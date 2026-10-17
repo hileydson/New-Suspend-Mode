@@ -1,5 +1,6 @@
-import React, { FC, useState, useEffect, useRef } from "react";
-import { definePlugin, routerHook, call, addEventListener, removeEventListener } from "@decky/api";
+import React, { FC, useState, useEffect } from "react";
+import { definePlugin, routerHook, call, addEventListener, removeEventListener, toaster } from "@decky/api";
+import { Navigation } from "@decky/ui";
 import { FaDownload } from "react-icons/fa";
 import { Overlay } from "./components/Overlay";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -10,6 +11,9 @@ import { PLUGIN_STYLES } from "./styles";
 declare global {
   interface Window {
     SteamClient?: {
+      URL?: {
+        ExecuteSteamURL?: (url: string) => void;
+      };
       Downloads?: {
         GetDownloadOverview?: () => any;
         GetQueue?: () => any;
@@ -17,6 +21,7 @@ declare global {
       };
       System?: {
         RegisterForOnSuspendRequest?: (callback: () => Promise<boolean> | boolean) => { unregister: () => void };
+        NavigateToLibraryHome?: () => void;
       };
     };
   }
@@ -26,7 +31,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
   enabled: true,
   min_battery_threshold: 15,
   hud_timeout_seconds: 5,
-  auto_suspend_delay_seconds: 15,
+  auto_suspend_delay_seconds: 120,
   throttle_cpu: true,
   throttle_gpu: true,
   mute_audio: true,
@@ -51,11 +56,160 @@ let sharedBatteryCapacity: number = 100;
 let sharedIsCharging: boolean = false;
 let sharedPowerPlugged: boolean = false;
 let sharedIsBackgroundMode: boolean = false;
+let sharedShowHud: boolean = false;
+let sharedCountdown: number = 5;
+let sharedWakeCooldownUntil: number = 0;
+let sharedHudTimer: NodeJS.Timeout | null = null;
 
 const stateListeners = new Set<() => void>();
 function notifyStateListeners() {
   stateListeners.forEach((cb) => cb());
 }
+
+/**
+ * Forcibly navigates SteamOS Gaming Mode directly to the HOME screen,
+ * closing any side menus and executing official route methods.
+ */
+const navigateToSteamHome = () => {
+  console.log("[DownloadInBackground] Forcing navigation to Steam Home screen...");
+  try {
+    Navigation.CloseSideMenus?.();
+  } catch (e) {}
+
+  try {
+    Navigation.Navigate?.("/library/home");
+  } catch (e) {}
+
+  try {
+    Navigation.NavigateToLibraryTab?.();
+  } catch (e) {}
+
+  try {
+    window.SteamClient?.URL?.ExecuteSteamURL?.("steam://open/library/home");
+  } catch (e) {}
+
+  try {
+    window.SteamClient?.URL?.ExecuteSteamURL?.("steam://open/main");
+  } catch (e) {}
+
+  try {
+    window.SteamClient?.System?.NavigateToLibraryHome?.();
+  } catch (e) {}
+
+  try {
+    if (window.location && window.location.hash !== "#/library/home") {
+      window.location.hash = "#/library/home";
+    }
+  } catch (e) {}
+};
+
+/**
+ * Triggers a complete system wake:
+ * 1. Synchronously drops any black screen or HUD from the DOM
+ * 2. Activates 12-second cooldown against re-sleep
+ * 3. Calls backend exit_background_mode to restore hardware/backlight
+ * 4. Navigates cleanly to the Steam Home screen
+ */
+const triggerFullWake = async (reason: string = "wake") => {
+  console.log("[DownloadInBackground] triggerFullWake called! Reason:", reason);
+  sharedIsBackgroundMode = false;
+  sharedShowHud = false;
+  sharedWakeCooldownUntil = Date.now() + 12000;
+
+  if (sharedHudTimer) {
+    clearInterval(sharedHudTimer);
+    sharedHudTimer = null;
+  }
+
+  // Instantly unmounts overlay from the DOM
+  notifyStateListeners();
+
+  try {
+    await call("exit_background_mode", reason);
+  } catch (e) {
+    console.error("[DownloadInBackground] Error calling exit_background_mode:", e);
+  }
+
+  // Force redirection to HOME multiple times to ensure transitions finish
+  navigateToSteamHome();
+  setTimeout(() => navigateToSteamHome(), 400);
+  setTimeout(() => navigateToSteamHome(), 1000);
+
+  toaster.toast({
+    title: "Download in Background",
+    body: "Console awakened! Returning to Home.",
+    duration: 2500,
+  });
+};
+
+/**
+ * Enters Pitch Black mode (download continuing in background)
+ */
+const triggerEnterBlackout = async (reason: string = "countdown_completed") => {
+  if (Date.now() < sharedWakeCooldownUntil) {
+    console.log("[DownloadInBackground] Wake cooldown active, blocking enter blackout.");
+    return;
+  }
+
+  if (sharedHudTimer) {
+    clearInterval(sharedHudTimer);
+    sharedHudTimer = null;
+  }
+
+  sharedShowHud = false;
+  sharedIsBackgroundMode = true;
+  notifyStateListeners();
+
+  try {
+    const success: any = await call("enter_background_mode", reason);
+    if (success === false) {
+      // Backend rejected entry -> restore to normal
+      sharedIsBackgroundMode = false;
+      notifyStateListeners();
+    }
+  } catch (e) {
+    console.error("[DownloadInBackground] Error entering background mode:", e);
+  }
+};
+
+/**
+ * Starts initial HUD Countdown before turning screen black
+ */
+const startHudCountdown = (customTimeout?: number) => {
+  if (sharedIsBackgroundMode || Date.now() < sharedWakeCooldownUntil) {
+    return;
+  }
+
+  const timeoutSec = customTimeout ?? sharedSettings.hud_timeout_seconds ?? 5;
+  if (timeoutSec <= 0) {
+    triggerEnterBlackout("immediate");
+    return;
+  }
+
+  if (sharedHudTimer) {
+    clearInterval(sharedHudTimer);
+  }
+
+  sharedCountdown = timeoutSec;
+  sharedShowHud = true;
+  sharedIsBackgroundMode = false;
+  notifyStateListeners();
+
+  let remaining = timeoutSec;
+  sharedHudTimer = setInterval(() => {
+    remaining -= 1;
+    sharedCountdown = remaining;
+    notifyStateListeners();
+
+    if (remaining <= 0) {
+      if (sharedHudTimer) {
+        clearInterval(sharedHudTimer);
+        sharedHudTimer = null;
+      }
+      triggerEnterBlackout("countdown_completed");
+    }
+  }, 1000);
+};
 
 // Global Overlay Container Component registered in routerHook
 const GlobalOverlayContainer: FC = () => {
@@ -69,14 +223,25 @@ const GlobalOverlayContainer: FC = () => {
     };
   }, []);
 
+  // CRITICAL: If NOT in background mode and NOT showing HUD: DO NOT RENDER ANYTHING!
+  // This guarantees that once awakened, the black div is 100% UNMOUNTED from the DOM.
+  if (!sharedIsBackgroundMode && !sharedShowHud) {
+    return null;
+  }
+
   return (
     <>
       <style>{PLUGIN_STYLES}</style>
       <Overlay
+        isBackgroundMode={sharedIsBackgroundMode}
+        showHud={sharedShowHud}
+        countdown={sharedCountdown}
         downloadInfo={sharedDownloadInfo}
         settings={sharedSettings}
         batteryCapacity={sharedBatteryCapacity}
         isCharging={sharedIsCharging}
+        onWake={() => triggerFullWake("overlay_wake")}
+        onEnterBlackout={() => triggerEnterBlackout("manual_screen_off")}
       />
     </>
   );
@@ -133,13 +298,104 @@ export default definePlugin(() => {
   let pollInterval: NodeJS.Timeout | null = null;
   let dlUnregister: (() => void) | null = null;
   let suspendUnregister: (() => void) | null = null;
+  let modeUnregister: any = null;
+  let suspendEventUnregister: any = null;
+  let batteryCriticalUnregister: any = null;
+  let downloadsCompletedUnregister: any = null;
+
+  // Listen directly for background mode changes from Python backend
+  try {
+    modeUnregister = addEventListener("background_mode_changed", (data: any) => {
+      console.log("[DownloadInBackground] background_mode_changed event received:", data);
+      const isBg = typeof data === "boolean" ? data : Boolean(data?.is_background_mode);
+      if (!isBg) {
+        // System awakened from backend!
+        sharedIsBackgroundMode = false;
+        sharedShowHud = false;
+        sharedWakeCooldownUntil = Date.now() + 12000;
+        if (sharedHudTimer) {
+          clearInterval(sharedHudTimer);
+          sharedHudTimer = null;
+        }
+        notifyStateListeners();
+        navigateToSteamHome();
+        setTimeout(() => navigateToSteamHome(), 400);
+      } else {
+        sharedIsBackgroundMode = true;
+        sharedShowHud = false;
+        notifyStateListeners();
+      }
+    });
+  } catch (e) {
+    console.warn("[DownloadInBackground] Could not register background_mode_changed listener:", e);
+  }
+
+  // Listen for suspend intercepted events from backend
+  try {
+    suspendEventUnregister = addEventListener("on_suspend_intercepted", (data: any) => {
+      console.log("[DownloadInBackground] on_suspend_intercepted event received:", data);
+      const now = Date.now();
+      if (sharedIsBackgroundMode) {
+        // If already in background mode, this is a wake action!
+        triggerFullWake("suspend_event_during_bg");
+        return;
+      }
+      if (now < sharedWakeCooldownUntil) {
+        console.log("[DownloadInBackground] Ignoring on_suspend_intercepted during wake cooldown.");
+        return;
+      }
+      const timeoutSec = data?.hud_timeout ?? sharedSettings.hud_timeout_seconds ?? 5;
+      startHudCountdown(timeoutSec);
+    });
+  } catch (e) {
+    console.warn("[DownloadInBackground] Could not register on_suspend_intercepted listener:", e);
+  }
+
+  // Critical battery auto-suspend notification
+  try {
+    batteryCriticalUnregister = addEventListener("battery_critical_suspend", (data: any) => {
+      toaster.toast({
+        title: "Download in Background",
+        body: `Battery reached ${data?.capacity ?? 15}%. Entering sleep now.`,
+        duration: 4000,
+        critical: true,
+      });
+    });
+  } catch (e) {}
+
+  // Downloads completed notification
+  try {
+    downloadsCompletedUnregister = addEventListener("downloads_completed_suspend", () => {
+      toaster.toast({
+        title: "Download in Background",
+        body: "All downloads completed! Suspending console.",
+        duration: 3500,
+      });
+    });
+  } catch (e) {}
 
   // Sync state with Python backend
   const syncBackendStatus = async () => {
     try {
       const status: SystemStatus = await call("get_status");
       if (status) {
-        sharedIsBackgroundMode = Boolean(status.is_background_mode);
+        const backendIsBg = Boolean(status.is_background_mode);
+        if (sharedIsBackgroundMode && !backendIsBg) {
+          console.log("[DownloadInBackground] Backend woke up -> Synchronizing frontend!");
+          sharedIsBackgroundMode = false;
+          sharedShowHud = false;
+          sharedWakeCooldownUntil = Date.now() + 12000;
+          if (sharedHudTimer) {
+            clearInterval(sharedHudTimer);
+            sharedHudTimer = null;
+          }
+          notifyStateListeners();
+          navigateToSteamHome();
+          setTimeout(() => navigateToSteamHome(), 400);
+        } else {
+          sharedIsBackgroundMode = backendIsBg;
+        }
+
         sharedBatteryCapacity = Number(status.battery_capacity ?? 100);
         sharedIsCharging = Boolean(status.is_charging);
         sharedPowerPlugged = Boolean(status.power_plugged);
@@ -268,21 +524,41 @@ export default definePlugin(() => {
     if (window.SteamClient?.System?.RegisterForOnSuspendRequest) {
       const reg = window.SteamClient.System.RegisterForOnSuspendRequest(async () => {
         console.log("[DownloadInBackground] SteamClient Suspend Request event received!");
-        // Always refresh download status immediately before making suspend decision
+        const now = Date.now();
+
+        // 1. If currently in background mode, this suspend request is actually a WAKE request from the Power Button!
+        if (sharedIsBackgroundMode) {
+          console.log("[DownloadInBackground] Power button pressed while in background mode -> WAKING UP!");
+          await triggerFullWake("power_button_wake");
+          return false; // Prevent Steam from suspending
+        }
+
+        // 2. Cooldown check: ignore suspend request if system just woke up within 12 seconds
+        if (now < sharedWakeCooldownUntil) {
+          console.log("[DownloadInBackground] Ignoring suspend request: within wake cooldown period.");
+          return false;
+        }
+
+        // 3. Normal suspend check: refresh download metrics first
         await querySteamDownloads();
 
-        if (sharedSettings.enabled && sharedDownloadInfo.is_downloading) {
+        const isDownloading = Boolean(
+          sharedSettings.enabled &&
+          sharedDownloadInfo.is_downloading &&
+          !sharedDownloadInfo.is_paused
+        );
+
+        if (isDownloading) {
           console.log("[DownloadInBackground] Active download running -> Intercepting suspend and showing HUD");
-          // Intercept SteamClient suspend!
-          // Trigger overlay HUD countdown
-          window.dispatchEvent(new CustomEvent("decky_event_on_suspend_intercepted", {
-            detail: {
-              download_info: sharedDownloadInfo,
-              hud_timeout: sharedSettings.hud_timeout_seconds,
-            }
-          }));
+          try {
+            await call("trigger_suspend_intercept");
+          } catch (e) {
+            console.error("[DownloadInBackground] Error calling trigger_suspend_intercept:", e);
+          }
+          startHudCountdown(sharedSettings.hud_timeout_seconds ?? 5);
           return false; // Prevent suspend in SteamClient
         }
+
         console.log("[DownloadInBackground] Download is paused or idle -> Allowing normal Steam suspend without intercepting.");
         return true; // Allow suspend immediately
       });
@@ -300,7 +576,31 @@ export default definePlugin(() => {
   pollInterval = setInterval(() => {
     syncBackendStatus();
     querySteamDownloads();
-  }, 2000);
+  }, 1500);
+
+  // Kernel sleep resume detection via clock-jump heartbeat
+  let lastHeartbeat = Date.now();
+  const heartbeatInterval = setInterval(() => {
+    const now = Date.now();
+    const delta = now - lastHeartbeat;
+    lastHeartbeat = now;
+
+    if (delta > 3500) {
+      console.log(`[DownloadInBackground] Kernel resume detected (delta=${delta}ms)! Enforcing wake state.`);
+      sharedWakeCooldownUntil = Date.now() + 12000;
+      if (sharedHudTimer) {
+        clearInterval(sharedHudTimer);
+        sharedHudTimer = null;
+      }
+      sharedShowHud = false;
+      sharedIsBackgroundMode = false;
+      notifyStateListeners();
+      call("exit_background_mode", "kernel_resume_clock_jump").catch(() => {});
+      navigateToSteamHome();
+      setTimeout(() => navigateToSteamHome(), 400);
+      setTimeout(() => navigateToSteamHome(), 1000);
+    }
+  }, 1000);
 
   return {
     name: "Download in Background",
@@ -311,6 +611,13 @@ export default definePlugin(() => {
       if (pollInterval) {
         clearInterval(pollInterval);
       }
+      if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+      }
+      if (sharedHudTimer) {
+        clearInterval(sharedHudTimer);
+        sharedHudTimer = null;
+      }
       if (dlUnregister) {
         try {
           dlUnregister();
@@ -319,6 +626,26 @@ export default definePlugin(() => {
       if (suspendUnregister) {
         try {
           suspendUnregister();
+        } catch (e) {}
+      }
+      if (modeUnregister) {
+        try {
+          removeEventListener("background_mode_changed", modeUnregister);
+        } catch (e) {}
+      }
+      if (suspendEventUnregister) {
+        try {
+          removeEventListener("on_suspend_intercepted", suspendEventUnregister);
+        } catch (e) {}
+      }
+      if (batteryCriticalUnregister) {
+        try {
+          removeEventListener("battery_critical_suspend", batteryCriticalUnregister);
+        } catch (e) {}
+      }
+      if (downloadsCompletedUnregister) {
+        try {
+          removeEventListener("downloads_completed_suspend", downloadsCompletedUnregister);
         } catch (e) {}
       }
     },

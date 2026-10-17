@@ -36,7 +36,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "enabled": True,
     "min_battery_threshold": 15,
     "hud_timeout_seconds": 5,
-    "auto_suspend_delay_seconds": 15,
+    "auto_suspend_delay_seconds": 120,
     "throttle_cpu": True,
     "throttle_gpu": True,
     "mute_audio": True,
@@ -289,8 +289,10 @@ class Plugin:
             "estimated_seconds_remaining": 0,
         }
         self.last_download_active_time: float = time.time()
+        self.last_frontend_dl_time: float = 0.0
         self.last_suspend_intercept_time: float = 0
         self.wake_cooldown_until: float = 0.0
+        self.last_loop_timestamp: float = time.time()
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.monitor_task: Optional[asyncio.Task] = None
 
@@ -461,8 +463,10 @@ class Plugin:
         self.download_info["is_downloading"] = is_dl and not is_paused
         self.download_info["is_paused"] = is_paused
 
+        now = time.time()
         if self.download_info["is_downloading"]:
-            self.last_download_active_time = time.time()
+            self.last_download_active_time = now
+            self.last_frontend_dl_time = now
 
         self._update_inhibitor_state()
         return True
@@ -528,7 +532,18 @@ class Plugin:
     def _trigger_suspend_intercepted(self):
         """Called whenever a suspend attempt is detected while downloads are active."""
         now = time.time()
-        # Cooldown: Ignore any suspend request if system just woke up within 5 seconds
+        # If currently in background mode, any suspend attempt is a WAKE action!
+        if self.is_background_mode:
+            logger.info("Suspend attempt detected while in background mode -> Waking system!")
+            self.wake_cooldown_until = now + 12.0
+            if self.loop and self.loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self.exit_background_mode("suspend_attempt_wake"),
+                    self.loop
+                )
+            return
+
+        # Cooldown: Ignore any suspend request if system just woke up within 12 seconds
         if now < self.wake_cooldown_until:
             logger.info("Ignoring suspend attempt because system just woke up from background mode.")
             return
@@ -560,6 +575,11 @@ class Plugin:
                 self.loop
             )
 
+    async def trigger_suspend_intercept(self) -> bool:
+        """API called by frontend when SteamClient intercepts suspend."""
+        self._trigger_suspend_intercepted()
+        return True
+
     def _logind_watcher_worker(self):
         """Watches systemd-logind journal logs to intercept UI suspend clicks."""
         logger.info("Starting logind journal watcher worker...")
@@ -580,11 +600,24 @@ class Plugin:
                     if not line:
                         break
 
-                    # Ignore logind events during wake cooldown
-                    if time.time() < self.wake_cooldown_until:
+                    lower = line.lower()
+                    now = time.time()
+
+                    # System resume from sleep detected via logind
+                    if (
+                        "operation 'sleep' finished" in lower
+                        or "system is resuming" in lower
+                    ):
+                        logger.info("Logind reported system resume from sleep -> Enforcing wake cooldown.")
+                        self.wake_cooldown_until = now + 12.0
+                        if self.is_background_mode:
+                            if self.loop and self.loop.is_running():
+                                asyncio.run_coroutine_threadsafe(
+                                    self.exit_background_mode("logind_resume"),
+                                    self.loop
+                                )
                         continue
 
-                    lower = line.lower()
                     if (
                         "inhibited by downloadinbackground" in lower
                         or "refusing operation" in lower
@@ -593,6 +626,21 @@ class Plugin:
                         or "suspend entry requested" in lower
                     ):
                         logger.info(f"Logind journal suspend event: {line.strip()}")
+                        # If in background mode, wake up!
+                        if self.is_background_mode:
+                            logger.info("Logind suspend event received while in background mode -> Waking system!")
+                            self.wake_cooldown_until = now + 12.0
+                            if self.loop and self.loop.is_running():
+                                asyncio.run_coroutine_threadsafe(
+                                    self.exit_background_mode("logind_wake"),
+                                    self.loop
+                                )
+                            continue
+
+                        # Ignore logind events during wake cooldown
+                        if now < self.wake_cooldown_until:
+                            continue
+
                         is_active_dl = (
                             self.download_info.get("is_downloading", False)
                             and not self.download_info.get("is_paused", False)
@@ -684,14 +732,15 @@ class Plugin:
         if not self.settings.get("enabled", True):
             return
 
-        # Cooldown check: ignore power button press if system just woke up within 5 seconds
-        if time.time() < self.wake_cooldown_until:
+        now = time.time()
+        # Cooldown check: ignore power button press if system just woke up within 12 seconds
+        if now < self.wake_cooldown_until:
             logger.info("Ignoring power key because system just woke up.")
             return
 
         if self.is_background_mode:
-            logger.info("Power button pressed during background mode -> Full system wake to SteamOS Home!")
-            self.wake_cooldown_until = time.time() + 5.0
+            logger.info("Power button pressed during background mode -> Full system wake!")
+            self.wake_cooldown_until = now + 12.0
             if self.loop and self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(
                     self.exit_background_mode("power_button_wake"),
@@ -724,6 +773,8 @@ class Plugin:
             for bdir in backlight_dirs:
                 brightness_path = os.path.join(bdir, "brightness")
                 max_b_path = os.path.join(bdir, "max_brightness")
+                bl_power_path = os.path.join(bdir, "bl_power")
+
                 if os.path.exists(brightness_path):
                     try:
                         with open(brightness_path, "r") as f:
@@ -741,6 +792,13 @@ class Plugin:
                         logger.info(f"Set backlight {brightness_path} from {curr_b} to 0 (saved {self.saved_brightness[brightness_path]}).")
                     except Exception as e:
                         logger.error(f"Failed to turn off backlight on {brightness_path}: {e}")
+
+                if os.path.exists(bl_power_path):
+                    try:
+                        with open(bl_power_path, "w") as f:
+                            f.write("1")
+                    except Exception:
+                        pass
 
             # Also try brightnessctl if installed
             try:
@@ -797,7 +855,16 @@ class Plugin:
         for brightness_path, val in list(self.saved_brightness.items()):
             try:
                 if os.path.exists(brightness_path):
-                    max_b_path = os.path.join(os.path.dirname(brightness_path), "max_brightness")
+                    bdir = os.path.dirname(brightness_path)
+                    bl_power_path = os.path.join(bdir, "bl_power")
+                    if os.path.exists(bl_power_path):
+                        try:
+                            with open(bl_power_path, "w") as pf:
+                                pf.write("0")
+                        except Exception:
+                            pass
+
+                    max_b_path = os.path.join(bdir, "max_brightness")
                     max_b = 255
                     if os.path.exists(max_b_path):
                         with open(max_b_path, "r") as mf:
@@ -809,6 +876,31 @@ class Plugin:
             except Exception as e:
                 logger.error(f"Failed to restore backlight on {brightness_path}: {e}")
         self.saved_brightness.clear()
+
+        # Guarantee all backlight devices are unblanked and brightened
+        backlight_dirs = glob.glob("/sys/class/backlight/*")
+        for bdir in backlight_dirs:
+            try:
+                bl_power_path = os.path.join(bdir, "bl_power")
+                if os.path.exists(bl_power_path):
+                    try:
+                        with open(bl_power_path, "w") as pf:
+                            pf.write("0")
+                    except Exception:
+                        pass
+
+                brightness_path = os.path.join(bdir, "brightness")
+                max_b_path = os.path.join(bdir, "max_brightness")
+                if os.path.exists(brightness_path) and os.path.exists(max_b_path):
+                    with open(brightness_path, "r") as f:
+                        curr_b = int(f.read().strip())
+                    if curr_b <= 0:
+                        with open(max_b_path, "r") as mf:
+                            max_b = int(mf.read().strip())
+                        with open(brightness_path, "w") as f:
+                            f.write(str(int(max_b * 0.6)))
+            except Exception:
+                pass
 
         # Fallback restore via brightnessctl
         try:
@@ -861,6 +953,11 @@ class Plugin:
         if self.is_background_mode:
             return True
 
+        # Do not enter background mode if wake cooldown is active!
+        if time.time() < self.wake_cooldown_until:
+            logger.info(f"Blocked enter_background_mode (reason: {reason}) because system just woke up.")
+            return False
+
         logger.info(f"Entering Background Download Mode (reason: {reason}).")
         self.is_background_mode = True
         self._acquire_sleep_inhibitor()
@@ -874,7 +971,7 @@ class Plugin:
             return False
 
         logger.info(f"Exiting Background Download Mode (reason: {reason}).")
-        self.wake_cooldown_until = time.time() + 5.0
+        self.wake_cooldown_until = time.time() + 12.0
         self.is_background_mode = False
         self._restore_system_power_and_display()
         self._update_inhibitor_state()
@@ -901,24 +998,70 @@ class Plugin:
     # ==========================================
     async def _background_monitor_loop(self):
         logger.info("Starting background monitor loop...")
+        self.last_loop_timestamp = time.time()
         while not self.stop_threads:
             try:
                 await asyncio.sleep(1.5)
 
+                now = time.time()
+                dt = now - self.last_loop_timestamp
+                self.last_loop_timestamp = now
+
+                # 0. Kernel Sleep Resume Detection
+                # Loop sleeps 1.5s. If dt > 3.5s, the system slept in kernel suspend and just woke up!
+                if dt > 3.5:
+                    logger.info(
+                        f"System wake from kernel suspend detected (dt={dt:.1f}s)! "
+                        "Enforcing wake cooldown and exiting background mode."
+                    )
+                    self.wake_cooldown_until = now + 12.0
+                    if self.is_background_mode:
+                        self.is_background_mode = False
+                        self._restore_system_power_and_display()
+                        self._update_inhibitor_state()
+                        await decky.emit("background_mode_changed", {
+                            "is_background_mode": False,
+                            "reason": "system_resume_clock_jump",
+                        })
+
                 if not self.settings.get("enabled", True):
                     continue
 
-                # 1. Native Download Detection
+                # 1. Native Download & Network Detection
                 info = self.detector.detect()
-                self.download_info.update(info)
-                is_dl = (
-                    self.download_info.get("is_downloading", False)
-                    and not self.download_info.get("is_paused", False)
+                detector_is_dl = bool(info.get("is_downloading", False))
+                detector_paused = bool(info.get("is_paused", False))
+                net_rx = self.detector.get_network_rx_rate()
+
+                # Check if frontend reported download recently (within 30 seconds)
+                frontend_active = (
+                    (now - self.last_frontend_dl_time < 30.0)
+                    and bool(self.download_info.get("is_downloading", False))
+                    and not bool(self.download_info.get("is_paused", False))
                 )
+
+                # Has active network traffic (> 30 KB/s)
+                has_net_traffic = (net_rx > 30000)
+
+                # Active download if detector says so, or frontend reported so recently, or network traffic exists
+                is_dl = (
+                    (detector_is_dl and not detector_paused)
+                    or frontend_active
+                    or (has_net_traffic and not detector_paused)
+                )
+
+                # If frontend provided richer info (game title, eta), keep it
+                if not frontend_active and info:
+                    self.download_info.update(info)
+
                 self.download_info["is_downloading"] = is_dl
+                if detector_paused and not is_dl:
+                    self.download_info["is_paused"] = True
 
                 if is_dl:
-                    self.last_download_active_time = time.time()
+                    self.last_download_active_time = now
+                    if net_rx > 0:
+                        self.download_info["bytes_per_second"] = max(net_rx, self.download_info.get("bytes_per_second", 0))
 
                 # Sync inhibitor state
                 self._update_inhibitor_state()
@@ -944,8 +1087,8 @@ class Plugin:
 
                     # Condition B: Downloads finished or paused auto-suspend
                     if not is_dl:
-                        elapsed_since_dl = time.time() - self.last_download_active_time
-                        auto_sleep_delay = float(self.settings.get("auto_suspend_delay_seconds", 15))
+                        elapsed_since_dl = now - self.last_download_active_time
+                        auto_sleep_delay = max(60.0, float(self.settings.get("auto_suspend_delay_seconds", 120)))
 
                         if elapsed_since_dl >= auto_sleep_delay:
                             logger.info(
