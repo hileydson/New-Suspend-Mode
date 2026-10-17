@@ -253,6 +253,7 @@ class Plugin:
         }
         self.last_download_active_time: float = time.time()
         self.last_suspend_intercept_time: float = 0
+        self.wake_cooldown_until: float = 0.0
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.monitor_task: Optional[asyncio.Task] = None
 
@@ -468,6 +469,11 @@ class Plugin:
     def _trigger_suspend_intercepted(self):
         """Called whenever a suspend attempt is detected while downloads are active."""
         now = time.time()
+        # Cooldown: Ignore any suspend request if system just woke up within 5 seconds
+        if now < self.wake_cooldown_until:
+            logger.info("Ignoring suspend attempt because system just woke up from background mode.")
+            return
+
         # Debounce to prevent double trigger within 3 seconds
         if now - self.last_suspend_intercept_time < 3.0:
             return
@@ -504,6 +510,11 @@ class Plugin:
                     line = proc.stdout.readline()
                     if not line:
                         break
+
+                    # Ignore logind events during wake cooldown
+                    if time.time() < self.wake_cooldown_until:
+                        continue
+
                     lower = line.lower()
                     if (
                         "inhibited by downloadinbackground" in lower
@@ -598,8 +609,14 @@ class Plugin:
         if not self.settings.get("enabled", True):
             return
 
+        # Cooldown check: ignore power button press if system just woke up within 5 seconds
+        if time.time() < self.wake_cooldown_until:
+            logger.info("Ignoring power key because system just woke up.")
+            return
+
         if self.is_background_mode:
-            logger.info("Power button pressed during background mode -> Waking up!")
+            logger.info("Power button pressed during background mode -> Full system wake to SteamOS Home!")
+            self.wake_cooldown_until = time.time() + 5.0
             if self.loop and self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(
                     self.exit_background_mode("power_button_wake"),
@@ -741,8 +758,59 @@ class Plugin:
             pass
 
     # ==========================================
-    # Background Mode Transitions
+    # Background Mode Transitions & Peek Feature
     # ==========================================
+    async def peek_display_on(self) -> bool:
+        """Temporarily turns backlight on so user can peek at download HUD without restoring full power."""
+        logger.info("Peeking display on...")
+        for brightness_path, val in self.saved_brightness.items():
+            try:
+                if os.path.exists(brightness_path):
+                    with open(brightness_path, "w") as f:
+                        f.write(str(max(val, 25)))
+            except Exception:
+                pass
+        try:
+            subprocess.run(["brightnessctl", "set", "50%"], capture_output=True, check=False)
+        except Exception:
+            pass
+        return True
+
+    async def peek_display_off(self) -> bool:
+        """Turns backlight back off to 0 after peeking."""
+        logger.info("Peeking display off...")
+        if self.is_background_mode and self.settings.get("turn_off_backlight", True):
+            for brightness_path in self.saved_brightness.keys():
+                if os.path.exists(brightness_path):
+                    try:
+                        with open(brightness_path, "w") as f:
+                            f.write("0")
+                    except Exception:
+                        pass
+            try:
+                subprocess.run(["brightnessctl", "set", "0%"], capture_output=True, check=False)
+            except Exception:
+                pass
+        return True
+
+    def _navigate_steam_home(self):
+        """Forces SteamOS to show the Home Screen."""
+        try:
+            user = "deck"
+            if hasattr(decky, "DECKY_USER_HOME") and decky.DECKY_USER_HOME:
+                parts = decky.DECKY_USER_HOME.strip("/").split("/")
+                if len(parts) >= 2 and parts[0] == "home":
+                    user = parts[1]
+
+            logger.info(f"Navigating Steam to Home screen for user {user}...")
+            subprocess.Popen(
+                ["su", "-", user, "-c", "steam steam://open/main"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+        except Exception as e:
+            logger.error(f"Error navigating to Steam home: {e}")
+
     async def enter_background_mode(self, reason: str = "manual") -> bool:
         if self.is_background_mode:
             return True
@@ -760,9 +828,13 @@ class Plugin:
             return False
 
         logger.info(f"Exiting Background Download Mode (reason: {reason}).")
+        self.wake_cooldown_until = time.time() + 5.0
         self.is_background_mode = False
         self._restore_system_power_and_display()
         self._update_inhibitor_state()
+
+        if reason == "power_button_wake":
+            self._navigate_steam_home()
 
         await decky.emit("background_mode_changed", {"is_background_mode": False, "reason": reason})
         return True

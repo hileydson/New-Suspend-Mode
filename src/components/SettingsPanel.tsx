@@ -2,7 +2,6 @@ import React, { FC } from "react";
 import {
   PanelSection,
   PanelSectionRow,
-  ButtonItem,
   ToggleField,
   SliderField,
   Field,
@@ -40,47 +39,6 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
       await call("save_settings", updated);
     } catch (e) {
       console.error("[DownloadInBackground] Error saving settings:", e);
-    }
-  };
-
-  const handleStartBackgroundNow = () => {
-    toaster.toast({
-      title: "Download in Background",
-      body: "Starting background mode... Screen turning off in 1s.",
-      duration: 3000,
-    });
-    setTimeout(async () => {
-      try {
-        await call("enter_background_mode", "user_manual_qam");
-      } catch (e) {
-        console.error("[DownloadInBackground] Error entering background mode:", e);
-      }
-    }, 600);
-  };
-
-  const handleWakeScreen = async () => {
-    try {
-      await call("exit_background_mode", "user_manual_qam");
-      toaster.toast({
-        title: "Download in Background",
-        body: "Screen awakened. Normal power restored.",
-        duration: 2500,
-      });
-    } catch (e) {
-      console.error("[DownloadInBackground] Error waking screen:", e);
-    }
-  };
-
-  const handleSuspendNow = async () => {
-    try {
-      toaster.toast({
-        title: "Download in Background",
-        body: "Suspending console now...",
-        duration: 2000,
-      });
-      await call("trigger_suspend");
-    } catch (e) {
-      console.error("[DownloadInBackground] Error triggering suspend:", e);
     }
   };
 
@@ -169,36 +127,6 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
               {isBackgroundMode ? "ACTIVE" : "STANDBY"}
             </span>
           </Field>
-        </PanelSectionRow>
-      </PanelSection>
-
-      {/* Quick Actions */}
-      <PanelSection title="Quick Actions">
-        <PanelSectionRow>
-          {!isBackgroundMode ? (
-            <ButtonItem
-              layout="below"
-              onClick={handleStartBackgroundNow}
-            >
-              Start Background Download Now
-            </ButtonItem>
-          ) : (
-            <ButtonItem
-              layout="below"
-              onClick={handleWakeScreen}
-            >
-              Wake Screen & Restore Normal Power
-            </ButtonItem>
-          )}
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={handleSuspendNow}
-          >
-            Suspend Console Immediately
-          </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
 
