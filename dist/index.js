@@ -211,15 +211,24 @@ const Overlay = ({ downloadInfo, settings, batteryCapacity, isCharging, }) => {
             }
         };
     }, [settings.hud_timeout_seconds, startHudSequence]);
+    const enteredTimestampRef = SP_REACT.useRef(0);
+    const buttonsReleasedRef = SP_REACT.useRef(false);
+    // Update activation timestamp when entering HUD or blackout
+    SP_REACT.useEffect(() => {
+        if (isBlackout || showHud) {
+            enteredTimestampRef.current = Date.now();
+            buttonsReleasedRef.current = false;
+        }
+    }, [isBlackout, showHud]);
     // Global Input Listener for Waking up
     SP_REACT.useEffect(() => {
         const handleGlobalKeyDown = (e) => {
-            if (blackoutRef.current || showHudRef.current) {
+            if ((blackoutRef.current || showHudRef.current) && Date.now() - enteredTimestampRef.current > 1500) {
                 wakeUp("key_press");
             }
         };
         const handlePointerDown = () => {
-            if (blackoutRef.current || showHudRef.current) {
+            if ((blackoutRef.current || showHudRef.current) && Date.now() - enteredTimestampRef.current > 1500) {
                 wakeUp("pointer_touch");
             }
         };
@@ -227,15 +236,28 @@ const Overlay = ({ downloadInfo, settings, batteryCapacity, isCharging, }) => {
         let gamepadPollId;
         const pollGamepads = () => {
             if (blackoutRef.current || showHudRef.current) {
-                const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-                for (const gp of gamepads) {
-                    if (!gp)
-                        continue;
-                    for (const btn of gp.buttons) {
-                        if (btn.pressed) {
-                            wakeUp("gamepad_button");
-                            return;
+                const timeSinceEntered = Date.now() - enteredTimestampRef.current;
+                if (timeSinceEntered > 1500) {
+                    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+                    let anyPressed = false;
+                    for (const gp of gamepads) {
+                        if (!gp)
+                            continue;
+                        for (const btn of gp.buttons) {
+                            if (btn.pressed) {
+                                anyPressed = true;
+                                break;
+                            }
                         }
+                        if (anyPressed)
+                            break;
+                    }
+                    if (!anyPressed) {
+                        buttonsReleasedRef.current = true;
+                    }
+                    else if (buttonsReleasedRef.current) {
+                        wakeUp("gamepad_button");
+                        return;
                     }
                 }
             }
@@ -302,18 +324,20 @@ const SettingsPanel = ({ settings, setSettings, downloadInfo, isBackgroundMode, 
             console.error("[DownloadInBackground] Error saving settings:", e);
         }
     };
-    const handleStartBackgroundNow = async () => {
-        try {
-            await call("enter_background_mode", "user_manual_qam");
-            toaster.toast({
-                title: "Download in Background",
-                body: "Background mode started. Screen turning off.",
-                duration: 2500,
-            });
-        }
-        catch (e) {
-            console.error("[DownloadInBackground] Error entering background mode:", e);
-        }
+    const handleStartBackgroundNow = () => {
+        toaster.toast({
+            title: "Download in Background",
+            body: "Starting background mode... Screen turning off in 1s.",
+            duration: 3000,
+        });
+        setTimeout(async () => {
+            try {
+                await call("enter_background_mode", "user_manual_qam");
+            }
+            catch (e) {
+                console.error("[DownloadInBackground] Error entering background mode:", e);
+            }
+        }, 600);
     };
     const handleWakeScreen = async () => {
         try {
@@ -732,6 +756,9 @@ var index = definePlugin(() => {
                 sharedPowerPlugged = Boolean(status.power_plugged);
                 if (status.settings) {
                     sharedSettings = { ...sharedSettings, ...status.settings };
+                }
+                if (status.download_info) {
+                    sharedDownloadInfo = { ...sharedDownloadInfo, ...status.download_info };
                 }
                 notifyStateListeners();
             }

@@ -43,17 +43,19 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
     }
   };
 
-  const handleStartBackgroundNow = async () => {
-    try {
-      await call("enter_background_mode", "user_manual_qam");
-      toaster.toast({
-        title: "Download in Background",
-        body: "Background mode started. Screen turning off.",
-        duration: 2500,
-      });
-    } catch (e) {
-      console.error("[DownloadInBackground] Error entering background mode:", e);
-    }
+  const handleStartBackgroundNow = () => {
+    toaster.toast({
+      title: "Download in Background",
+      body: "Starting background mode... Screen turning off in 1s.",
+      duration: 3000,
+    });
+    setTimeout(async () => {
+      try {
+        await call("enter_background_mode", "user_manual_qam");
+      } catch (e) {
+        console.error("[DownloadInBackground] Error entering background mode:", e);
+      }
+    }, 600);
   };
 
   const handleWakeScreen = async () => {

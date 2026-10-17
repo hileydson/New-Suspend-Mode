@@ -146,6 +146,9 @@ export default definePlugin(() => {
         if (status.settings) {
           sharedSettings = { ...sharedSettings, ...status.settings };
         }
+        if (status.download_info) {
+          sharedDownloadInfo = { ...sharedDownloadInfo, ...status.download_info };
+        }
         notifyStateListeners();
       }
     } catch (e) {

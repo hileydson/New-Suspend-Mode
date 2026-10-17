@@ -5,11 +5,13 @@ import glob
 import time
 import struct
 import select
+import fcntl
+import re
 import asyncio
 import logging
 import threading
 import subprocess
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Set
 
 # Setup Decky compatibility
 try:
@@ -42,12 +44,186 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "oled_black_screen": True,
 }
 
-# Input event struct format for Linux 64-bit:
-# struct input_event { struct timeval time (8+8 bytes); __u16 type (2 bytes); __u16 code (2 bytes); __s32 value (4 bytes); }
 INPUT_EVENT_FORMAT = "qqHHi"
 INPUT_EVENT_SIZE = struct.calcsize(INPUT_EVENT_FORMAT)
 EV_KEY = 1
 KEY_POWER = 116
+KEY_SLEEP = 142
+
+
+class SteamDownloadDetector:
+    """
+    Natively inspects Steam library folders, appmanifest files, and network traffic
+    to detect downloads with 100% reliability without relying on CEF JavaScript.
+    """
+    def __init__(self):
+        self.cached_libraries: List[str] = []
+        self.last_lib_scan: float = 0
+        self.last_net_bytes: int = 0
+        self.last_net_time: float = time.time()
+        self.last_completed_bytes: int = 0
+        self.last_dl_calc_time: float = time.time()
+
+    def get_library_paths(self) -> List[str]:
+        now = time.time()
+        if self.cached_libraries and (now - self.last_lib_scan) < 20:
+            return self.cached_libraries
+
+        libs: Set[str] = set()
+
+        # Check decky.DECKY_USER_HOME, /home/* and ~
+        candidate_homes = glob.glob("/home/*") + [decky.DECKY_USER_HOME, os.path.expanduser("~")]
+        for ch in candidate_homes:
+            if not ch or not os.path.isdir(ch):
+                continue
+            for rel in [".local/share/Steam", ".steam/steam", ".steam/root"]:
+                steam_base = os.path.join(ch, rel)
+                sa = os.path.join(steam_base, "steamapps")
+                if os.path.isdir(sa):
+                    libs.add(sa)
+                    vdf_file = os.path.join(sa, "libraryfolders.vdf")
+                    if os.path.isfile(vdf_file):
+                        try:
+                            with open(vdf_file, "r", encoding="utf-8", errors="ignore") as f:
+                                content = f.read()
+                            matches = re.findall(r"\"path\"\s*\"([^\"]+)\"", content)
+                            for m in matches:
+                                extra_sa = os.path.join(m, "steamapps")
+                                if os.path.isdir(extra_sa):
+                                    libs.add(extra_sa)
+                        except Exception:
+                            pass
+
+        # Check removable media (SD Card, second NVMe partition, USB)
+        for rem in glob.glob("/run/media/*/*") + glob.glob("/media/*/*") + glob.glob("/mnt/*"):
+            sa = os.path.join(rem, "steamapps")
+            if os.path.isdir(sa):
+                libs.add(sa)
+
+        self.cached_libraries = list(libs)
+        self.last_lib_scan = now
+        return self.cached_libraries
+
+    def get_network_rx_rate(self) -> float:
+        """Reads real received bytes per second across all non-lo network interfaces."""
+        curr_bytes = 0
+        try:
+            with open("/proc/net/dev", "r") as f:
+                lines = f.readlines()[2:]
+            for line in lines:
+                parts = line.split(":")
+                if len(parts) == 2 and parts[0].strip() != "lo":
+                    vals = parts[1].split()
+                    if vals:
+                        curr_bytes += int(vals[0])
+        except Exception:
+            pass
+
+        now = time.time()
+        dt = max(0.1, now - self.last_net_time)
+        bps = 0.0
+        if self.last_net_bytes > 0 and curr_bytes >= self.last_net_bytes:
+            bps = (curr_bytes - self.last_net_bytes) / dt
+
+        self.last_net_bytes = curr_bytes
+        self.last_net_time = now
+        return bps
+
+    def detect(self) -> Dict[str, Any]:
+        libs = self.get_library_paths()
+        active_dl = None
+
+        # Check appmanifest files in all libraries
+        for sa in libs:
+            manifests = glob.glob(os.path.join(sa, "appmanifest_*.acf"))
+            for mf in manifests:
+                try:
+                    with open(mf, "r", encoding="utf-8", errors="ignore") as f:
+                        txt = f.read()
+
+                    state_m = re.search(r"\"StateFlags\"\s*\"(\d+)\"", txt)
+                    if not state_m:
+                        continue
+                    state = int(state_m.group(1))
+
+                    # 1024 = StateUpdateStarted, 256 = StateUpdateRunning, 512 = StateUpdatePaused
+                    is_updating = bool((state & 1024) or (state & 256)) and not bool(state & 512)
+                    if is_updating:
+                        name_m = re.search(r"\"name\"\s*\"([^\"]+)\"", txt)
+                        dl_m = re.search(r"\"BytesDownloaded\"\s*\"(\d+)\"", txt)
+                        tot_m = re.search(r"\"BytesToDownload\"\s*\"(\d+)\"", txt)
+
+                        name = name_m.group(1) if name_m else "Steam Download"
+                        b_dl = int(dl_m.group(1)) if dl_m else 0
+                        b_tot = int(tot_m.group(1)) if tot_m else 0
+                        pct = (b_dl / b_tot * 100) if b_tot > 0 else 0
+
+                        active_dl = {
+                            "is_downloading": True,
+                            "game_title": name,
+                            "completed_bytes": b_dl,
+                            "total_bytes": b_tot,
+                            "progress_percent": pct,
+                        }
+                        break
+                except Exception:
+                    pass
+            if active_dl:
+                break
+
+        # Check downloading directories for active downloads
+        has_downloading_files = False
+        for sa in libs:
+            dl_dir = os.path.join(sa, "downloading")
+            if os.path.isdir(dl_dir):
+                try:
+                    items = os.listdir(dl_dir)
+                    if items:
+                        has_downloading_files = True
+                        if not active_dl:
+                            active_dl = {
+                                "is_downloading": True,
+                                "game_title": "Steam Game Download",
+                                "completed_bytes": 0,
+                                "total_bytes": 0,
+                                "progress_percent": 0,
+                            }
+                        break
+                except Exception:
+                    pass
+
+        net_bps = self.get_network_rx_rate()
+
+        if active_dl:
+            active_dl["bytes_per_second"] = net_bps
+            if net_bps > 0 and active_dl["total_bytes"] > active_dl["completed_bytes"]:
+                rem_bytes = active_dl["total_bytes"] - active_dl["completed_bytes"]
+                active_dl["estimated_seconds_remaining"] = int(rem_bytes / net_bps)
+            else:
+                active_dl["estimated_seconds_remaining"] = 0
+            return active_dl
+
+        # High network traffic + downloading files
+        if net_bps > 150000 and has_downloading_files:
+            return {
+                "is_downloading": True,
+                "game_title": "Steam Game Download",
+                "bytes_per_second": net_bps,
+                "completed_bytes": 0,
+                "total_bytes": 0,
+                "progress_percent": 0,
+                "estimated_seconds_remaining": 0,
+            }
+
+        return {
+            "is_downloading": False,
+            "game_title": "",
+            "bytes_per_second": net_bps,
+            "completed_bytes": 0,
+            "total_bytes": 0,
+            "progress_percent": 0,
+            "estimated_seconds_remaining": 0,
+        }
 
 
 class Plugin:
@@ -59,12 +235,13 @@ class Plugin:
         self.saved_power_profile: Optional[str] = None
         self.saved_cpu_governors: Dict[str, str] = {}
         self.saved_gpu_dpm: Optional[str] = None
-        self.saved_audio_muted: Optional[bool] = None
 
         self.inhibitor_proc: Optional[subprocess.Popen] = None
         self.power_button_thread: Optional[threading.Thread] = None
+        self.logind_watcher_thread: Optional[threading.Thread] = None
         self.stop_threads: bool = False
 
+        self.detector = SteamDownloadDetector()
         self.download_info: Dict[str, Any] = {
             "is_downloading": False,
             "bytes_per_second": 0,
@@ -75,6 +252,7 @@ class Plugin:
             "estimated_seconds_remaining": 0,
         }
         self.last_download_active_time: float = time.time()
+        self.last_suspend_intercept_time: float = 0
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.monitor_task: Optional[asyncio.Task] = None
 
@@ -82,7 +260,6 @@ class Plugin:
     # Lifecycle Hooks
     # ==========================================
     async def _migration(self):
-        """Prepare directory structures and migrate legacy paths if needed."""
         try:
             os.makedirs(decky.DECKY_PLUGIN_SETTINGS_DIR, exist_ok=True)
             self.settings_file = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
@@ -91,7 +268,6 @@ class Plugin:
             logger.error(f"Error during migration: {e}")
 
     async def _main(self):
-        """Plugin initialized and started."""
         self.loop = asyncio.get_running_loop()
         self.settings_file = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
         self._load_settings()
@@ -99,7 +275,7 @@ class Plugin:
 
         logger.info("Download in Background plugin started.")
 
-        # Start power button listener thread
+        # 1. Hardware Power Button Listener Thread
         self.power_button_thread = threading.Thread(
             target=self._power_button_listener_worker,
             daemon=True,
@@ -107,26 +283,30 @@ class Plugin:
         )
         self.power_button_thread.start()
 
-        # Start periodic background monitor
+        # 2. Systemd Logind Journal Watcher Thread (catches UI suspend requests)
+        self.logind_watcher_thread = threading.Thread(
+            target=self._logind_watcher_worker,
+            daemon=True,
+            name="DownloadInBackground-LogindWatcher"
+        )
+        self.logind_watcher_thread.start()
+
+        # 3. Main periodic monitor loop
         self.monitor_task = self.loop.create_task(self._background_monitor_loop())
 
     async def _unload(self):
-        """Called when plugin is unloaded or disabled."""
         logger.info("Unloading Download in Background plugin...")
         self.stop_threads = True
 
         if self.monitor_task and not self.monitor_task.done():
             self.monitor_task.cancel()
 
-        # Restore system state if we were in background download mode
         if self.is_background_mode:
             self._restore_system_power_and_display()
 
-        # Release inhibitor lock
         self._release_sleep_inhibitor()
 
     async def _uninstall(self):
-        """Called during complete uninstall."""
         await self._unload()
         try:
             if os.path.exists(self.settings_file):
@@ -164,7 +344,6 @@ class Plugin:
         self._save_settings_sync()
         logger.info(f"Updated settings: {self.settings}")
 
-        # Update inhibitor state based on settings
         if not self.settings.get("enabled", True):
             if self.is_background_mode:
                 await self.exit_background_mode("disabled_in_settings")
@@ -178,12 +357,10 @@ class Plugin:
     # Battery & Hardware Status Queries
     # ==========================================
     def _get_battery_info(self) -> Dict[str, Any]:
-        """Reads capacity and status from /sys/class/power_supply/BAT*."""
         capacity = 100
         is_charging = False
         is_plugged = False
 
-        # Check AC/USB power supply
         ac_paths = glob.glob("/sys/class/power_supply/AC*") + glob.glob("/sys/class/power_supply/ucsi-source-psy*")
         for p in ac_paths:
             online_file = os.path.join(p, "online")
@@ -196,7 +373,6 @@ class Plugin:
                 except Exception:
                     pass
 
-        # Check Battery (BAT0, BAT1, etc.)
         bat_paths = glob.glob("/sys/class/power_supply/BAT*")
         for p in bat_paths:
             cap_file = os.path.join(p, "capacity")
@@ -236,55 +412,15 @@ class Plugin:
         }
 
     # ==========================================
-    # Download Status Sync & Backend Detection
-    # ==========================================
-    async def update_download_status(self, info: Dict[str, Any]):
-        """Called by Frontend whenever SteamClient reports download metrics."""
-        self.download_info.update(info)
-        is_dl = bool(info.get("is_downloading", False) or info.get("bytes_per_second", 0) > 10000)
-        self.download_info["is_downloading"] = is_dl
-
-        if is_dl:
-            self.last_download_active_time = time.time()
-
-        self._update_inhibitor_state()
-
-    def _is_downloading_active(self) -> bool:
-        """Determines if downloads are currently active, checking frontend report & filesystem."""
-        if self.download_info.get("is_downloading", False):
-            return True
-
-        if self.download_info.get("bytes_per_second", 0) > 50000:
-            return True
-
-        # Secondary check: Check Steam's downloading directory for active files
-        steam_paths = [
-            os.path.expanduser("~/.local/share/Steam/steamapps/downloading"),
-            os.path.expanduser("~/.steam/steam/steamapps/downloading"),
-        ]
-        for sp in steam_paths:
-            if os.path.isdir(sp):
-                try:
-                    entries = os.listdir(sp)
-                    if entries:
-                        # Files exist in downloading directory
-                        return True
-                except Exception:
-                    pass
-
-        return False
-
-    # ==========================================
     # Systemd Inhibitor Control
     # ==========================================
     def _acquire_sleep_inhibitor(self):
-        """Acquires sleep:handle-power-key inhibitor using systemd-inhibit."""
         if self.inhibitor_proc is not None:
             return
 
         cmd = [
             "systemd-inhibit",
-            "--what=sleep:handle-power-key",
+            "--what=sleep:handle-power-key:handle-suspend-key",
             "--who=DownloadInBackground",
             "--why=Steam game download active in background",
             "--mode=block",
@@ -297,13 +433,12 @@ class Plugin:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            logger.info("Acquired sleep inhibitor lock.")
+            logger.info("Acquired sleep inhibitor lock (block mode).")
         except Exception as e:
             logger.error(f"Failed to acquire sleep inhibitor: {e}")
             self.inhibitor_proc = None
 
     def _release_sleep_inhibitor(self):
-        """Releases the sleep inhibitor lock."""
         if self.inhibitor_proc is not None:
             try:
                 self.inhibitor_proc.terminate()
@@ -317,65 +452,114 @@ class Plugin:
             logger.info("Released sleep inhibitor lock.")
 
     def _update_inhibitor_state(self):
-        """Keeps inhibitor active if plugin is enabled and downloading or in background mode."""
         if not self.settings.get("enabled", True):
             self._release_sleep_inhibitor()
             return
 
-        should_inhibit = self.is_background_mode or self._is_downloading_active()
+        should_inhibit = self.is_background_mode or self.download_info.get("is_downloading", False)
         if should_inhibit and self.inhibitor_proc is None:
             self._acquire_sleep_inhibitor()
         elif not should_inhibit and self.inhibitor_proc is not None:
             self._release_sleep_inhibitor()
 
     # ==========================================
-    # Hardware Power Button Monitoring
+    # Suspend Interception & Logind Watcher
     # ==========================================
-    def _find_power_button_devices(self):
-        """Finds all input event device nodes corresponding to the Power Button."""
+    def _trigger_suspend_intercepted(self):
+        """Called whenever a suspend attempt is detected while downloads are active."""
+        now = time.time()
+        # Debounce to prevent double trigger within 3 seconds
+        if now - self.last_suspend_intercept_time < 3.0:
+            return
+        self.last_suspend_intercept_time = now
+
+        logger.info("Suspend attempt intercepted while downloading -> Showing HUD!")
+        self._acquire_sleep_inhibitor()
+
+        if self.loop and self.loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                decky.emit("on_suspend_intercepted", {
+                    "download_info": self.download_info,
+                    "hud_timeout": self.settings.get("hud_timeout_seconds", 5),
+                }),
+                self.loop
+            )
+
+    def _logind_watcher_worker(self):
+        """Watches systemd-logind journal logs to intercept UI suspend clicks."""
+        logger.info("Starting logind journal watcher worker...")
+        while not self.stop_threads:
+            proc = None
+            try:
+                cmd = ["journalctl", "-u", "systemd-logind", "-f", "-n", "0", "-o", "cat"]
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1
+                )
+
+                while not self.stop_threads and proc.poll() is None:
+                    line = proc.stdout.readline()
+                    if not line:
+                        break
+                    lower = line.lower()
+                    if (
+                        "inhibited by downloadinbackground" in lower
+                        or "refusing operation" in lower
+                        or "power key pressed to suspend" in lower
+                        or "suspend key pressed to sleep" in lower
+                        or "suspend entry requested" in lower
+                    ):
+                        logger.info(f"Logind journal suspend event: {line.strip()}")
+                        if self.download_info.get("is_downloading", False):
+                            self._trigger_suspend_intercepted()
+
+            except Exception as e:
+                logger.error(f"Error in logind watcher: {e}")
+            finally:
+                if proc:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                time.sleep(2.0)
+
+    # ==========================================
+    # Hardware Power / Sleep Key Monitoring
+    # ==========================================
+    def _find_power_sleep_devices(self) -> List[str]:
+        """Finds all input devices with KEY_POWER or KEY_SLEEP using kernel EVIOCGBIT."""
         devs = []
-        try:
-            with open("/proc/bus/input/devices", "r") as f:
-                content = f.read()
-
-            sections = content.split("\n\n")
-            for section in sections:
-                if 'Name="Power Button"' in section or "button/power" in section or "gpio-keys" in section:
-                    for line in section.split("\n"):
-                        if line.startswith("H: Handlers="):
-                            parts = line.split()
-                            for p in parts:
-                                if p.startswith("event"):
-                                    dev_path = f"/dev/input/{p}"
-                                    if os.path.exists(dev_path) and dev_path not in devs:
-                                        devs.append(dev_path)
-        except Exception as e:
-            logger.error(f"Error parsing /proc/bus/input/devices: {e}")
-
-        # Fallback to searching /dev/input/by-path/*
-        if not devs:
-            for p in glob.glob("/dev/input/by-path/*-event"):
-                if "pnp" in p.lower() or "button" in p.lower() or "power" in p.lower():
-                    devs.append(p)
-
+        for path in sorted(glob.glob("/dev/input/event*")):
+            try:
+                with open(path, "rb") as f:
+                    buf = bytearray(96)
+                    fcntl.ioctl(f.fileno(), 0x80604521, buf)  # EVIOCGBIT(EV_KEY, 96)
+                    # KEY_POWER = 116 (byte 14, bit 4)
+                    has_power = bool(buf[14] & (1 << 4))
+                    # KEY_SLEEP = 142 (byte 17, bit 6)
+                    has_sleep = bool(buf[17] & (1 << 6))
+                    if has_power or has_sleep:
+                        devs.append(path)
+            except Exception:
+                pass
         return devs
 
     def _power_button_listener_worker(self):
-        """Background thread monitoring power button key events."""
-        logger.info("Starting power button listener worker...")
+        logger.info("Starting hardware power key listener worker...")
         while not self.stop_threads:
-            device_paths = self._find_power_button_devices()
+            device_paths = self._find_power_sleep_devices()
             if not device_paths:
                 time.sleep(3.0)
                 continue
 
             fds = []
-            fd_map = {}
             for path in device_paths:
                 try:
                     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
                     fds.append(fd)
-                    fd_map[fd] = path
                 except Exception:
                     pass
 
@@ -394,14 +578,13 @@ class Plugin:
                                 data = data[INPUT_EVENT_SIZE:]
                                 _, _, ev_type, ev_code, ev_value = struct.unpack(INPUT_EVENT_FORMAT, chunk)
 
-                                # EV_KEY, KEY_POWER (116), ev_value 1 = key down
-                                if ev_type == EV_KEY and ev_code == KEY_POWER and ev_value == 1:
-                                    logger.info("Power button pressed detected!")
-                                    self._on_power_button_pressed()
+                                if ev_type == EV_KEY and (ev_code == KEY_POWER or ev_code == KEY_SLEEP) and ev_value == 1:
+                                    logger.info(f"Hardware key event: code={ev_code}")
+                                    self._on_hardware_power_key()
                         except BlockingIOError:
                             pass
                         except Exception as e:
-                            logger.error(f"Error reading power button event: {e}")
+                            logger.error(f"Error reading hardware key event: {e}")
                             break
             finally:
                 for fd in fds:
@@ -411,15 +594,11 @@ class Plugin:
                         pass
                 time.sleep(1.0)
 
-    def _on_power_button_pressed(self):
-        """Handles power button press logic."""
+    def _on_hardware_power_key(self):
         if not self.settings.get("enabled", True):
-            # Plugin disabled; let system handle suspend
             return
 
         if self.is_background_mode:
-            # Console is currently in Background Download Mode (screen off).
-            # Power button wakes the screen up!
             logger.info("Power button pressed during background mode -> Waking up!")
             if self.loop and self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(
@@ -428,22 +607,10 @@ class Plugin:
                 )
             return
 
-        # Console is ON. Check if downloads are active.
-        if self._is_downloading_active():
-            logger.info("Power button pressed while downloading -> Intercepting suspend!")
-            # Intercept! Hold inhibitor, notify frontend to show download HUD
-            self._acquire_sleep_inhibitor()
-            if self.loop and self.loop.is_running():
-                asyncio.run_coroutine_threadsafe(
-                    decky.emit("on_suspend_intercepted", {
-                        "download_info": self.download_info,
-                        "hud_timeout": self.settings.get("hud_timeout_seconds", 5),
-                    }),
-                    self.loop
-                )
+        if self.download_info.get("is_downloading", False):
+            self._trigger_suspend_intercepted()
         else:
-            # No downloads active. User legitimately wants to suspend.
-            logger.info("Power button pressed with no downloads active -> Executing normal suspend.")
+            logger.info("Power key pressed with no downloads active -> Allowing normal suspend.")
             self._release_sleep_inhibitor()
             if self.loop and self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(self.trigger_suspend(), self.loop)
@@ -452,10 +619,12 @@ class Plugin:
     # Power Saving & Screen Control
     # ==========================================
     def _apply_power_saving_and_screen_off(self):
-        """Applies ultra low power state and turns display backlight off."""
-        # 1. Turn off backlight
+        # 1. Turn off backlight: prioritize amdgpu_bl* on ROG Ally / Steam Deck
         if self.settings.get("turn_off_backlight", True):
             backlight_dirs = glob.glob("/sys/class/backlight/*")
+            # Sort amdgpu_bl first
+            backlight_dirs.sort(key=lambda p: 0 if "amdgpu" in p else 1)
+
             for bdir in backlight_dirs:
                 brightness_path = os.path.join(bdir, "brightness")
                 if os.path.exists(brightness_path):
@@ -469,19 +638,22 @@ class Plugin:
                     except Exception as e:
                         logger.error(f"Failed to turn off backlight on {brightness_path}: {e}")
 
+            # Also try brightnessctl if installed
+            try:
+                subprocess.run(["brightnessctl", "set", "0%"], capture_output=True, check=False)
+            except Exception:
+                pass
+
         # 2. CPU governor / Power profile
         if self.settings.get("throttle_cpu", True):
-            # Try powerprofilesctl
             try:
                 res = subprocess.run(["powerprofilesctl", "get"], capture_output=True, text=True, check=False)
                 if res.returncode == 0:
                     self.saved_power_profile = res.stdout.strip()
                     subprocess.run(["powerprofilesctl", "set", "power-saver"], check=False)
-                    logger.info(f"Switched power profile from {self.saved_power_profile} to power-saver.")
-            except Exception as e:
-                logger.error(f"Failed to set powerprofilesctl: {e}")
+            except Exception:
+                pass
 
-            # Also set cpufreq scaling governor to powersave
             gov_paths = glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor")
             for gp in gov_paths:
                 try:
@@ -503,23 +675,18 @@ class Plugin:
                     self.saved_gpu_dpm = curr_dpm
                     with open(dpm_path, "w") as f:
                         f.write("low")
-                    logger.info(f"Set GPU performance level to low (was {curr_dpm}).")
-                except Exception as e:
-                    logger.error(f"Failed to throttle GPU clock: {e}")
+                except Exception:
+                    pass
 
         # 4. Mute Audio
         if self.settings.get("mute_audio", True):
             try:
-                # PipeWire / WirePlumber
                 subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "1"], check=False)
-                # Fallbacks
                 subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "1"], check=False)
-                logger.info("Muted audio for background download.")
-            except Exception as e:
-                logger.error(f"Failed to mute audio: {e}")
+            except Exception:
+                pass
 
     def _restore_system_power_and_display(self):
-        """Restores screen brightness, audio, CPU governors, and GPU clocks."""
         logger.info("Restoring system power and display settings...")
 
         # 1. Restore Backlight
@@ -527,19 +694,23 @@ class Plugin:
             try:
                 if os.path.exists(brightness_path):
                     with open(brightness_path, "w") as f:
-                        f.write(str(max(val, 10)))  # Ensure at least minimal visible brightness
-                    logger.info(f"Restored backlight on {brightness_path} to {val}.")
-            except Exception as e:
-                logger.error(f"Failed to restore backlight on {brightness_path}: {e}")
+                        f.write(str(max(val, 25)))
+            except Exception:
+                pass
         self.saved_brightness.clear()
+
+        # Fallback restore via brightnessctl if needed
+        try:
+            subprocess.run(["brightnessctl", "set", "50%"], capture_output=True, check=False)
+        except Exception:
+            pass
 
         # 2. Restore Power Profile / CPU Governor
         if self.saved_power_profile:
             try:
                 subprocess.run(["powerprofilesctl", "set", self.saved_power_profile], check=False)
-                logger.info(f"Restored power profile to {self.saved_power_profile}.")
-            except Exception as e:
-                logger.error(f"Failed to restore power profile: {e}")
+            except Exception:
+                pass
             self.saved_power_profile = None
 
         for gp, gov in self.saved_cpu_governors.items():
@@ -558,24 +729,21 @@ class Plugin:
                 if os.path.exists(dpm_path):
                     with open(dpm_path, "w") as f:
                         f.write(self.saved_gpu_dpm)
-                    logger.info(f"Restored GPU performance level to {self.saved_gpu_dpm}.")
-            except Exception as e:
-                logger.error(f"Failed to restore GPU performance level: {e}")
+            except Exception:
+                pass
             self.saved_gpu_dpm = None
 
         # 4. Unmute Audio
         try:
             subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"], check=False)
             subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "0"], check=False)
-            logger.info("Unmuted audio.")
-        except Exception as e:
-            logger.error(f"Failed to unmute audio: {e}")
+        except Exception:
+            pass
 
     # ==========================================
     # Background Mode Transitions
     # ==========================================
     async def enter_background_mode(self, reason: str = "manual") -> bool:
-        """Transitions into background download mode: turns screen off and applies power saving."""
         if self.is_background_mode:
             return True
 
@@ -588,7 +756,6 @@ class Plugin:
         return True
 
     async def exit_background_mode(self, reason: str = "manual") -> bool:
-        """Exits background download mode and restores normal operation."""
         if not self.is_background_mode:
             return False
 
@@ -601,15 +768,12 @@ class Plugin:
         return True
 
     async def trigger_suspend(self):
-        """Releases inhibitor and invokes systemctl suspend."""
         logger.info("Executing systemctl suspend...")
         if self.is_background_mode:
             self._restore_system_power_and_display()
             self.is_background_mode = False
 
         self._release_sleep_inhibitor()
-
-        # Give systemd a moment to register released inhibitor
         await asyncio.sleep(0.5)
 
         try:
@@ -618,31 +782,38 @@ class Plugin:
             logger.error(f"Failed to execute systemctl suspend: {e}")
 
     # ==========================================
-    # Periodic Background Loop (Battery & Completion)
+    # Periodic Background Loop (Download & Battery)
     # ==========================================
     async def _background_monitor_loop(self):
-        """Continuously monitors battery and download completion while in background mode."""
         logger.info("Starting background monitor loop...")
         while not self.stop_threads:
             try:
-                await asyncio.sleep(4.0)
+                await asyncio.sleep(1.5)
 
                 if not self.settings.get("enabled", True):
                     continue
 
-                bat = self._get_battery_info()
-                is_dl = self._is_downloading_active()
+                # 1. Native Download Detection
+                info = self.detector.detect()
+                self.download_info = info
+                is_dl = info["is_downloading"]
+
+                if is_dl:
+                    self.last_download_active_time = time.time()
 
                 # Sync inhibitor state
                 self._update_inhibitor_state()
 
+                # 2. In Background Mode Checks
                 if self.is_background_mode:
-                    # 1. Low battery check: If battery drops below configured threshold (default 15%)
+                    bat = self._get_battery_info()
+
+                    # Condition A: Low battery auto-suspend
                     min_thresh = int(self.settings.get("min_battery_threshold", 15))
                     if not bat["is_charging"] and bat["capacity"] <= min_thresh:
                         logger.warning(
-                            f"Battery level is {bat['capacity']}% (<= {min_thresh}% threshold). "
-                            "Entering sleep to protect battery!"
+                            f"Battery level {bat['capacity']}% <= {min_thresh}%. "
+                            "Auto-suspending to protect battery!"
                         )
                         await decky.emit("battery_critical_suspend", {
                             "capacity": bat["capacity"],
@@ -652,17 +823,15 @@ class Plugin:
                         await self.trigger_suspend()
                         continue
 
-                    # 2. Download completion check
-                    if is_dl:
-                        self.last_download_active_time = time.time()
-                    else:
+                    # Condition B: Downloads finished auto-suspend
+                    if not is_dl:
                         elapsed_since_dl = time.time() - self.last_download_active_time
                         auto_sleep_delay = float(self.settings.get("auto_suspend_delay_seconds", 15))
 
                         if elapsed_since_dl >= auto_sleep_delay:
                             logger.info(
                                 f"All downloads completed ({elapsed_since_dl:.1f}s inactive). "
-                                "Entering automatic system suspend!"
+                                "Auto-suspending system!"
                             )
                             await decky.emit("downloads_completed_suspend", {
                                 "elapsed_seconds": elapsed_since_dl,
@@ -675,4 +844,4 @@ class Plugin:
                 break
             except Exception as e:
                 logger.error(f"Error in background monitor loop: {e}")
-                await asyncio.sleep(5.0)
+                await asyncio.sleep(2.0)
