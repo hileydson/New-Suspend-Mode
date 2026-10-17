@@ -1,6 +1,6 @@
 import React, { FC, useState, useEffect, useRef, useCallback } from "react";
 import { call, addEventListener, removeEventListener, toaster } from "@decky/api";
-import { FaDownload, FaMoon, FaBatteryThreeQuarters, FaTimes, FaBolt, FaHome } from "react-icons/fa";
+import { FaDownload, FaMoon, FaBatteryThreeQuarters, FaTimes, FaBolt } from "react-icons/fa";
 import { DownloadInfo, PluginSettings } from "../types";
 
 interface OverlayProps {
@@ -19,21 +19,11 @@ export const Overlay: FC<OverlayProps> = ({
 }) => {
   const [showHud, setShowHud] = useState<boolean>(false);
   const [isBlackout, setIsBlackout] = useState<boolean>(false);
-  const [isPeeking, setIsPeeking] = useState<boolean>(false);
   const [countdown, setCountdown] = useState<number>(5);
 
   const countdownTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const blackoutRef = useRef<boolean>(false);
-  const showHudRef = useRef<boolean>(false);
-  const peekingRef = useRef<boolean>(false);
-  const enteredTimestampRef = useRef<number>(0);
-  const buttonsReleasedRef = useRef<boolean>(false);
 
-  blackoutRef.current = isBlackout;
-  showHudRef.current = showHud;
-  peekingRef.current = isPeeking;
-
-  // Full System Wake (triggered via Power Button or manual Home button)
+  // Full System Wake (triggered via Power Button or manual cancel button)
   const fullWakeUp = useCallback(async (reason: string = "user_input") => {
     if (countdownTimerRef.current) {
       clearInterval(countdownTimerRef.current);
@@ -42,7 +32,6 @@ export const Overlay: FC<OverlayProps> = ({
 
     setShowHud(false);
     setIsBlackout(false);
-    setIsPeeking(false);
 
     try {
       await call("exit_background_mode", reason);
@@ -50,13 +39,11 @@ export const Overlay: FC<OverlayProps> = ({
       console.error("[DownloadInBackground] Error exiting background mode:", e);
     }
 
-    // Force navigation to SteamOS Home Screen
+    // Safely request Steam to open main screen (NEVER use window.location.href)
     try {
       const steamClient = (window as any).SteamClient;
       if (steamClient?.URL?.ExecuteSteamURL) {
         steamClient.URL.ExecuteSteamURL("steam://open/main");
-      } else {
-        window.location.href = "steam://open/main";
       }
     } catch (e) {
       console.error("[DownloadInBackground] Error navigating to Steam home:", e);
@@ -64,7 +51,7 @@ export const Overlay: FC<OverlayProps> = ({
 
     toaster.toast({
       title: "Download in Background",
-      body: "Console awakened! Returning to Home screen.",
+      body: "Console awakened! Returning to normal operation.",
       duration: 2500,
     });
   }, []);
@@ -77,68 +64,12 @@ export const Overlay: FC<OverlayProps> = ({
     }
 
     setShowHud(false);
-    setIsPeeking(false);
     setIsBlackout(true);
 
     try {
       await call("enter_background_mode", reason);
     } catch (e) {
       console.error("[DownloadInBackground] Error entering background mode:", e);
-    }
-  }, []);
-
-  // Peek Progress: Briefly turn on screen for 4s, keeping power savings intact
-  const startPeekHud = useCallback(async () => {
-    if (!blackoutRef.current && !peekingRef.current) return;
-
-    try {
-      await call("peek_display_on");
-    } catch (e) {
-      console.error("[DownloadInBackground] Error peeking display on:", e);
-    }
-
-    setIsPeeking(true);
-    setShowHud(true);
-    setIsBlackout(false);
-    setCountdown(4);
-
-    if (countdownTimerRef.current) {
-      clearInterval(countdownTimerRef.current);
-    }
-
-    let remaining = 4;
-    countdownTimerRef.current = setInterval(async () => {
-      remaining -= 1;
-      setCountdown(remaining);
-      if (remaining <= 0) {
-        if (countdownTimerRef.current) {
-          clearInterval(countdownTimerRef.current);
-          countdownTimerRef.current = null;
-        }
-        setIsPeeking(false);
-        setShowHud(false);
-        setIsBlackout(true);
-        try {
-          await call("peek_display_off");
-        } catch (e) {
-          console.error("[DownloadInBackground] Error peeking display off:", e);
-        }
-      }
-    }, 1000);
-  }, []);
-
-  const dismissPeekNow = useCallback(async () => {
-    if (countdownTimerRef.current) {
-      clearInterval(countdownTimerRef.current);
-      countdownTimerRef.current = null;
-    }
-    setIsPeeking(false);
-    setShowHud(false);
-    setIsBlackout(true);
-    try {
-      await call("peek_display_off");
-    } catch (e) {
-      console.error("[DownloadInBackground] Error dismissing peek:", e);
     }
   }, []);
 
@@ -154,7 +85,6 @@ export const Overlay: FC<OverlayProps> = ({
     setCountdown(timeoutSec);
     setShowHud(true);
     setIsBlackout(false);
-    setIsPeeking(false);
 
     if (countdownTimerRef.current) {
       clearInterval(countdownTimerRef.current);
@@ -187,7 +117,6 @@ export const Overlay: FC<OverlayProps> = ({
         if (data.is_background_mode) {
           setIsBlackout(true);
           setShowHud(false);
-          setIsPeeking(false);
         } else {
           // Full system wake up
           if (countdownTimerRef.current) {
@@ -196,15 +125,12 @@ export const Overlay: FC<OverlayProps> = ({
           }
           setIsBlackout(false);
           setShowHud(false);
-          setIsPeeking(false);
 
-          // Force SteamOS to the Home Screen
+          // Force SteamOS to the Home Screen SAFELY (only via official API)
           try {
             const sc = (window as any).SteamClient;
             if (sc?.URL?.ExecuteSteamURL) {
               sc.URL.ExecuteSteamURL("steam://open/main");
-            } else {
-              window.location.href = "steam://open/main";
             }
           } catch (e) {}
         }
@@ -245,80 +171,6 @@ export const Overlay: FC<OverlayProps> = ({
     };
   }, [settings.hud_timeout_seconds, startInitialHudSequence]);
 
-  // Update activation timestamp when entering HUD or blackout
-  useEffect(() => {
-    if (isBlackout || showHud) {
-      enteredTimestampRef.current = Date.now();
-      buttonsReleasedRef.current = false;
-    }
-  }, [isBlackout, showHud]);
-
-  // Controller / Input Listeners:
-  // - When screen is black: Controller button press = Peek download status for 4s
-  // - When peeking: Controller button press resets 4s peek timer
-  useEffect(() => {
-    const handleGlobalKeyDown = () => {
-      if (Date.now() - enteredTimestampRef.current < 1200) return;
-      if (blackoutRef.current) {
-        startPeekHud();
-      } else if (peekingRef.current) {
-        setCountdown(4);
-      }
-    };
-
-    const handlePointerDown = () => {
-      if (Date.now() - enteredTimestampRef.current < 1200) return;
-      if (blackoutRef.current) {
-        startPeekHud();
-      } else if (peekingRef.current) {
-        setCountdown(4);
-      }
-    };
-
-    let gamepadPollId: number;
-    const pollGamepads = () => {
-      const timeSinceEntered = Date.now() - enteredTimestampRef.current;
-      if (timeSinceEntered > 1200) {
-        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-        let anyPressed = false;
-        for (const gp of gamepads) {
-          if (!gp) continue;
-          for (const btn of gp.buttons) {
-            if (btn.pressed) {
-              anyPressed = true;
-              break;
-            }
-          }
-          if (anyPressed) break;
-        }
-
-        if (!anyPressed) {
-          buttonsReleasedRef.current = true;
-        } else if (buttonsReleasedRef.current) {
-          // Button was pressed after being released!
-          if (blackoutRef.current) {
-            buttonsReleasedRef.current = false;
-            startPeekHud();
-          } else if (peekingRef.current) {
-            setCountdown(4);
-          }
-        }
-      }
-
-      gamepadPollId = requestAnimationFrame(pollGamepads);
-    };
-
-    window.addEventListener("keydown", handleGlobalKeyDown, { capture: true });
-    window.addEventListener("pointerdown", handlePointerDown, { capture: true });
-    gamepadPollId = requestAnimationFrame(pollGamepads);
-
-    return () => {
-      window.removeEventListener("keydown", handleGlobalKeyDown, { capture: true });
-      window.removeEventListener("pointerdown", handlePointerDown, { capture: true });
-      cancelAnimationFrame(gamepadPollId);
-    };
-  }, [startPeekHud]);
-
   // Format Helpers
   const formatSpeed = (bytesPerSec: number): string => {
     if (!bytesPerSec || bytesPerSec <= 0) return "0 KB/s";
@@ -345,6 +197,7 @@ export const Overlay: FC<OverlayProps> = ({
     return `${m}m ${s}s`;
   };
 
+  // If neither HUD nor blackout is active, do not render anything
   if (!showHud && !isBlackout) {
     return null;
   }
@@ -354,14 +207,13 @@ export const Overlay: FC<OverlayProps> = ({
     return (
       <div
         className="dib-overlay-container dib-overlay-blackout"
-        onClick={startPeekHud}
         tabIndex={0}
         aria-hidden="true"
       />
     );
   }
 
-  // Download HUD Mode (both Initial Suspend Countdown and Controller Peek)
+  // Download HUD Mode (Initial Suspend Countdown)
   const percent = Math.min(100, Math.max(0, downloadInfo.progress_percent || 0));
   const gameTitle = downloadInfo.game_title || "Steam Game Download";
 
@@ -375,9 +227,7 @@ export const Overlay: FC<OverlayProps> = ({
             <div>
               <div className="dib-hud-title">Download in Background</div>
               <div className="dib-hud-subtitle">
-                {isPeeking
-                  ? "Peeking download progress — Press POWER to fully wake"
-                  : "System entering low-power mode to continue downloads"}
+                System entering low-power mode to continue downloads
               </div>
             </div>
           </div>
@@ -445,43 +295,22 @@ export const Overlay: FC<OverlayProps> = ({
 
         {/* Actions */}
         <div className="dib-hud-actions">
-          {isPeeking ? (
-            <>
-              <button
-                className="dib-btn-primary"
-                onClick={dismissPeekNow}
-              >
-                <FaMoon style={{ marginRight: 6 }} /> Turn Screen Off Now
-              </button>
-              <button
-                className="dib-btn-secondary"
-                onClick={() => fullWakeUp("user_peek_home")}
-              >
-                <FaHome style={{ marginRight: 6 }} /> Wake to Home Screen
-              </button>
-            </>
-          ) : (
-            <>
-              <button
-                className="dib-btn-primary"
-                onClick={() => enterBlackout("button_clicked")}
-              >
-                Turn Off Screen Now
-              </button>
-              <button
-                className="dib-btn-secondary"
-                onClick={() => fullWakeUp("cancel_clicked")}
-              >
-                <FaTimes style={{ marginRight: 6 }} /> Cancel & Keep Awake
-              </button>
-            </>
-          )}
+          <button
+            className="dib-btn-primary"
+            onClick={() => enterBlackout("button_clicked")}
+          >
+            Turn Off Screen Now
+          </button>
+          <button
+            className="dib-btn-secondary"
+            onClick={() => fullWakeUp("cancel_clicked")}
+          >
+            <FaTimes style={{ marginRight: 6 }} /> Cancel & Keep Awake
+          </button>
         </div>
 
         <div className="dib-hud-footer">
-          {isPeeking
-            ? "Press any controller button to reset timer. Press the POWER button to wake console completely to Home."
-            : "Screen turns off automatically. Press any controller button to glance at progress, or POWER to wake."}
+          Screen turns off automatically. Press the POWER button at any time to wake console back to normal.
         </div>
       </div>
     </div>

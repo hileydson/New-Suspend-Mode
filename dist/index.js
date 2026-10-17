@@ -86,8 +86,6 @@ function FaTimes (props) {
   return GenIcon({"attr":{"viewBox":"0 0 352 512"},"child":[{"tag":"path","attr":{"d":"M242.72 256l100.07-100.07c12.28-12.28 12.28-32.19 0-44.48l-22.24-22.24c-12.28-12.28-32.19-12.28-44.48 0L176 189.28 75.93 89.21c-12.28-12.28-32.19-12.28-44.48 0L9.21 111.45c-12.28 12.28-12.28 32.19 0 44.48L109.28 256 9.21 356.07c-12.28 12.28-12.28 32.19 0 44.48l22.24 22.24c12.28 12.28 32.2 12.28 44.48 0L176 322.72l100.07 100.07c12.28 12.28 32.2 12.28 44.48 0l22.24-22.24c12.28-12.28 12.28-32.19 0-44.48L242.72 256z"},"child":[]}]})(props);
 }function FaMoon (props) {
   return GenIcon({"attr":{"viewBox":"0 0 512 512"},"child":[{"tag":"path","attr":{"d":"M283.211 512c78.962 0 151.079-35.925 198.857-94.792 7.068-8.708-.639-21.43-11.562-19.35-124.203 23.654-238.262-71.576-238.262-196.954 0-72.222 38.662-138.635 101.498-174.394 9.686-5.512 7.25-20.197-3.756-22.23A258.156 258.156 0 0 0 283.211 0c-141.309 0-256 114.511-256 256 0 141.309 114.511 256 256 256z"},"child":[]}]})(props);
-}function FaHome (props) {
-  return GenIcon({"attr":{"viewBox":"0 0 576 512"},"child":[{"tag":"path","attr":{"d":"M280.37 148.26L96 300.11V464a16 16 0 0 0 16 16l112.06-.29a16 16 0 0 0 15.92-16V368a16 16 0 0 1 16-16h64a16 16 0 0 1 16 16v95.64a16 16 0 0 0 16 16.05L464 480a16 16 0 0 0 16-16V300L295.67 148.26a12.19 12.19 0 0 0-15.3 0zM571.6 251.47L488 182.56V44.05a12 12 0 0 0-12-12h-56a12 12 0 0 0-12 12v72.61L318.47 43a48 48 0 0 0-61 0L4.34 251.47a12 12 0 0 0-1.6 16.9l25.5 31A12 12 0 0 0 45.15 301l235.22-193.74a12.19 12.19 0 0 1 15.3 0L530.9 301a12 12 0 0 0 16.9-1.6l25.5-31a12 12 0 0 0-1.7-16.93z"},"child":[]}]})(props);
 }function FaDownload (props) {
   return GenIcon({"attr":{"viewBox":"0 0 512 512"},"child":[{"tag":"path","attr":{"d":"M216 0h80c13.3 0 24 10.7 24 24v168h87.7c17.8 0 26.7 21.5 14.1 34.1L269.7 378.3c-7.5 7.5-19.8 7.5-27.3 0L90.1 226.1c-12.6-12.6-3.7-34.1 14.1-34.1H192V24c0-13.3 10.7-24 24-24zm296 376v112c0 13.3-10.7 24-24 24H24c-13.3 0-24-10.7-24-24V376c0-13.3 10.7-24 24-24h146.7l49 49c20.1 20.1 52.5 20.1 72.6 0l49-49H488c13.3 0 24 10.7 24 24zm-124 88c0-11-9-20-20-20s-20 9-20 20 9 20 20 20 20-9 20-20zm64 0c0-11-9-20-20-20s-20 9-20 20 9 20 20 20 20-9 20-20z"},"child":[]}]})(props);
 }function FaBolt (props) {
@@ -99,18 +97,9 @@ function FaTimes (props) {
 const Overlay = ({ downloadInfo, settings, batteryCapacity, isCharging, }) => {
     const [showHud, setShowHud] = SP_REACT.useState(false);
     const [isBlackout, setIsBlackout] = SP_REACT.useState(false);
-    const [isPeeking, setIsPeeking] = SP_REACT.useState(false);
     const [countdown, setCountdown] = SP_REACT.useState(5);
     const countdownTimerRef = SP_REACT.useRef(null);
-    const blackoutRef = SP_REACT.useRef(false);
-    const showHudRef = SP_REACT.useRef(false);
-    const peekingRef = SP_REACT.useRef(false);
-    const enteredTimestampRef = SP_REACT.useRef(0);
-    const buttonsReleasedRef = SP_REACT.useRef(false);
-    blackoutRef.current = isBlackout;
-    showHudRef.current = showHud;
-    peekingRef.current = isPeeking;
-    // Full System Wake (triggered via Power Button or manual Home button)
+    // Full System Wake (triggered via Power Button or manual cancel button)
     const fullWakeUp = SP_REACT.useCallback(async (reason = "user_input") => {
         if (countdownTimerRef.current) {
             clearInterval(countdownTimerRef.current);
@@ -118,21 +107,17 @@ const Overlay = ({ downloadInfo, settings, batteryCapacity, isCharging, }) => {
         }
         setShowHud(false);
         setIsBlackout(false);
-        setIsPeeking(false);
         try {
             await call("exit_background_mode", reason);
         }
         catch (e) {
             console.error("[DownloadInBackground] Error exiting background mode:", e);
         }
-        // Force navigation to SteamOS Home Screen
+        // Safely request Steam to open main screen (NEVER use window.location.href)
         try {
             const steamClient = window.SteamClient;
             if (steamClient?.URL?.ExecuteSteamURL) {
                 steamClient.URL.ExecuteSteamURL("steam://open/main");
-            }
-            else {
-                window.location.href = "steam://open/main";
             }
         }
         catch (e) {
@@ -140,7 +125,7 @@ const Overlay = ({ downloadInfo, settings, batteryCapacity, isCharging, }) => {
         }
         toaster.toast({
             title: "Download in Background",
-            body: "Console awakened! Returning to Home screen.",
+            body: "Console awakened! Returning to normal operation.",
             duration: 2500,
         });
     }, []);
@@ -151,66 +136,12 @@ const Overlay = ({ downloadInfo, settings, batteryCapacity, isCharging, }) => {
             countdownTimerRef.current = null;
         }
         setShowHud(false);
-        setIsPeeking(false);
         setIsBlackout(true);
         try {
             await call("enter_background_mode", reason);
         }
         catch (e) {
             console.error("[DownloadInBackground] Error entering background mode:", e);
-        }
-    }, []);
-    // Peek Progress: Briefly turn on screen for 4s, keeping power savings intact
-    const startPeekHud = SP_REACT.useCallback(async () => {
-        if (!blackoutRef.current && !peekingRef.current)
-            return;
-        try {
-            await call("peek_display_on");
-        }
-        catch (e) {
-            console.error("[DownloadInBackground] Error peeking display on:", e);
-        }
-        setIsPeeking(true);
-        setShowHud(true);
-        setIsBlackout(false);
-        setCountdown(4);
-        if (countdownTimerRef.current) {
-            clearInterval(countdownTimerRef.current);
-        }
-        let remaining = 4;
-        countdownTimerRef.current = setInterval(async () => {
-            remaining -= 1;
-            setCountdown(remaining);
-            if (remaining <= 0) {
-                if (countdownTimerRef.current) {
-                    clearInterval(countdownTimerRef.current);
-                    countdownTimerRef.current = null;
-                }
-                setIsPeeking(false);
-                setShowHud(false);
-                setIsBlackout(true);
-                try {
-                    await call("peek_display_off");
-                }
-                catch (e) {
-                    console.error("[DownloadInBackground] Error peeking display off:", e);
-                }
-            }
-        }, 1000);
-    }, []);
-    const dismissPeekNow = SP_REACT.useCallback(async () => {
-        if (countdownTimerRef.current) {
-            clearInterval(countdownTimerRef.current);
-            countdownTimerRef.current = null;
-        }
-        setIsPeeking(false);
-        setShowHud(false);
-        setIsBlackout(true);
-        try {
-            await call("peek_display_off");
-        }
-        catch (e) {
-            console.error("[DownloadInBackground] Error dismissing peek:", e);
         }
     }, []);
     // Initial HUD Sequence before going to sleep (on suspend intercept)
@@ -223,7 +154,6 @@ const Overlay = ({ downloadInfo, settings, batteryCapacity, isCharging, }) => {
         setCountdown(timeoutSec);
         setShowHud(true);
         setIsBlackout(false);
-        setIsPeeking(false);
         if (countdownTimerRef.current) {
             clearInterval(countdownTimerRef.current);
         }
@@ -252,7 +182,6 @@ const Overlay = ({ downloadInfo, settings, batteryCapacity, isCharging, }) => {
                 if (data.is_background_mode) {
                     setIsBlackout(true);
                     setShowHud(false);
-                    setIsPeeking(false);
                 }
                 else {
                     // Full system wake up
@@ -262,15 +191,11 @@ const Overlay = ({ downloadInfo, settings, batteryCapacity, isCharging, }) => {
                     }
                     setIsBlackout(false);
                     setShowHud(false);
-                    setIsPeeking(false);
-                    // Force SteamOS to the Home Screen
+                    // Force SteamOS to the Home Screen SAFELY (only via official API)
                     try {
                         const sc = window.SteamClient;
                         if (sc?.URL?.ExecuteSteamURL) {
                             sc.URL.ExecuteSteamURL("steam://open/main");
-                        }
-                        else {
-                            window.location.href = "steam://open/main";
                         }
                     }
                     catch (e) { }
@@ -306,80 +231,6 @@ const Overlay = ({ downloadInfo, settings, batteryCapacity, isCharging, }) => {
             }
         };
     }, [settings.hud_timeout_seconds, startInitialHudSequence]);
-    // Update activation timestamp when entering HUD or blackout
-    SP_REACT.useEffect(() => {
-        if (isBlackout || showHud) {
-            enteredTimestampRef.current = Date.now();
-            buttonsReleasedRef.current = false;
-        }
-    }, [isBlackout, showHud]);
-    // Controller / Input Listeners:
-    // - When screen is black: Controller button press = Peek download status for 4s
-    // - When peeking: Controller button press resets 4s peek timer
-    SP_REACT.useEffect(() => {
-        const handleGlobalKeyDown = () => {
-            if (Date.now() - enteredTimestampRef.current < 1200)
-                return;
-            if (blackoutRef.current) {
-                startPeekHud();
-            }
-            else if (peekingRef.current) {
-                setCountdown(4);
-            }
-        };
-        const handlePointerDown = () => {
-            if (Date.now() - enteredTimestampRef.current < 1200)
-                return;
-            if (blackoutRef.current) {
-                startPeekHud();
-            }
-            else if (peekingRef.current) {
-                setCountdown(4);
-            }
-        };
-        let gamepadPollId;
-        const pollGamepads = () => {
-            const timeSinceEntered = Date.now() - enteredTimestampRef.current;
-            if (timeSinceEntered > 1200) {
-                const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-                let anyPressed = false;
-                for (const gp of gamepads) {
-                    if (!gp)
-                        continue;
-                    for (const btn of gp.buttons) {
-                        if (btn.pressed) {
-                            anyPressed = true;
-                            break;
-                        }
-                    }
-                    if (anyPressed)
-                        break;
-                }
-                if (!anyPressed) {
-                    buttonsReleasedRef.current = true;
-                }
-                else if (buttonsReleasedRef.current) {
-                    // Button was pressed after being released!
-                    if (blackoutRef.current) {
-                        buttonsReleasedRef.current = false;
-                        startPeekHud();
-                    }
-                    else if (peekingRef.current) {
-                        setCountdown(4);
-                    }
-                }
-            }
-            gamepadPollId = requestAnimationFrame(pollGamepads);
-        };
-        window.addEventListener("keydown", handleGlobalKeyDown, { capture: true });
-        window.addEventListener("pointerdown", handlePointerDown, { capture: true });
-        gamepadPollId = requestAnimationFrame(pollGamepads);
-        return () => {
-            window.removeEventListener("keydown", handleGlobalKeyDown, { capture: true });
-            window.removeEventListener("pointerdown", handlePointerDown, { capture: true });
-            cancelAnimationFrame(gamepadPollId);
-        };
-    }, [startPeekHud]);
     // Format Helpers
     const formatSpeed = (bytesPerSec) => {
         if (!bytesPerSec || bytesPerSec <= 0)
@@ -408,21 +259,18 @@ const Overlay = ({ downloadInfo, settings, batteryCapacity, isCharging, }) => {
         }
         return `${m}m ${s}s`;
     };
+    // If neither HUD nor blackout is active, do not render anything
     if (!showHud && !isBlackout) {
         return null;
     }
     // Pure black screen mode
     if (isBlackout) {
-        return (SP_JSX.jsx("div", { className: "dib-overlay-container dib-overlay-blackout", onClick: startPeekHud, tabIndex: 0, "aria-hidden": "true" }));
+        return (SP_JSX.jsx("div", { className: "dib-overlay-container dib-overlay-blackout", tabIndex: 0, "aria-hidden": "true" }));
     }
-    // Download HUD Mode (both Initial Suspend Countdown and Controller Peek)
+    // Download HUD Mode (Initial Suspend Countdown)
     const percent = Math.min(100, Math.max(0, downloadInfo.progress_percent || 0));
     const gameTitle = downloadInfo.game_title || "Steam Game Download";
-    return (SP_JSX.jsx("div", { className: "dib-overlay-container dib-overlay-hud", children: SP_JSX.jsxs("div", { className: "dib-hud-card", children: [SP_JSX.jsxs("div", { className: "dib-hud-header", children: [SP_JSX.jsxs("div", { className: "dib-hud-title-box", children: [SP_JSX.jsx(FaDownload, { className: "dib-hud-icon" }), SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { className: "dib-hud-title", children: "Download in Background" }), SP_JSX.jsx("div", { className: "dib-hud-subtitle", children: isPeeking
-                                                ? "Peeking download progress — Press POWER to fully wake"
-                                                : "System entering low-power mode to continue downloads" })] })] }), SP_JSX.jsxs("div", { className: "dib-countdown-badge", children: [SP_JSX.jsx(FaMoon, {}), "Screen off in ", countdown, "s"] })] }), SP_JSX.jsxs("div", { className: "dib-game-info", children: [SP_JSX.jsx("div", { className: "dib-game-title", children: gameTitle }), SP_JSX.jsx("div", { className: "dib-progress-container", children: SP_JSX.jsx("div", { className: "dib-progress-bar", style: { width: `${percent > 0 ? percent : 2}%` } }) }), SP_JSX.jsxs("div", { className: "dib-metrics-row", children: [SP_JSX.jsxs("div", { className: "dib-metric-item", children: [SP_JSX.jsx("span", { children: "Speed:" }), SP_JSX.jsx("span", { className: "dib-metric-value", children: formatSpeed(downloadInfo.bytes_per_second) })] }), SP_JSX.jsxs("div", { className: "dib-metric-item", children: [SP_JSX.jsx("span", { children: "Progress:" }), SP_JSX.jsxs("span", { className: "dib-metric-value", children: [percent.toFixed(1), "% (", formatSize(downloadInfo.completed_bytes), " / ", formatSize(downloadInfo.total_bytes), ")"] })] }), SP_JSX.jsxs("div", { className: "dib-metric-item", children: [SP_JSX.jsx("span", { children: "Time Left:" }), SP_JSX.jsx("span", { className: "dib-metric-value", children: formatTime(downloadInfo.estimated_seconds_remaining) })] })] })] }), SP_JSX.jsxs("div", { className: "dib-status-badges", children: [SP_JSX.jsxs("div", { className: "dib-badge", children: [SP_JSX.jsx(FaBatteryThreeQuarters, { className: `dib-badge-icon ${batteryCapacity <= 20 ? "warning" : ""}` }), SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { className: "dib-badge-title", children: "Battery Level" }), SP_JSX.jsxs("div", { className: "dib-badge-val", children: [batteryCapacity, "% ", isCharging ? "(Charging)" : ""] })] })] }), SP_JSX.jsxs("div", { className: "dib-badge", children: [SP_JSX.jsx(FaBolt, { className: "dib-badge-icon" }), SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { className: "dib-badge-title", children: "Auto-Suspend Threshold" }), SP_JSX.jsxs("div", { className: "dib-badge-val", children: ["At \u2264 ", settings.min_battery_threshold, "% or on finish"] })] })] })] }), SP_JSX.jsx("div", { className: "dib-hud-actions", children: isPeeking ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs("button", { className: "dib-btn-primary", onClick: dismissPeekNow, children: [SP_JSX.jsx(FaMoon, { style: { marginRight: 6 } }), " Turn Screen Off Now"] }), SP_JSX.jsxs("button", { className: "dib-btn-secondary", onClick: () => fullWakeUp("user_peek_home"), children: [SP_JSX.jsx(FaHome, { style: { marginRight: 6 } }), " Wake to Home Screen"] })] })) : (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("button", { className: "dib-btn-primary", onClick: () => enterBlackout("button_clicked"), children: "Turn Off Screen Now" }), SP_JSX.jsxs("button", { className: "dib-btn-secondary", onClick: () => fullWakeUp("cancel_clicked"), children: [SP_JSX.jsx(FaTimes, { style: { marginRight: 6 } }), " Cancel & Keep Awake"] })] })) }), SP_JSX.jsx("div", { className: "dib-hud-footer", children: isPeeking
-                        ? "Press any controller button to reset timer. Press the POWER button to wake console completely to Home."
-                        : "Screen turns off automatically. Press any controller button to glance at progress, or POWER to wake." })] }) }));
+    return (SP_JSX.jsx("div", { className: "dib-overlay-container dib-overlay-hud", children: SP_JSX.jsxs("div", { className: "dib-hud-card", children: [SP_JSX.jsxs("div", { className: "dib-hud-header", children: [SP_JSX.jsxs("div", { className: "dib-hud-title-box", children: [SP_JSX.jsx(FaDownload, { className: "dib-hud-icon" }), SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { className: "dib-hud-title", children: "Download in Background" }), SP_JSX.jsx("div", { className: "dib-hud-subtitle", children: "System entering low-power mode to continue downloads" })] })] }), SP_JSX.jsxs("div", { className: "dib-countdown-badge", children: [SP_JSX.jsx(FaMoon, {}), "Screen off in ", countdown, "s"] })] }), SP_JSX.jsxs("div", { className: "dib-game-info", children: [SP_JSX.jsx("div", { className: "dib-game-title", children: gameTitle }), SP_JSX.jsx("div", { className: "dib-progress-container", children: SP_JSX.jsx("div", { className: "dib-progress-bar", style: { width: `${percent > 0 ? percent : 2}%` } }) }), SP_JSX.jsxs("div", { className: "dib-metrics-row", children: [SP_JSX.jsxs("div", { className: "dib-metric-item", children: [SP_JSX.jsx("span", { children: "Speed:" }), SP_JSX.jsx("span", { className: "dib-metric-value", children: formatSpeed(downloadInfo.bytes_per_second) })] }), SP_JSX.jsxs("div", { className: "dib-metric-item", children: [SP_JSX.jsx("span", { children: "Progress:" }), SP_JSX.jsxs("span", { className: "dib-metric-value", children: [percent.toFixed(1), "% (", formatSize(downloadInfo.completed_bytes), " / ", formatSize(downloadInfo.total_bytes), ")"] })] }), SP_JSX.jsxs("div", { className: "dib-metric-item", children: [SP_JSX.jsx("span", { children: "Time Left:" }), SP_JSX.jsx("span", { className: "dib-metric-value", children: formatTime(downloadInfo.estimated_seconds_remaining) })] })] })] }), SP_JSX.jsxs("div", { className: "dib-status-badges", children: [SP_JSX.jsxs("div", { className: "dib-badge", children: [SP_JSX.jsx(FaBatteryThreeQuarters, { className: `dib-badge-icon ${batteryCapacity <= 20 ? "warning" : ""}` }), SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { className: "dib-badge-title", children: "Battery Level" }), SP_JSX.jsxs("div", { className: "dib-badge-val", children: [batteryCapacity, "% ", isCharging ? "(Charging)" : ""] })] })] }), SP_JSX.jsxs("div", { className: "dib-badge", children: [SP_JSX.jsx(FaBolt, { className: "dib-badge-icon" }), SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { className: "dib-badge-title", children: "Auto-Suspend Threshold" }), SP_JSX.jsxs("div", { className: "dib-badge-val", children: ["At \u2264 ", settings.min_battery_threshold, "% or on finish"] })] })] })] }), SP_JSX.jsxs("div", { className: "dib-hud-actions", children: [SP_JSX.jsx("button", { className: "dib-btn-primary", onClick: () => enterBlackout("button_clicked"), children: "Turn Off Screen Now" }), SP_JSX.jsxs("button", { className: "dib-btn-secondary", onClick: () => fullWakeUp("cancel_clicked"), children: [SP_JSX.jsx(FaTimes, { style: { marginRight: 6 } }), " Cancel & Keep Awake"] })] }), SP_JSX.jsx("div", { className: "dib-hud-footer", children: "Screen turns off automatically. Press the POWER button at any time to wake console back to normal." })] }) }));
 };
 
 const SettingsPanel = ({ settings, setSettings, downloadInfo, isBackgroundMode, batteryCapacity, isCharging, powerPlugged, }) => {

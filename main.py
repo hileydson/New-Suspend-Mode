@@ -723,14 +723,22 @@ class Plugin:
 
             for bdir in backlight_dirs:
                 brightness_path = os.path.join(bdir, "brightness")
+                max_b_path = os.path.join(bdir, "max_brightness")
                 if os.path.exists(brightness_path):
                     try:
                         with open(brightness_path, "r") as f:
                             curr_b = int(f.read().strip())
-                        self.saved_brightness[brightness_path] = curr_b
+                        max_b = 255
+                        if os.path.exists(max_b_path):
+                            with open(max_b_path, "r") as mf:
+                                max_b = int(mf.read().strip())
+
+                        if brightness_path not in self.saved_brightness or self.saved_brightness[brightness_path] <= 0:
+                            self.saved_brightness[brightness_path] = curr_b if curr_b > int(max_b * 0.05) else int(max_b * 0.6)
+
                         with open(brightness_path, "w") as f:
                             f.write("0")
-                        logger.info(f"Set backlight {brightness_path} from {curr_b} to 0.")
+                        logger.info(f"Set backlight {brightness_path} from {curr_b} to 0 (saved {self.saved_brightness[brightness_path]}).")
                     except Exception as e:
                         logger.error(f"Failed to turn off backlight on {brightness_path}: {e}")
 
@@ -786,48 +794,58 @@ class Plugin:
         logger.info("Restoring system power and display settings...")
 
         # 1. Restore Backlight
-        for brightness_path, val in self.saved_brightness.items():
+        for brightness_path, val in list(self.saved_brightness.items()):
             try:
                 if os.path.exists(brightness_path):
+                    max_b_path = os.path.join(os.path.dirname(brightness_path), "max_brightness")
+                    max_b = 255
+                    if os.path.exists(max_b_path):
+                        with open(max_b_path, "r") as mf:
+                            max_b = int(mf.read().strip())
+                    target = val if val > int(max_b * 0.05) else int(max_b * 0.6)
                     with open(brightness_path, "w") as f:
-                        f.write(str(max(val, 25)))
-            except Exception:
-                pass
+                        f.write(str(target))
+                    logger.info(f"Restored backlight on {brightness_path} to {target}.")
+            except Exception as e:
+                logger.error(f"Failed to restore backlight on {brightness_path}: {e}")
         self.saved_brightness.clear()
 
-        # Fallback restore via brightnessctl if needed
+        # Fallback restore via brightnessctl
         try:
-            subprocess.run(["brightnessctl", "set", "50%"], capture_output=True, check=False)
+            subprocess.run(["brightnessctl", "set", "60%"], capture_output=True, check=False)
         except Exception:
             pass
 
         # 2. Restore Power Profile / CPU Governor
-        if self.saved_power_profile:
-            try:
-                subprocess.run(["powerprofilesctl", "set", self.saved_power_profile], check=False)
-            except Exception:
-                pass
-            self.saved_power_profile = None
+        target_profile = self.saved_power_profile if self.saved_power_profile and self.saved_power_profile != "power-saver" else "balanced"
+        try:
+            subprocess.run(["powerprofilesctl", "set", target_profile], check=False)
+        except Exception:
+            pass
+        self.saved_power_profile = None
 
-        for gp, gov in self.saved_cpu_governors.items():
+        gov_paths = glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor")
+        for gp in gov_paths:
             try:
-                if os.path.exists(gp):
-                    with open(gp, "w") as f:
-                        f.write(gov)
+                gov = self.saved_cpu_governors.get(gp, "schedutil")
+                if gov == "powersave":
+                    gov = "schedutil"
+                with open(gp, "w") as f:
+                    f.write(gov)
             except Exception:
                 pass
         self.saved_cpu_governors.clear()
 
         # 3. Restore GPU DPM
-        if self.saved_gpu_dpm:
-            dpm_path = "/sys/class/drm/card0/device/power_dpm_force_performance_level"
+        dpm_path = "/sys/class/drm/card0/device/power_dpm_force_performance_level"
+        if os.path.exists(dpm_path):
             try:
-                if os.path.exists(dpm_path):
-                    with open(dpm_path, "w") as f:
-                        f.write(self.saved_gpu_dpm)
+                target_dpm = self.saved_gpu_dpm if self.saved_gpu_dpm and self.saved_gpu_dpm != "low" else "auto"
+                with open(dpm_path, "w") as f:
+                    f.write(target_dpm)
             except Exception:
                 pass
-            self.saved_gpu_dpm = None
+        self.saved_gpu_dpm = None
 
         # 4. Unmute Audio
         try:
@@ -837,59 +855,8 @@ class Plugin:
             pass
 
     # ==========================================
-    # Background Mode Transitions & Peek Feature
+    # Background Mode Transitions
     # ==========================================
-    async def peek_display_on(self) -> bool:
-        """Temporarily turns backlight on so user can peek at download HUD without restoring full power."""
-        logger.info("Peeking display on...")
-        for brightness_path, val in self.saved_brightness.items():
-            try:
-                if os.path.exists(brightness_path):
-                    with open(brightness_path, "w") as f:
-                        f.write(str(max(val, 25)))
-            except Exception:
-                pass
-        try:
-            subprocess.run(["brightnessctl", "set", "50%"], capture_output=True, check=False)
-        except Exception:
-            pass
-        return True
-
-    async def peek_display_off(self) -> bool:
-        """Turns backlight back off to 0 after peeking."""
-        logger.info("Peeking display off...")
-        if self.is_background_mode and self.settings.get("turn_off_backlight", True):
-            for brightness_path in self.saved_brightness.keys():
-                if os.path.exists(brightness_path):
-                    try:
-                        with open(brightness_path, "w") as f:
-                            f.write("0")
-                    except Exception:
-                        pass
-            try:
-                subprocess.run(["brightnessctl", "set", "0%"], capture_output=True, check=False)
-            except Exception:
-                pass
-        return True
-
-    def _navigate_steam_home(self):
-        """Forces SteamOS to show the Home Screen."""
-        try:
-            user = "deck"
-            if hasattr(decky, "DECKY_USER_HOME") and decky.DECKY_USER_HOME:
-                parts = decky.DECKY_USER_HOME.strip("/").split("/")
-                if len(parts) >= 2 and parts[0] == "home":
-                    user = parts[1]
-
-            logger.info(f"Navigating Steam to Home screen for user {user}...")
-            subprocess.Popen(
-                ["su", "-", user, "-c", "steam steam://open/main"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-        except Exception as e:
-            logger.error(f"Error navigating to Steam home: {e}")
-
     async def enter_background_mode(self, reason: str = "manual") -> bool:
         if self.is_background_mode:
             return True
@@ -911,9 +878,6 @@ class Plugin:
         self.is_background_mode = False
         self._restore_system_power_and_display()
         self._update_inhibitor_state()
-
-        if reason == "power_button_wake":
-            self._navigate_steam_home()
 
         await decky.emit("background_mode_changed", {"is_background_mode": False, "reason": reason})
         return True
