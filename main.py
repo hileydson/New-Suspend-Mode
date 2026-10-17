@@ -129,9 +129,36 @@ class SteamDownloadDetector:
         self.last_net_time = now
         return bps
 
+    def _has_recent_download_writes(self, libs: List[str], max_age_seconds: float = 6.0) -> bool:
+        """Checks if files in steamapps/downloading/ were modified within max_age_seconds."""
+        now = time.time()
+        for sa in libs:
+            dl_dir = os.path.join(sa, "downloading")
+            if not os.path.isdir(dl_dir):
+                continue
+            try:
+                count = 0
+                for root, dirs, files in os.walk(dl_dir):
+                    for fname in files:
+                        count += 1
+                        if count > 60:
+                            break
+                        fpath = os.path.join(root, fname)
+                        try:
+                            if (now - os.path.getmtime(fpath)) <= max_age_seconds:
+                                return True
+                        except OSError:
+                            pass
+                    if count > 60:
+                        break
+            except Exception:
+                pass
+        return False
+
     def detect(self) -> Dict[str, Any]:
         libs = self.get_library_paths()
-        active_dl = None
+        active_candidates: List[Dict[str, Any]] = []
+        paused_candidates: List[Dict[str, Any]] = []
 
         # Check appmanifest files in all libraries
         for sa in libs:
@@ -146,67 +173,74 @@ class SteamDownloadDetector:
                         continue
                     state = int(state_m.group(1))
 
-                    # 1024 = StateUpdateStarted, 256 = StateUpdateRunning, 512 = StateUpdatePaused
-                    is_updating = bool((state & 1024) or (state & 256)) and not bool(state & 512)
-                    if is_updating:
-                        name_m = re.search(r"\"name\"\s*\"([^\"]+)\"", txt)
-                        dl_m = re.search(r"\"BytesDownloaded\"\s*\"(\d+)\"", txt)
-                        tot_m = re.search(r"\"BytesToDownload\"\s*\"(\d+)\"", txt)
+                    name_m = re.search(r"\"name\"\s*\"([^\"]+)\"", txt)
+                    dl_m = re.search(r"\"BytesDownloaded\"\s*\"(\d+)\"", txt)
+                    tot_m = re.search(r"\"BytesToDownload\"\s*\"(\d+)\"", txt)
 
-                        name = name_m.group(1) if name_m else "Steam Download"
-                        b_dl = int(dl_m.group(1)) if dl_m else 0
-                        b_tot = int(tot_m.group(1)) if tot_m else 0
-                        pct = (b_dl / b_tot * 100) if b_tot > 0 else 0
+                    name = name_m.group(1) if name_m else "Steam Download"
+                    b_dl = int(dl_m.group(1)) if dl_m else 0
+                    b_tot = int(tot_m.group(1)) if tot_m else 0
+                    pct = (b_dl / b_tot * 100) if b_tot > 0 else 0
 
-                        active_dl = {
-                            "is_downloading": True,
-                            "game_title": name,
-                            "completed_bytes": b_dl,
-                            "total_bytes": b_tot,
-                            "progress_percent": pct,
-                        }
-                        break
-                except Exception:
-                    pass
-            if active_dl:
-                break
+                    cand = {
+                        "game_title": name,
+                        "completed_bytes": b_dl,
+                        "total_bytes": b_tot,
+                        "progress_percent": pct,
+                    }
 
-        # Check downloading directories for active downloads
-        has_downloading_files = False
-        for sa in libs:
-            dl_dir = os.path.join(sa, "downloading")
-            if os.path.isdir(dl_dir):
-                try:
-                    items = os.listdir(dl_dir)
-                    if items:
-                        has_downloading_files = True
-                        if not active_dl:
-                            active_dl = {
-                                "is_downloading": True,
-                                "game_title": "Steam Game Download",
-                                "completed_bytes": 0,
-                                "total_bytes": 0,
-                                "progress_percent": 0,
-                            }
-                        break
+                    # StateFlags:
+                    # 512 = StateUpdatePaused
+                    # 1048576 = StateUpdateStopping
+                    # 1024 = StateUpdateStarted, 256 = StateUpdateRunning, 131072 = StateDownloading, 262144 = StateStaging, 65536 = StatePreallocating
+                    is_paused = bool(state & 512)
+                    is_stopping = bool(state & 1048576)
+                    is_updating = bool((state & 1024) or (state & 256) or (state & 131072) or (state & 262144) or (state & 65536))
+
+                    if is_paused or is_stopping:
+                        paused_candidates.append(cand)
+                    elif is_updating:
+                        active_candidates.append(cand)
                 except Exception:
                     pass
 
         net_bps = self.get_network_rx_rate()
+        has_recent_writes = self._has_recent_download_writes(libs, max_age_seconds=6.0)
 
-        if active_dl:
-            active_dl["bytes_per_second"] = net_bps
-            if net_bps > 0 and active_dl["total_bytes"] > active_dl["completed_bytes"]:
-                rem_bytes = active_dl["total_bytes"] - active_dl["completed_bytes"]
-                active_dl["estimated_seconds_remaining"] = int(rem_bytes / net_bps)
-            else:
-                active_dl["estimated_seconds_remaining"] = 0
-            return active_dl
+        # Case 1: Active updating candidate in manifests
+        if active_candidates:
+            active_dl = active_candidates[0]
+            # Verify network is actually flowing or disk is actively being written
+            if net_bps > 15000 or has_recent_writes:
+                active_dl["is_downloading"] = True
+                active_dl["is_paused"] = False
+                active_dl["bytes_per_second"] = net_bps
+                if net_bps > 0 and active_dl["total_bytes"] > active_dl["completed_bytes"]:
+                    rem_bytes = active_dl["total_bytes"] - active_dl["completed_bytes"]
+                    active_dl["estimated_seconds_remaining"] = int(rem_bytes / net_bps)
+                else:
+                    active_dl["estimated_seconds_remaining"] = 0
+                return active_dl
 
-        # High network traffic + downloading files
-        if net_bps > 150000 and has_downloading_files:
+        # Case 2: No active downloads, but games are paused in download queue
+        if paused_candidates and not has_recent_writes and net_bps < 30000:
+            paused_dl = paused_candidates[0]
+            return {
+                "is_downloading": False,
+                "is_paused": True,
+                "game_title": paused_dl["game_title"],
+                "completed_bytes": paused_dl["completed_bytes"],
+                "total_bytes": paused_dl["total_bytes"],
+                "progress_percent": paused_dl["progress_percent"],
+                "bytes_per_second": 0,
+                "estimated_seconds_remaining": 0,
+            }
+
+        # Case 3: High network traffic + active file writes (fallback for unmanifested downloads)
+        if net_bps > 50000 and has_recent_writes:
             return {
                 "is_downloading": True,
+                "is_paused": False,
                 "game_title": "Steam Game Download",
                 "bytes_per_second": net_bps,
                 "completed_bytes": 0,
@@ -215,9 +249,11 @@ class SteamDownloadDetector:
                 "estimated_seconds_remaining": 0,
             }
 
+        # Case 4: Completely idle or paused
         return {
             "is_downloading": False,
-            "game_title": "",
+            "is_paused": bool(paused_candidates),
+            "game_title": paused_candidates[0]["game_title"] if paused_candidates else "",
             "bytes_per_second": net_bps,
             "completed_bytes": 0,
             "total_bytes": 0,
@@ -244,6 +280,7 @@ class Plugin:
         self.detector = SteamDownloadDetector()
         self.download_info: Dict[str, Any] = {
             "is_downloading": False,
+            "is_paused": False,
             "bytes_per_second": 0,
             "progress_percent": 0,
             "game_title": "",
@@ -412,6 +449,24 @@ class Plugin:
             "download_info": self.download_info,
         }
 
+    async def update_download_status(self, info: Dict[str, Any]) -> bool:
+        """Receives real-time SteamClient download updates from frontend."""
+        if not isinstance(info, dict):
+            return False
+
+        is_dl = bool(info.get("is_downloading", False))
+        is_paused = bool(info.get("is_paused", False))
+
+        self.download_info.update(info)
+        self.download_info["is_downloading"] = is_dl and not is_paused
+        self.download_info["is_paused"] = is_paused
+
+        if self.download_info["is_downloading"]:
+            self.last_download_active_time = time.time()
+
+        self._update_inhibitor_state()
+        return True
+
     # ==========================================
     # Systemd Inhibitor Control
     # ==========================================
@@ -457,7 +512,11 @@ class Plugin:
             self._release_sleep_inhibitor()
             return
 
-        should_inhibit = self.is_background_mode or self.download_info.get("is_downloading", False)
+        is_active_download = (
+            self.download_info.get("is_downloading", False)
+            and not self.download_info.get("is_paused", False)
+        )
+        should_inhibit = self.is_background_mode or is_active_download
         if should_inhibit and self.inhibitor_proc is None:
             self._acquire_sleep_inhibitor()
         elif not should_inhibit and self.inhibitor_proc is not None:
@@ -472,6 +531,16 @@ class Plugin:
         # Cooldown: Ignore any suspend request if system just woke up within 5 seconds
         if now < self.wake_cooldown_until:
             logger.info("Ignoring suspend attempt because system just woke up from background mode.")
+            return
+
+        # Double check: Is download REALLY actively downloading (not paused or idle)?
+        is_active_dl = (
+            self.download_info.get("is_downloading", False)
+            and not self.download_info.get("is_paused", False)
+        )
+        if not is_active_dl:
+            logger.info("Suspend attempt not intercepted: Download is paused or idle. Allowing normal suspend.")
+            self._release_sleep_inhibitor()
             return
 
         # Debounce to prevent double trigger within 3 seconds
@@ -524,8 +593,14 @@ class Plugin:
                         or "suspend entry requested" in lower
                     ):
                         logger.info(f"Logind journal suspend event: {line.strip()}")
-                        if self.download_info.get("is_downloading", False):
+                        is_active_dl = (
+                            self.download_info.get("is_downloading", False)
+                            and not self.download_info.get("is_paused", False)
+                        )
+                        if is_active_dl:
                             self._trigger_suspend_intercepted()
+                        else:
+                            self._release_sleep_inhibitor()
 
             except Exception as e:
                 logger.error(f"Error in logind watcher: {e}")
@@ -624,10 +699,14 @@ class Plugin:
                 )
             return
 
-        if self.download_info.get("is_downloading", False):
+        is_active_dl = (
+            self.download_info.get("is_downloading", False)
+            and not self.download_info.get("is_paused", False)
+        )
+        if is_active_dl:
             self._trigger_suspend_intercepted()
         else:
-            logger.info("Power key pressed with no downloads active -> Allowing normal suspend.")
+            logger.info("Power key pressed with no active downloads (paused/idle) -> Allowing normal suspend.")
             self._release_sleep_inhibitor()
             if self.loop and self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(self.trigger_suspend(), self.loop)
@@ -867,8 +946,12 @@ class Plugin:
 
                 # 1. Native Download Detection
                 info = self.detector.detect()
-                self.download_info = info
-                is_dl = info["is_downloading"]
+                self.download_info.update(info)
+                is_dl = (
+                    self.download_info.get("is_downloading", False)
+                    and not self.download_info.get("is_paused", False)
+                )
+                self.download_info["is_downloading"] = is_dl
 
                 if is_dl:
                     self.last_download_active_time = time.time()
@@ -895,14 +978,14 @@ class Plugin:
                         await self.trigger_suspend()
                         continue
 
-                    # Condition B: Downloads finished auto-suspend
+                    # Condition B: Downloads finished or paused auto-suspend
                     if not is_dl:
                         elapsed_since_dl = time.time() - self.last_download_active_time
                         auto_sleep_delay = float(self.settings.get("auto_suspend_delay_seconds", 15))
 
                         if elapsed_since_dl >= auto_sleep_delay:
                             logger.info(
-                                f"All downloads completed ({elapsed_since_dl:.1f}s inactive). "
+                                f"Downloads inactive or completed ({elapsed_since_dl:.1f}s inactive). "
                                 "Auto-suspending system!"
                             )
                             await decky.emit("downloads_completed_suspend", {

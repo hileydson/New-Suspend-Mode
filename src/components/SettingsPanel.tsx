@@ -49,8 +49,13 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
     return `${(bytesPerSec / 1024).toFixed(0)} KB/s`;
   };
 
+  const isPaused = Boolean(downloadInfo.is_paused);
   const isDownloading =
-    downloadInfo.is_downloading || (downloadInfo.bytes_per_second || 0) > 10000;
+    !isPaused &&
+    Boolean(
+      downloadInfo.is_downloading ||
+      (downloadInfo.bytes_per_second || 0) > 10000
+    );
 
   return (
     <div>
@@ -64,20 +69,22 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
                 ? `${downloadInfo.game_title || "Steam Download"} (${formatSpeed(
                     downloadInfo.bytes_per_second
                   )})`
+                : isPaused
+                ? `${downloadInfo.game_title ? downloadInfo.game_title + " (Paused)" : "Downloads paused"}`
                 : "No active downloads"
             }
           >
             <span
               className={`dib-status-tag ${
-                isDownloading ? "downloading" : "idle"
+                isDownloading ? "downloading" : isPaused ? "paused" : "idle"
               }`}
             >
-              {isDownloading ? "DOWNLOADING" : "IDLE"}
+              {isDownloading ? "DOWNLOADING" : isPaused ? "PAUSED" : "IDLE"}
             </span>
           </Field>
         </PanelSectionRow>
 
-        {isDownloading && (
+        {(isDownloading || (isPaused && downloadInfo.total_bytes > 0)) && (
           <PanelSectionRow>
             <div style={{ width: "100%", margin: "4px 0" }}>
               <div
@@ -90,7 +97,11 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
                 }}
               >
                 <span>Progress: {downloadInfo.progress_percent.toFixed(1)}%</span>
-                <span>Speed: {formatSpeed(downloadInfo.bytes_per_second)}</span>
+                <span>
+                  {isDownloading
+                    ? `Speed: ${formatSpeed(downloadInfo.bytes_per_second)}`
+                    : "Paused"}
+                </span>
               </div>
               <ProgressBar
                 nProgress={downloadInfo.progress_percent || 0}

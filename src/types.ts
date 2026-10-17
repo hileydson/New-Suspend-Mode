@@ -12,6 +12,7 @@ export interface PluginSettings {
 
 export interface DownloadInfo {
   is_downloading: boolean;
+  is_paused?: boolean;
   app_id?: number | string;
   game_title?: string;
   bytes_per_second: number;

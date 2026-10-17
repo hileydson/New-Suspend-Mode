@@ -271,6 +271,12 @@ export const PLUGIN_STYLES = `
   border: 1px solid rgba(56, 189, 248, 0.4);
 }
 
+.dib-status-tag.paused {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
 .dib-status-tag.idle {
   background: rgba(148, 163, 184, 0.15);
   color: #94a3b8;

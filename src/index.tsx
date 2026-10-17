@@ -147,7 +147,14 @@ export default definePlugin(() => {
           sharedSettings = { ...sharedSettings, ...status.settings };
         }
         if (status.download_info) {
-          sharedDownloadInfo = { ...sharedDownloadInfo, ...status.download_info };
+          if (window.SteamClient?.Downloads?.GetDownloadOverview) {
+            sharedDownloadInfo = {
+              ...status.download_info,
+              ...sharedDownloadInfo,
+            };
+          } else {
+            sharedDownloadInfo = { ...sharedDownloadInfo, ...status.download_info };
+          }
         }
         notifyStateListeners();
       }
@@ -182,16 +189,50 @@ export default definePlugin(() => {
             }
           }
 
-          const isDl = bps > 10000 || overview.bIsDownloading === true || overview.downloading === true;
+          const isPaused = Boolean(
+            overview.bIsPaused ||
+            overview.paused ||
+            overview.bPaused ||
+            overview.bQueuePaused ||
+            overview.is_paused ||
+            overview.m_bPaused
+          );
+
+          let queuePaused = false;
+          if (window.SteamClient?.Downloads?.GetQueue) {
+            const queue = window.SteamClient.Downloads.GetQueue();
+            if (Array.isArray(queue)) {
+              if (queue.length === 0) {
+                queuePaused = true;
+              } else {
+                const hasActiveUnpaused = queue.some(
+                  (item: any) =>
+                    (item.bDownloading || item.bIsDownloading || item.active) &&
+                    !item.bPaused &&
+                    !item.bIsPaused &&
+                    !item.paused
+                );
+                if (!hasActiveUnpaused) {
+                  queuePaused = true;
+                }
+              }
+            }
+          }
+
+          const isDl =
+            !isPaused &&
+            !queuePaused &&
+            (bps > 10000 || (overview.bIsDownloading === true && bps > 0));
 
           const updatedInfo: DownloadInfo = {
             is_downloading: isDl,
-            bytes_per_second: bps,
+            is_paused: isPaused || queuePaused,
+            bytes_per_second: isDl ? bps : 0,
             total_bytes: totalBytes,
             completed_bytes: completedBytes,
             progress_percent: percent,
             game_title: gameTitle || "Steam Download",
-            estimated_seconds_remaining: etaSeconds,
+            estimated_seconds_remaining: isDl ? etaSeconds : 0,
           };
 
           sharedDownloadInfo = updatedInfo;
@@ -227,7 +268,11 @@ export default definePlugin(() => {
     if (window.SteamClient?.System?.RegisterForOnSuspendRequest) {
       const reg = window.SteamClient.System.RegisterForOnSuspendRequest(async () => {
         console.log("[DownloadInBackground] SteamClient Suspend Request event received!");
+        // Always refresh download status immediately before making suspend decision
+        await querySteamDownloads();
+
         if (sharedSettings.enabled && sharedDownloadInfo.is_downloading) {
+          console.log("[DownloadInBackground] Active download running -> Intercepting suspend and showing HUD");
           // Intercept SteamClient suspend!
           // Trigger overlay HUD countdown
           window.dispatchEvent(new CustomEvent("decky_event_on_suspend_intercepted", {
@@ -238,7 +283,8 @@ export default definePlugin(() => {
           }));
           return false; // Prevent suspend in SteamClient
         }
-        return true; // Allow suspend
+        console.log("[DownloadInBackground] Download is paused or idle -> Allowing normal Steam suspend without intercepting.");
+        return true; // Allow suspend immediately
       });
       if (reg && typeof reg.unregister === "function") {
         suspendUnregister = reg.unregister;

@@ -444,16 +444,23 @@ const SettingsPanel = ({ settings, setSettings, downloadInfo, isBackgroundMode, 
             return `${mb.toFixed(1)} MB/s`;
         return `${(bytesPerSec / 1024).toFixed(0)} KB/s`;
     };
-    const isDownloading = downloadInfo.is_downloading || (downloadInfo.bytes_per_second || 0) > 10000;
+    const isPaused = Boolean(downloadInfo.is_paused);
+    const isDownloading = !isPaused &&
+        Boolean(downloadInfo.is_downloading ||
+            (downloadInfo.bytes_per_second || 0) > 10000);
     return (SP_JSX.jsxs("div", { children: [SP_JSX.jsxs(DFL.PanelSection, { title: "Download & System Status", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "Download Status", description: isDownloading
                                 ? `${downloadInfo.game_title || "Steam Download"} (${formatSpeed(downloadInfo.bytes_per_second)})`
-                                : "No active downloads", children: SP_JSX.jsx("span", { className: `dib-status-tag ${isDownloading ? "downloading" : "idle"}`, children: isDownloading ? "DOWNLOADING" : "IDLE" }) }) }), isDownloading && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { width: "100%", margin: "4px 0" }, children: [SP_JSX.jsxs("div", { style: {
+                                : isPaused
+                                    ? `${downloadInfo.game_title ? downloadInfo.game_title + " (Paused)" : "Downloads paused"}`
+                                    : "No active downloads", children: SP_JSX.jsx("span", { className: `dib-status-tag ${isDownloading ? "downloading" : isPaused ? "paused" : "idle"}`, children: isDownloading ? "DOWNLOADING" : isPaused ? "PAUSED" : "IDLE" }) }) }), (isDownloading || (isPaused && downloadInfo.total_bytes > 0)) && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { width: "100%", margin: "4px 0" }, children: [SP_JSX.jsxs("div", { style: {
                                         display: "flex",
                                         justifyContent: "space-between",
                                         fontSize: "12px",
                                         color: "#cbd5e1",
                                         marginBottom: "4px",
-                                    }, children: [SP_JSX.jsxs("span", { children: ["Progress: ", downloadInfo.progress_percent.toFixed(1), "%"] }), SP_JSX.jsxs("span", { children: ["Speed: ", formatSpeed(downloadInfo.bytes_per_second)] })] }), SP_JSX.jsx(DFL.ProgressBar, { nProgress: downloadInfo.progress_percent || 0 })] }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "Battery Level", description: `Auto-sleep threshold: ${settings.min_battery_threshold}%`, children: SP_JSX.jsxs("span", { style: { fontWeight: "bold" }, children: [batteryCapacity, "% ", isCharging ? "⚡ (Charging)" : "🔋"] }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "Background Download Mode", description: isBackgroundMode
+                                    }, children: [SP_JSX.jsxs("span", { children: ["Progress: ", downloadInfo.progress_percent.toFixed(1), "%"] }), SP_JSX.jsx("span", { children: isDownloading
+                                                ? `Speed: ${formatSpeed(downloadInfo.bytes_per_second)}`
+                                                : "Paused" })] }), SP_JSX.jsx(DFL.ProgressBar, { nProgress: downloadInfo.progress_percent || 0 })] }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "Battery Level", description: `Auto-sleep threshold: ${settings.min_battery_threshold}%`, children: SP_JSX.jsxs("span", { style: { fontWeight: "bold" }, children: [batteryCapacity, "% ", isCharging ? "⚡ (Charging)" : "🔋"] }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "Background Download Mode", description: isBackgroundMode
                                 ? "Active (Screen off & power saving enabled)"
                                 : "Inactive (Normal operation)", children: SP_JSX.jsx("span", { className: `dib-status-tag ${isBackgroundMode ? "active" : "idle"}`, children: isBackgroundMode ? "ACTIVE" : "STANDBY" }) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Behavior Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Enable Plugin", description: "Intercepts suspend when downloading, turns off screen, and saves power.", checked: settings.enabled, onChange: (checked) => updateSetting("enabled", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Auto-Suspend Battery Threshold", description: "Console suspends automatically if battery drops below this limit during download.", value: settings.min_battery_threshold, min: 5, max: 30, step: 1, showValue: true, valueSuffix: "%", onChange: (val) => updateSetting("min_battery_threshold", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "HUD Display Countdown", description: "Seconds the download card shows on screen before turning display off.", value: settings.hud_timeout_seconds, min: 0, max: 15, step: 1, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("hud_timeout_seconds", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Completion Suspend Delay", description: "Seconds to wait after all downloads complete before automatically sleeping.", value: settings.auto_suspend_delay_seconds, min: 5, max: 60, step: 5, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("auto_suspend_delay_seconds", val) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Power Saving & Screen Options", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Turn Off Display Backlight", description: "Physically drops LCD/OLED panel backlight brightness to 0.", checked: settings.turn_off_backlight, onChange: (checked) => updateSetting("turn_off_backlight", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pitch Black OLED Mode", description: "Presents a pure black overlay, shutting off individual OLED pixels.", checked: settings.oled_black_screen, onChange: (checked) => updateSetting("oled_black_screen", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle CPU to Powersave", description: "Switches power profile to power-saver and lowers CPU clock frequencies.", checked: settings.throttle_cpu, onChange: (checked) => updateSetting("throttle_cpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle GPU to 200MHz", description: "Sets AMD GPU performance level to low, minimizing GPU power draw.", checked: settings.throttle_gpu, onChange: (checked) => updateSetting("throttle_gpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Mute Audio While Screen Off", description: "Silences audio output during background download to prevent disturbance.", checked: settings.mute_audio, onChange: (checked) => updateSetting("mute_audio", checked) }) })] })] }));
 };
@@ -731,6 +738,12 @@ const PLUGIN_STYLES = `
   border: 1px solid rgba(56, 189, 248, 0.4);
 }
 
+.dib-status-tag.paused {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
 .dib-status-tag.idle {
   background: rgba(148, 163, 184, 0.15);
   color: #94a3b8;
@@ -829,7 +842,15 @@ var index = definePlugin(() => {
                     sharedSettings = { ...sharedSettings, ...status.settings };
                 }
                 if (status.download_info) {
-                    sharedDownloadInfo = { ...sharedDownloadInfo, ...status.download_info };
+                    if (window.SteamClient?.Downloads?.GetDownloadOverview) {
+                        sharedDownloadInfo = {
+                            ...status.download_info,
+                            ...sharedDownloadInfo,
+                        };
+                    }
+                    else {
+                        sharedDownloadInfo = { ...sharedDownloadInfo, ...status.download_info };
+                    }
                 }
                 notifyStateListeners();
             }
@@ -861,15 +882,42 @@ var index = definePlugin(() => {
                             gameTitle = queue[0]?.display_name ?? queue[0]?.app_name ?? queue[0]?.name;
                         }
                     }
-                    const isDl = bps > 10000 || overview.bIsDownloading === true || overview.downloading === true;
+                    const isPaused = Boolean(overview.bIsPaused ||
+                        overview.paused ||
+                        overview.bPaused ||
+                        overview.bQueuePaused ||
+                        overview.is_paused ||
+                        overview.m_bPaused);
+                    let queuePaused = false;
+                    if (window.SteamClient?.Downloads?.GetQueue) {
+                        const queue = window.SteamClient.Downloads.GetQueue();
+                        if (Array.isArray(queue)) {
+                            if (queue.length === 0) {
+                                queuePaused = true;
+                            }
+                            else {
+                                const hasActiveUnpaused = queue.some((item) => (item.bDownloading || item.bIsDownloading || item.active) &&
+                                    !item.bPaused &&
+                                    !item.bIsPaused &&
+                                    !item.paused);
+                                if (!hasActiveUnpaused) {
+                                    queuePaused = true;
+                                }
+                            }
+                        }
+                    }
+                    const isDl = !isPaused &&
+                        !queuePaused &&
+                        (bps > 10000 || (overview.bIsDownloading === true && bps > 0));
                     const updatedInfo = {
                         is_downloading: isDl,
-                        bytes_per_second: bps,
+                        is_paused: isPaused || queuePaused,
+                        bytes_per_second: isDl ? bps : 0,
                         total_bytes: totalBytes,
                         completed_bytes: completedBytes,
                         progress_percent: percent,
                         game_title: gameTitle || "Steam Download",
-                        estimated_seconds_remaining: etaSeconds,
+                        estimated_seconds_remaining: isDl ? etaSeconds : 0,
                     };
                     sharedDownloadInfo = updatedInfo;
                     notifyStateListeners();
@@ -903,7 +951,10 @@ var index = definePlugin(() => {
         if (window.SteamClient?.System?.RegisterForOnSuspendRequest) {
             const reg = window.SteamClient.System.RegisterForOnSuspendRequest(async () => {
                 console.log("[DownloadInBackground] SteamClient Suspend Request event received!");
+                // Always refresh download status immediately before making suspend decision
+                await querySteamDownloads();
                 if (sharedSettings.enabled && sharedDownloadInfo.is_downloading) {
+                    console.log("[DownloadInBackground] Active download running -> Intercepting suspend and showing HUD");
                     // Intercept SteamClient suspend!
                     // Trigger overlay HUD countdown
                     window.dispatchEvent(new CustomEvent("decky_event_on_suspend_intercepted", {
@@ -914,7 +965,8 @@ var index = definePlugin(() => {
                     }));
                     return false; // Prevent suspend in SteamClient
                 }
-                return true; // Allow suspend
+                console.log("[DownloadInBackground] Download is paused or idle -> Allowing normal Steam suspend without intercepting.");
+                return true; // Allow suspend immediately
             });
             if (reg && typeof reg.unregister === "function") {
                 suspendUnregister = reg.unregister;
