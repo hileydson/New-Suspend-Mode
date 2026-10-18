@@ -11,6 +11,7 @@ import asyncio
 import logging
 import threading
 import subprocess
+import shutil
 from typing import Dict, Any, Optional, List, Set, Tuple
 
 # Setup Decky compatibility
@@ -37,8 +38,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "min_battery_threshold": 15,
     "hud_timeout_seconds": 5,
     "auto_suspend_delay_seconds": 120,
-    "throttle_cpu": False,
-    "throttle_gpu": False,
+    "throttle_cpu": True,
+    "throttle_gpu": True,
     "mute_audio": True,
     "turn_off_backlight": True,
     "oled_black_screen": True,
@@ -268,9 +269,17 @@ class Plugin:
         self.settings_file: str = ""
         self.is_background_mode: bool = False
         self.saved_brightness: Dict[str, int] = {}
+        self.saved_platform_profile: Optional[str] = None
+        self.saved_asus_thermal: Optional[str] = None
         self.saved_power_profile: Optional[str] = None
+        self.saved_cpu_freqs: Dict[str, str] = {}
         self.saved_cpu_governors: Dict[str, str] = {}
-        self.saved_gpu_dpm: Optional[str] = None
+        self.saved_cpu_epp: Dict[str, str] = {}
+        self.saved_gpu_dpm: Dict[str, str] = {}
+        self.saved_leds: Dict[str, str] = {}
+        self.offlined_cpus: List[str] = []
+        self.grabbed_gamepad_fds: Dict[str, int] = {}
+        self.power_device_paths: Set[str] = set()
 
         self.inhibitor_proc: Optional[subprocess.Popen] = None
         self.power_button_thread: Optional[threading.Thread] = None
@@ -741,6 +750,7 @@ class Plugin:
             fds = []
             grabbed_fds = set()
             for path, name, should_grab in devices:
+                self.power_device_paths.add(path)
                 try:
                     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
                     if should_grab:
@@ -825,14 +835,140 @@ class Plugin:
             if self.loop and self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(self.trigger_suspend(), self.loop)
 
+    def _is_power_or_sleep_device(self, path: str) -> bool:
+        if path in self.power_device_paths:
+            return True
+        try:
+            with open(path, "rb") as f:
+                buf = bytearray(96)
+                fcntl.ioctl(f.fileno(), 0x80604521, buf)  # EVIOCGBIT(EV_KEY, 96)
+                has_power = bool(buf[14] & (1 << 4))
+                has_sleep = bool(buf[17] & (1 << 6))
+                if has_power or has_sleep:
+                    self.power_device_paths.add(path)
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _grab_all_gamepad_inputs(self):
+        """
+        Exclusively grabs ALL non-power input devices (/dev/input/event*) using EVIOCGRAB.
+        This blocks Steam, Gamescope, and OS from receiving any gamepad, button, trigger,
+        touchscreen, or joystick inputs while in Background Download Mode.
+        The device feels completely asleep and won't wake up or show menus when buttons are pressed.
+        """
+        EVIOCGRAB = 0x40044590
+        count = 0
+        for path in sorted(glob.glob("/dev/input/event*")):
+            if path in self.grabbed_gamepad_fds or self._is_power_or_sleep_device(path):
+                continue
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+                try:
+                    fcntl.ioctl(fd, EVIOCGRAB, 1)
+                    self.grabbed_gamepad_fds[path] = fd
+                    count += 1
+                except Exception:
+                    os.close(fd)
+            except Exception:
+                pass
+        if count > 0:
+            logger.info(f"Exclusively grabbed {count} gamepad/button input devices (lockout active).")
+
+    def _release_all_gamepad_inputs(self):
+        """
+        Releases all grabbed input devices so gamepad, touchscreen, and buttons
+        immediately regain normal control upon waking up.
+        """
+        EVIOCGRAB = 0x40044590
+        released_count = len(self.grabbed_gamepad_fds)
+        for path, fd in list(self.grabbed_gamepad_fds.items()):
+            try:
+                # Flush any pending events while grabbed so they don't fire on wake
+                try:
+                    while os.read(fd, 1024):
+                        pass
+                except (BlockingIOError, OSError):
+                    pass
+                fcntl.ioctl(fd, EVIOCGRAB, 0)
+            except Exception:
+                pass
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        self.grabbed_gamepad_fds.clear()
+        if released_count > 0:
+            logger.info(f"Released {released_count} input devices (gamepad controls fully restored).")
+
     # ==========================================
     # Power Saving & Screen Control
     # ==========================================
+    def _set_audio_mute(self, mute: bool):
+        val = "1" if mute else "0"
+        amixer_arg = "mute" if mute else "unmute"
+        # 1. ALSA hardware master mute (works directly at hardware level)
+        try:
+            subprocess.run(["amixer", "-q", "set", "Master", amixer_arg], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+        # 2. PipeWire & PulseAudio per-user session sockets
+        for uid_dir in glob.glob("/run/user/*"):
+            if os.path.basename(uid_dir).isdigit():
+                env = os.environ.copy()
+                env["XDG_RUNTIME_DIR"] = uid_dir
+                try:
+                    subprocess.run(
+                        ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", val],
+                        env=env,
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    subprocess.run(
+                        ["pactl", "set-sink-mute", "@DEFAULT_SINK@", val],
+                        env=env,
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    pass
+
+    def _set_gamescope_display(self, sleep: bool):
+        arg = "1" if sleep else "0"
+        bool_arg = "true" if sleep else "false"
+        for uid_dir in glob.glob("/run/user/*"):
+            if os.path.basename(uid_dir).isdigit():
+                env = os.environ.copy()
+                env["XDG_RUNTIME_DIR"] = uid_dir
+                for cmd in ["gamescopectl", "/usr/bin/gamescopectl", "/usr/local/bin/gamescopectl"]:
+                    try:
+                        subprocess.run(
+                            [cmd, "drm_sleep_internal_screen", arg],
+                            env=env,
+                            check=False,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        subprocess.run(
+                            [cmd, "drm_sleep_internal_screen", bool_arg],
+                            env=env,
+                            check=False,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except Exception:
+                        pass
+
     def _apply_power_saving_and_screen_off(self):
+        logger.info("Applying smart suspend power saving and screen off...")
+
         # 1. Turn off backlight: prioritize amdgpu_bl* on ROG Ally / Steam Deck
         if self.settings.get("turn_off_backlight", True):
             backlight_dirs = glob.glob("/sys/class/backlight/*")
-            # Sort amdgpu_bl first
             backlight_dirs.sort(key=lambda p: 0 if "amdgpu" in p else 1)
 
             for bdir in backlight_dirs:
@@ -856,14 +992,25 @@ class Plugin:
                             f.write("0")
                         logger.info(f"Set backlight {brightness_path} from {curr_b} to 0 (saved {self.saved_brightness[brightness_path]}).")
                     except Exception as e:
-                        logger.error(f"Failed to turn off backlight on {brightness_path}: {e}")
+                        try:
+                            subprocess.run(["sudo", "sh", "-c", f"echo 0 > '{brightness_path}'"], check=False)
+                        except Exception:
+                            pass
 
                 if os.path.exists(bl_power_path):
                     try:
+                        # FB_BLANK_POWERDOWN = 4 (completely shuts down backlight power on LCD/IPS panels)
                         with open(bl_power_path, "w") as f:
-                            f.write("1")
-                    except Exception:
-                        pass
+                            f.write("4")
+                        logger.info(f"Set bl_power {bl_power_path} to 4 (FB_BLANK_POWERDOWN).")
+                    except Exception as e:
+                        try:
+                            subprocess.run(["sudo", "sh", "-c", f"echo 4 > '{bl_power_path}'"], check=False)
+                        except Exception:
+                            pass
+
+            # Also try gamescopectl to put the internal screen to sleep via Gamescope DRM
+            self._set_gamescope_display(sleep=True)
 
             # Also try brightnessctl if installed
             try:
@@ -871,32 +1018,147 @@ class Plugin:
             except Exception:
                 pass
 
-        # 2. Keep CPU governor on schedutil/balanced so download speeds and TLS/decompression stay fast
-        # Note: We intentionally avoid pinning CPU to 'powersave' (400MHz) to keep Wi-Fi and Steam downloads at full speed.
-
-        # 3. AMD GPU DPM clock level
-        if self.settings.get("throttle_gpu", True):
-            dpm_path = "/sys/class/drm/card0/device/power_dpm_force_performance_level"
-            if os.path.exists(dpm_path):
+        # 2. CPU Power Profile & Deep Low-Power Throttling (Stops fans, cuts power consumption to ~3W)
+        if self.settings.get("throttle_cpu", True):
+            # A. ACPI platform profile (direct kernel sysfs)
+            profile_file = "/sys/firmware/acpi/platform_profile"
+            choices_file = "/sys/firmware/acpi/platform_profile_choices"
+            if os.path.exists(profile_file):
                 try:
-                    with open(dpm_path, "r") as f:
-                        curr_dpm = f.read().strip()
-                    self.saved_gpu_dpm = curr_dpm
-                    with open(dpm_path, "w") as f:
-                        f.write("low")
+                    with open(profile_file, "r") as f:
+                        self.saved_platform_profile = f.read().strip()
+                    choices = ""
+                    if os.path.exists(choices_file):
+                        with open(choices_file, "r") as cf:
+                            choices = cf.read().strip()
+                    target_choice = "low-power" if "low-power" in choices else ("quiet" if "quiet" in choices else "balanced")
+                    with open(profile_file, "w") as f:
+                        f.write(target_choice)
+                    logger.info(f"Set ACPI platform_profile to {target_choice} (was {self.saved_platform_profile}).")
+                except Exception as e:
+                    logger.debug(f"Direct ACPI platform_profile write failed: {e}")
+
+            # B. ASUS WMI Thermal Policy (0=Normal, 1=Boost, 2=Silent)
+            asus_thermal_file = "/sys/devices/platform/asus-nb-wmi/throttle_thermal_policy"
+            if os.path.exists(asus_thermal_file):
+                try:
+                    with open(asus_thermal_file, "r") as f:
+                        self.saved_asus_thermal = f.read().strip()
+                    with open(asus_thermal_file, "w") as f:
+                        f.write("2")
+                    logger.info("Set ASUS thermal policy to Silent (2).")
                 except Exception:
                     pass
 
-        # 4. Mute Audio
+            # C. powerprofilesctl fallback (if available)
+            if shutil.which("powerprofilesctl"):
+                try:
+                    res = subprocess.run(["powerprofilesctl", "get"], capture_output=True, text=True, check=False)
+                    if res.returncode == 0:
+                        self.saved_power_profile = res.stdout.strip()
+                        subprocess.run(["powerprofilesctl", "set", "power-saver"], check=False)
+                        logger.info(f"Switched platform power profile from {self.saved_power_profile} to power-saver.")
+                except Exception as e:
+                    logger.debug(f"powerprofilesctl failed: {e}")
+
+            # D. Dynamic CPU Core Offlining:
+            # Keep cpu0 and cpu1 online for Steam download I/O; offline all other cores (cpu2..cpu15)
+            # This parks secondary cores into deep C6 sleep, eliminating heat and stopping fans!
+            self.offlined_cpus.clear()
+            candidate_online_files = sorted(
+                glob.glob("/sys/devices/system/cpu/cpu[2-9]/online") +
+                glob.glob("/sys/devices/system/cpu/cpu[1-9][0-9]/online")
+            )
+            for online_file in candidate_online_files:
+                try:
+                    with open(online_file, "r") as f:
+                        status = f.read().strip()
+                    if status == "1":
+                        try:
+                            with open(online_file, "w") as f:
+                                f.write("0")
+                            self.offlined_cpus.append(online_file)
+                        except PermissionError:
+                            subprocess.run(["sudo", "sh", "-c", f"echo 0 > '{online_file}'"], check=False)
+                            self.offlined_cpus.append(online_file)
+                except Exception:
+                    pass
+            if self.offlined_cpus:
+                logger.info(f"Offlined {len(self.offlined_cpus)} secondary CPU cores for deep low-power download.")
+
+            # E. Cap max frequency on remaining online cores (cpu0, cpu1)
+            self.saved_cpu_freqs.clear()
+            for freq_file in glob.glob("/sys/devices/system/cpu/cpu[0-1]/cpufreq/scaling_max_freq"):
+                try:
+                    with open(freq_file, "r") as f:
+                        curr_freq = f.read().strip()
+                    self.saved_cpu_freqs[freq_file] = curr_freq
+                    with open(freq_file, "w") as f:
+                        f.write("1400000")
+                except Exception:
+                    pass
+
+            # F. Set AMD Energy Performance Preference (EPP) to power
+            epp_paths = glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference")
+            for ep in epp_paths:
+                try:
+                    with open(ep, "r") as f:
+                        curr_epp = f.read().strip()
+                    self.saved_cpu_epp[ep] = curr_epp
+                    with open(ep, "w") as f:
+                        f.write("power")
+                except Exception:
+                    pass
+
+        # 3. AMD GPU DPM Clock Level (downclock GPU to minimum power floor)
+        if self.settings.get("throttle_gpu", True):
+            dpm_paths = glob.glob("/sys/class/drm/card*/device/power_dpm_force_performance_level")
+            for dpm_path in dpm_paths:
+                try:
+                    with open(dpm_path, "r") as f:
+                        curr_dpm = f.read().strip()
+                    self.saved_gpu_dpm[dpm_path] = curr_dpm
+                    try:
+                        with open(dpm_path, "w") as f:
+                            f.write("low")
+                    except PermissionError:
+                        subprocess.run(["sudo", "sh", "-c", f"echo low > '{dpm_path}'"], check=False)
+                    logger.info(f"Throttled GPU clock {dpm_path} to low (was {curr_dpm}).")
+                except Exception as e:
+                    logger.error(f"Failed to throttle GPU on {dpm_path}: {e}")
+
+        # 4. Mute Audio (Hardware ALSA Master & PipeWire)
         if self.settings.get("mute_audio", True):
+            self._set_audio_mute(True)
+
+        # 5. LEDs / Gamepad Stick RGB Rings / Keyboard Backlight
+        led_paths = glob.glob("/sys/class/leds/*/brightness")
+        for lp in led_paths:
+            lower_lp = lp.lower()
+            if "bat" in lower_lp or "charge" in lower_lp or "power" in lower_lp:
+                continue
             try:
-                subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "1"], check=False)
-                subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "1"], check=False)
+                with open(lp, "r") as f:
+                    curr_led = f.read().strip()
+                if curr_led != "0":
+                    self.saved_leds[lp] = curr_led
+                    try:
+                        with open(lp, "w") as f:
+                            f.write("0")
+                    except PermissionError:
+                        subprocess.run(["sudo", "sh", "-c", f"echo 0 > '{lp}'"], check=False)
             except Exception:
                 pass
 
+        # 6. Exclusive Gamepad & Button Lockout (EVIOCGRAB on all controllers)
+        # Prevents any button, trigger, joystick, or touch from waking the display or triggering menus!
+        self._grab_all_gamepad_inputs()
+
     def _restore_system_power_and_display(self):
         logger.info("Restoring system power and display settings...")
+
+        # 0. Release all gamepad & button locks FIRST so controls respond immediately
+        self._release_all_gamepad_inputs()
 
         # 1. Restore Backlight
         for brightness_path, val in list(self.saved_brightness.items()):
@@ -934,7 +1196,10 @@ class Plugin:
                         with open(bl_power_path, "w") as pf:
                             pf.write("0")
                     except Exception:
-                        pass
+                        try:
+                            subprocess.run(["sudo", "sh", "-c", f"echo 0 > '{bl_power_path}'"], check=False)
+                        except Exception:
+                            pass
 
                 brightness_path = os.path.join(bdir, "brightness")
                 max_b_path = os.path.join(bdir, "max_brightness")
@@ -949,49 +1214,112 @@ class Plugin:
             except Exception:
                 pass
 
+        # Wake up internal display via Gamescope
+        self._set_gamescope_display(sleep=False)
+
         # Fallback restore via brightnessctl
         try:
             subprocess.run(["brightnessctl", "set", "60%"], capture_output=True, check=False)
         except Exception:
             pass
 
-        # 2. Restore Power Profile / CPU Governor
-        target_profile = self.saved_power_profile if self.saved_power_profile and self.saved_power_profile != "power-saver" else "balanced"
-        try:
-            subprocess.run(["powerprofilesctl", "set", target_profile], check=False)
-        except Exception:
-            pass
+        # 2. Restore CPU Cores & Power Profiles
+        # A. Restore offlined CPU cores
+        for online_file in self.offlined_cpus:
+            try:
+                try:
+                    with open(online_file, "w") as f:
+                        f.write("1")
+                except PermissionError:
+                    subprocess.run(["sudo", "sh", "-c", f"echo 1 > '{online_file}'"], check=False)
+            except Exception:
+                pass
+        if self.offlined_cpus:
+            logger.info(f"Restored {len(self.offlined_cpus)} offlined CPU cores to online state.")
+        self.offlined_cpus.clear()
+
+        # B. Restore CPU max frequencies
+        for freq_file, orig_freq in list(self.saved_cpu_freqs.items()):
+            try:
+                if os.path.exists(freq_file):
+                    with open(freq_file, "w") as f:
+                        f.write(orig_freq)
+            except Exception:
+                pass
+        self.saved_cpu_freqs.clear()
+
+        # C. Restore ACPI platform profile
+        if self.saved_platform_profile and os.path.exists("/sys/firmware/acpi/platform_profile"):
+            try:
+                with open("/sys/firmware/acpi/platform_profile", "w") as f:
+                    f.write(self.saved_platform_profile)
+                logger.info(f"Restored ACPI platform_profile to {self.saved_platform_profile}.")
+            except Exception:
+                pass
+        self.saved_platform_profile = None
+
+        # D. Restore ASUS thermal policy
+        if self.saved_asus_thermal and os.path.exists("/sys/devices/platform/asus-nb-wmi/throttle_thermal_policy"):
+            try:
+                with open("/sys/devices/platform/asus-nb-wmi/throttle_thermal_policy", "w") as f:
+                    f.write(self.saved_asus_thermal)
+                logger.info(f"Restored ASUS thermal policy to {self.saved_asus_thermal}.")
+            except Exception:
+                pass
+        self.saved_asus_thermal = None
+
+        # E. Restore powerprofilesctl (if installed)
+        if shutil.which("powerprofilesctl"):
+            target_profile = self.saved_power_profile if self.saved_power_profile and self.saved_power_profile != "power-saver" else "balanced"
+            try:
+                subprocess.run(["powerprofilesctl", "set", target_profile], check=False)
+                logger.info(f"Restored platform power profile to {target_profile}.")
+            except Exception:
+                pass
         self.saved_power_profile = None
 
-        gov_paths = glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor")
-        for gp in gov_paths:
+        # F. Restore CPU EPP
+        for ep, orig_epp in list(self.saved_cpu_epp.items()):
             try:
-                gov = self.saved_cpu_governors.get(gp, "schedutil")
-                if gov == "powersave":
-                    gov = "schedutil"
-                with open(gp, "w") as f:
-                    f.write(gov)
+                if os.path.exists(ep):
+                    target_epp = orig_epp if orig_epp and orig_epp != "power" else "balance_performance"
+                    with open(ep, "w") as f:
+                        f.write(target_epp)
             except Exception:
                 pass
-        self.saved_cpu_governors.clear()
+        self.saved_cpu_epp.clear()
 
-        # 3. Restore GPU DPM
-        dpm_path = "/sys/class/drm/card0/device/power_dpm_force_performance_level"
-        if os.path.exists(dpm_path):
+        # 3. Restore GPU DPM across all cards
+        for dpm_path, orig_dpm in list(self.saved_gpu_dpm.items()):
             try:
-                target_dpm = self.saved_gpu_dpm if self.saved_gpu_dpm and self.saved_gpu_dpm != "low" else "auto"
-                with open(dpm_path, "w") as f:
-                    f.write(target_dpm)
+                if os.path.exists(dpm_path):
+                    target_dpm = orig_dpm if orig_dpm and orig_dpm != "low" else "auto"
+                    try:
+                        with open(dpm_path, "w") as f:
+                            f.write(target_dpm)
+                    except PermissionError:
+                        subprocess.run(["sudo", "sh", "-c", f"echo '{target_dpm}' > '{dpm_path}'"], check=False)
+                    logger.info(f"Restored GPU performance level on {dpm_path} to {target_dpm}.")
+            except Exception as e:
+                logger.error(f"Failed to restore GPU on {dpm_path}: {e}")
+        self.saved_gpu_dpm.clear()
+
+        # 4. Unmute Audio (Hardware ALSA Master & PipeWire)
+        if self.settings.get("mute_audio", True):
+            self._set_audio_mute(False)
+
+        # 5. Restore LEDs
+        for lp, orig_val in list(self.saved_leds.items()):
+            try:
+                if os.path.exists(lp):
+                    try:
+                        with open(lp, "w") as f:
+                            f.write(orig_val)
+                    except PermissionError:
+                        subprocess.run(["sudo", "sh", "-c", f"echo '{orig_val}' > '{lp}'"], check=False)
             except Exception:
                 pass
-        self.saved_gpu_dpm = None
-
-        # 4. Unmute Audio
-        try:
-            subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"], check=False)
-            subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "0"], check=False)
-        except Exception:
-            pass
+        self.saved_leds.clear()
 
     # ==========================================
     # Background Mode Transitions
@@ -1116,6 +1444,27 @@ class Plugin:
 
                 # 2. In Background Mode Checks
                 if self.is_background_mode:
+                    # Enforce screen backlight off and maintain gamepad lockout
+                    if self.settings.get("turn_off_backlight", True):
+                        for bdir in glob.glob("/sys/class/backlight/*"):
+                            bp = os.path.join(bdir, "brightness")
+                            bpow = os.path.join(bdir, "bl_power")
+                            try:
+                                with open(bp, "r") as f:
+                                    if int(f.read().strip()) > 0:
+                                        with open(bp, "w") as wf:
+                                            wf.write("0")
+                            except Exception:
+                                pass
+                            try:
+                                with open(bpow, "r") as pf:
+                                    if pf.read().strip() != "4":
+                                        with open(bpow, "w") as pwf:
+                                            pwf.write("4")
+                            except Exception:
+                                pass
+                    self._grab_all_gamepad_inputs()
+
                     bat = self._get_battery_info()
 
                     # Condition A: Low battery auto-suspend

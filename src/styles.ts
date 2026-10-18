@@ -21,6 +21,8 @@ export const PLUGIN_STYLES = `
 .dib-overlay-blackout {
   background-color: #000000 !important;
   cursor: none;
+  pointer-events: all;
+  touch-action: none;
 }
 
 /* HUD Mode: Dark glassmorphic overlay */

@@ -199,6 +199,8 @@ const PLUGIN_STYLES = `
 .dib-overlay-blackout {
   background-color: #000000 !important;
   cursor: none;
+  pointer-events: all;
+  touch-action: none;
 }
 
 /* HUD Mode: Dark glassmorphic overlay */
@@ -597,6 +599,24 @@ const GlobalOverlayContainer = () => {
             stateListeners.delete(update);
         };
     }, []);
+    // Intercept and swallow keyboard/gamepad navigation while in background mode
+    SP_REACT.useEffect(() => {
+        if (!sharedIsBackgroundMode)
+            return;
+        const blockInput = (e) => {
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            e.preventDefault();
+        };
+        window.addEventListener("keydown", blockInput, true);
+        window.addEventListener("keyup", blockInput, true);
+        window.addEventListener("keypress", blockInput, true);
+        return () => {
+            window.removeEventListener("keydown", blockInput, true);
+            window.removeEventListener("keyup", blockInput, true);
+            window.removeEventListener("keypress", blockInput, true);
+        };
+    }, [sharedIsBackgroundMode]);
     // CRITICAL: If NOT in background mode and NOT showing HUD: DO NOT RENDER ANYTHING!
     // This guarantees that once awakened, the black div is 100% UNMOUNTED from the DOM.
     if (!sharedIsBackgroundMode && !sharedShowHud) {
