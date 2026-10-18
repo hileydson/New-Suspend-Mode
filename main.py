@@ -283,6 +283,7 @@ class Plugin:
         self.offlined_cpus: List[str] = []
         self.grabbed_gamepad_fds: Dict[str, int] = {}
         self.power_device_paths: Set[str] = set()
+        self.unbound_hid_devices: List[Tuple[str, str]] = []
 
         self.inhibitor_proc: Optional[subprocess.Popen] = None
         self.power_button_thread: Optional[threading.Thread] = None
@@ -904,7 +905,8 @@ class Plugin:
                 if not args:
                     continue
                 exe = os.path.basename(args[0])
-                script = os.path.basename(args[1]) if len(args) > 1 else ""
+                # First non-flag argument after the interpreter (handles 'python3 -sP /usr/bin/hhd')
+                script = next((os.path.basename(a) for a in args[1:] if not a.startswith("-")), "")
                 if exe == daemon or (exe.startswith("python") and script == daemon):
                     pids.append(pid)
             except Exception:
@@ -928,7 +930,7 @@ class Plugin:
         for daemon in ["inputplumber", "hhd"]:
             try:
                 pids = self._signal_daemon(daemon, signal.SIGSTOP)
-                subprocess.run(["systemctl", "freeze", f"{daemon}.service"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0)
+                subprocess.run(["systemctl", "freeze", f"{daemon}.service", f"{daemon}@*.service"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0)
                 logger.info(f"[DBG] Paused daemon {daemon} pids={pids}")
             except Exception as e:
                 logger.warning(f"[DBG] Pause daemon {daemon} failed: {e}")
@@ -940,7 +942,7 @@ class Plugin:
         """
         for daemon in ["inputplumber", "hhd"]:
             try:
-                subprocess.run(["systemctl", "thaw", f"{daemon}.service"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0)
+                subprocess.run(["systemctl", "thaw", f"{daemon}.service", f"{daemon}@*.service"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0)
                 pids = self._signal_daemon(daemon, signal.SIGCONT)
                 logger.info(f"[DBG] Resumed daemon {daemon} pids={pids}")
             except Exception as e:
@@ -1009,42 +1011,88 @@ class Plugin:
         """
         Exclusively grabs gamepad/controller input devices (/dev/input/event*) using EVIOCGRAB,
         and pauses controller mapping daemons.
-        Explicitly excludes any device with KEY_POWER or KEY_SLEEP to ensure hardware power wake is never blocked.
+        Only the real power/sleep button devices are excluded so the hardware power wake is never blocked.
         """
         self._pause_controller_daemons()
-        # Ensure power devices are updated before grabbing
-        power_devs = self._find_power_sleep_devices()
-        for p, _, _ in power_devs:
-            self.power_device_paths.add(p)
+        # Only true power/sleep buttons (e.g. ACPI 'Power Button') are excluded; keyboards and controller
+        # HID interfaces also declare KEY_POWER and MUST be grabbed, otherwise their buttons keep working.
+        for p, name, _ in self._find_power_sleep_devices():
+            name_lower = name.lower()
+            if "power button" in name_lower or "sleep button" in name_lower:
+                self.power_device_paths.add(p)
+        logger.info(f"[DBG] Power devices kept ungrabbed: {sorted(self.power_device_paths)}")
 
         EVIOCGRAB = 0x40044590
         count = 0
         for path in sorted(glob.glob("/dev/input/event*")):
             if path in self.grabbed_gamepad_fds or path in self.power_device_paths:
                 continue
-            # Double check with ioctl before grabbing to never grab a power key device
-            try:
-                with open(path, "rb") as f:
-                    buf = bytearray(96)
-                    fcntl.ioctl(f.fileno(), 0x80604521, buf)  # EVIOCGBIT(EV_KEY, 96)
-                    if bool(buf[14] & (1 << 4)) or bool(buf[17] & (1 << 6)):
-                        self.power_device_paths.add(path)
-                        continue
-            except Exception:
-                pass
-
+            name = self._get_input_name(path)
             try:
                 fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
                 try:
                     fcntl.ioctl(fd, EVIOCGRAB, 1)
                     self.grabbed_gamepad_fds[path] = fd
                     count += 1
-                except Exception:
+                    logger.info(f"[DBG] Grabbed {path} ({name})")
+                except Exception as ge:
                     os.close(fd)
-            except Exception:
-                pass
+                    logger.info(f"[DBG] Could not grab {path} ({name}): {ge}")
+            except Exception as oe:
+                logger.info(f"[DBG] Could not open {path} ({name}): {oe}")
         if count > 0:
             logger.info(f"Exclusively grabbed {count} gamepad/button input devices (lockout active).")
+
+        # Steam reads USB/Bluetooth controllers through hidraw, which EVIOCGRAB does not block.
+        self._unbind_external_gamepads()
+
+    def _get_input_name(self, path: str) -> str:
+        try:
+            with open(path, "rb") as f:
+                name_buf = bytearray(256)
+                fcntl.ioctl(f.fileno(), 0x82004506, name_buf)  # EVIOCGNAME(256)
+                return name_buf.split(b"\x00")[0].decode("utf-8", errors="ignore")
+        except Exception:
+            return "Unknown Device"
+
+    def _unbind_external_gamepads(self):
+        """
+        Detaches external USB/Bluetooth gamepads from their HID driver (removes evdev + hidraw nodes),
+        so neither Steam nor games can receive their buttons. Built-in handheld controllers and
+        virtual (uhid) devices from InputPlumber/HHD are left alone (those daemons are frozen instead).
+        """
+        internal_vendors = {"0B05", "28DE", "17EF"}  # ASUS ROG Ally, Valve Steam Deck, Lenovo Legion Go
+        for dev in sorted(glob.glob("/sys/bus/hid/devices/*")):
+            try:
+                dev_id = os.path.basename(dev)
+                parts = dev_id.split(":")
+                if len(parts) < 3:
+                    continue
+                bus, vendor = parts[0].upper(), parts[1].upper()
+                if bus not in ("0003", "0005") or vendor in internal_vendors:
+                    continue
+                if "uhid" in os.path.realpath(dev):
+                    continue
+                if not glob.glob(os.path.join(dev, "input", "input*", "js*")):
+                    continue  # Not a gamepad/joystick
+                driver_link = os.path.join(dev, "driver")
+                if not os.path.exists(driver_link):
+                    continue
+                driver = os.path.basename(os.path.realpath(driver_link))
+                ok = self._write_sysfs(f"/sys/bus/hid/drivers/{driver}/unbind", dev_id)
+                if ok:
+                    self.unbound_hid_devices.append((driver, dev_id))
+                logger.info(f"[DBG] Unbind external gamepad {dev_id} from {driver}: {'ok' if ok else 'failed'}")
+            except Exception as e:
+                logger.warning(f"[DBG] Error unbinding HID device {dev}: {e}")
+
+    def _rebind_external_gamepads(self):
+        for driver, dev_id in list(self.unbound_hid_devices):
+            ok = self._write_sysfs(f"/sys/bus/hid/drivers/{driver}/bind", dev_id)
+            if not ok:
+                ok = self._write_sysfs("/sys/bus/hid/drivers_probe", dev_id)
+            logger.info(f"[DBG] Rebind external gamepad {dev_id} to {driver}: {'ok' if ok else 'failed'}")
+        self.unbound_hid_devices.clear()
 
     def _release_all_gamepad_inputs(self):
         """
@@ -1070,6 +1118,7 @@ class Plugin:
                 pass
         self.grabbed_gamepad_fds.clear()
         self._resume_controller_daemons()
+        self._rebind_external_gamepads()
         if released_count > 0:
             logger.info(f"Released {released_count} input devices (gamepad controls fully restored).")
 
