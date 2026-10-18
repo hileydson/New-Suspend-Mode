@@ -2,12 +2,13 @@ export interface PluginSettings {
   enabled: boolean;
   min_battery_threshold: number; // default 15
   hud_timeout_seconds: number; // default 5
-  auto_suspend_delay_seconds: number; // default 15
+  auto_suspend_delay_seconds: number; // default 120
   throttle_cpu: boolean; // default true
   throttle_gpu: boolean; // default true
   mute_audio: boolean; // default true
   turn_off_backlight: boolean; // default true
   oled_black_screen: boolean; // default true
+  deep_input_lockout: boolean; // default true
 }
 
 export interface DownloadInfo {
@@ -28,7 +29,8 @@ export interface SystemStatus {
   is_charging: boolean;
   power_plugged: boolean;
   inhibitor_active: boolean;
-  backlight_saved: number | null;
+  plugin_active?: boolean;
+  backlight_saved?: number | null;
   settings: PluginSettings;
   download_info: DownloadInfo;
 }

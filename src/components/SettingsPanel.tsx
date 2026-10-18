@@ -185,12 +185,21 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
             label="Completion Suspend Delay"
             description="Seconds to wait after all downloads complete before automatically sleeping."
             value={settings.auto_suspend_delay_seconds}
-            min={5}
-            max={60}
-            step={5}
+            min={30}
+            max={600}
+            step={30}
             showValue
             valueSuffix="s"
             onChange={(val) => updateSetting("auto_suspend_delay_seconds", val)}
+          />
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <ToggleField
+            label="Block All Input While Screen Is Off"
+            description="Freezes button mapping and disconnects external controllers so only the power button responds. Turn off if a controller misbehaves after waking."
+            checked={settings.deep_input_lockout}
+            onChange={(checked) => updateSetting("deep_input_lockout", checked)}
           />
         </PanelSectionRow>
       </PanelSection>

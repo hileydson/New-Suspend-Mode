@@ -44,6 +44,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "mute_audio": True,
     "turn_off_backlight": True,
     "oled_black_screen": True,
+    "deep_input_lockout": True,
 }
 
 INPUT_EVENT_FORMAT = "qqHHi"
@@ -51,6 +52,36 @@ INPUT_EVENT_SIZE = struct.calcsize(INPUT_EVENT_FORMAT)
 EV_KEY = 1
 KEY_POWER = 116
 KEY_SLEEP = 142
+EVIOCGRAB = 0x40044590
+
+# Monitor loop cadence. While nothing is downloading the plugin must stay as close
+# to a no-op as possible, so it polls slowly and never touches the system.
+ACTIVE_LOOP_INTERVAL = 2.0
+IDLE_LOOP_INTERVAL = 6.0
+DISABLED_LOOP_INTERVAL = 10.0
+
+# Seconds during which suspend/power events are ignored right after a wake, so the
+# key press (or logind event) that woke the console cannot put it straight back to sleep.
+WAKE_COOLDOWN_SECONDS = 5.0
+
+# Grace periods after entering background mode, before power/logind events count as a wake.
+POWER_KEY_GRACE_SECONDS = 2.5
+LOGIND_GRACE_SECONDS = 5.0
+
+# Linux scheduling policies that leave a process starved of CPU time.
+SCHED_BATCH = 3
+SCHED_IDLE = 5
+
+# Processes whose sluggishness is immediately visible in Gaming Mode. Used to undo
+# idle-priority scheduling that older versions of this plugin applied to Steam.
+# Gamescope is deliberately absent: it was always excluded from that throttling, so it
+# has nothing to repair, and its scheduling class is not something to touch on a wake.
+STEAM_UI_COMMS = {
+    "steam",
+    "steamwebhelper",
+    "reaper",
+    "steam_monitor",
+}
 
 
 class SteamDownloadDetector:
@@ -62,9 +93,13 @@ class SteamDownloadDetector:
         self.cached_libraries: List[str] = []
         self.last_lib_scan: float = 0
         self.last_net_bytes: int = 0
-        self.last_net_time: float = time.time()
+        self.last_net_time: float = 0.0
+        self.last_net_rate: float = 0.0
         self.last_completed_bytes: int = 0
         self.last_dl_calc_time: float = time.time()
+        # appmanifest path -> (mtime_ns, parsed fields). Steam rewrites a manifest
+        # while it downloads, so the mtime alone tells us when a re-read is needed.
+        self.manifest_cache: Dict[str, Tuple[int, Optional[Dict[str, Any]]]] = {}
 
     def get_library_paths(self) -> List[str]:
         now = time.time()
@@ -106,8 +141,18 @@ class SteamDownloadDetector:
         self.last_lib_scan = now
         return self.cached_libraries
 
-    def get_network_rx_rate(self) -> float:
-        """Reads real received bytes per second across all non-lo network interfaces."""
+    def get_network_rx_rate(self, min_sample_age: float = 0.5) -> float:
+        """
+        Reads real received bytes per second across all non-lo network interfaces.
+
+        Calls made less than min_sample_age apart return the previous result instead of
+        re-sampling: two samples taken milliseconds apart always read as ~0 B/s, which
+        used to make the plugin believe an active download had stopped.
+        """
+        now = time.time()
+        if (now - self.last_net_time) < min_sample_age:
+            return self.last_net_rate
+
         curr_bytes = 0
         try:
             with open("/proc/net/dev", "r") as f:
@@ -121,7 +166,6 @@ class SteamDownloadDetector:
         except Exception:
             pass
 
-        now = time.time()
         dt = max(0.1, now - self.last_net_time)
         bps = 0.0
         if self.last_net_bytes > 0 and curr_bytes >= self.last_net_bytes:
@@ -129,6 +173,7 @@ class SteamDownloadDetector:
 
         self.last_net_bytes = curr_bytes
         self.last_net_time = now
+        self.last_net_rate = bps
         return bps
 
     def _has_recent_download_writes(self, libs: List[str], max_age_seconds: float = 6.0) -> bool:
@@ -157,57 +202,90 @@ class SteamDownloadDetector:
                 pass
         return False
 
+    def _read_manifest(self, path: str) -> Optional[Dict[str, Any]]:
+        """Parses an appmanifest, reusing the cached result while its mtime is unchanged."""
+        try:
+            mtime_ns = os.stat(path).st_mtime_ns
+        except OSError:
+            self.manifest_cache.pop(path, None)
+            return None
+
+        cached = self.manifest_cache.get(path)
+        if cached is not None and cached[0] == mtime_ns:
+            return cached[1]
+
+        parsed: Optional[Dict[str, Any]] = None
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                txt = f.read()
+
+            state_m = re.search(r"\"StateFlags\"\s*\"(\d+)\"", txt)
+            if state_m:
+                name_m = re.search(r"\"name\"\s*\"([^\"]+)\"", txt)
+                dl_m = re.search(r"\"BytesDownloaded\"\s*\"(\d+)\"", txt)
+                tot_m = re.search(r"\"BytesToDownload\"\s*\"(\d+)\"", txt)
+
+                b_dl = int(dl_m.group(1)) if dl_m else 0
+                b_tot = int(tot_m.group(1)) if tot_m else 0
+                parsed = {
+                    "state": int(state_m.group(1)),
+                    "game_title": name_m.group(1) if name_m else "Steam Download",
+                    "completed_bytes": b_dl,
+                    "total_bytes": b_tot,
+                    "progress_percent": (b_dl / b_tot * 100) if b_tot > 0 else 0,
+                }
+        except Exception:
+            parsed = None
+
+        self.manifest_cache[path] = (mtime_ns, parsed)
+        return parsed
+
     def detect(self) -> Dict[str, Any]:
         libs = self.get_library_paths()
         active_candidates: List[Dict[str, Any]] = []
         paused_candidates: List[Dict[str, Any]] = []
+        seen_manifests: Set[str] = set()
 
         # Check appmanifest files in all libraries
         for sa in libs:
-            manifests = glob.glob(os.path.join(sa, "appmanifest_*.acf"))
-            for mf in manifests:
-                try:
-                    with open(mf, "r", encoding="utf-8", errors="ignore") as f:
-                        txt = f.read()
+            for mf in glob.glob(os.path.join(sa, "appmanifest_*.acf")):
+                seen_manifests.add(mf)
+                parsed = self._read_manifest(mf)
+                if not parsed:
+                    continue
 
-                    state_m = re.search(r"\"StateFlags\"\s*\"(\d+)\"", txt)
-                    if not state_m:
-                        continue
-                    state = int(state_m.group(1))
+                state = parsed["state"]
+                cand = {
+                    "game_title": parsed["game_title"],
+                    "completed_bytes": parsed["completed_bytes"],
+                    "total_bytes": parsed["total_bytes"],
+                    "progress_percent": parsed["progress_percent"],
+                }
 
-                    name_m = re.search(r"\"name\"\s*\"([^\"]+)\"", txt)
-                    dl_m = re.search(r"\"BytesDownloaded\"\s*\"(\d+)\"", txt)
-                    tot_m = re.search(r"\"BytesToDownload\"\s*\"(\d+)\"", txt)
+                # StateFlags:
+                # 512 = StateUpdatePaused
+                # 1048576 = StateUpdateStopping
+                # 1024 = StateUpdateStarted, 256 = StateUpdateRunning, 131072 = StateDownloading, 262144 = StateStaging, 65536 = StatePreallocating
+                is_paused = bool(state & 512)
+                is_stopping = bool(state & 1048576)
+                is_updating = bool((state & 1024) or (state & 256) or (state & 131072) or (state & 262144) or (state & 65536))
 
-                    name = name_m.group(1) if name_m else "Steam Download"
-                    b_dl = int(dl_m.group(1)) if dl_m else 0
-                    b_tot = int(tot_m.group(1)) if tot_m else 0
-                    pct = (b_dl / b_tot * 100) if b_tot > 0 else 0
+                if is_paused or is_stopping:
+                    paused_candidates.append(cand)
+                elif is_updating:
+                    active_candidates.append(cand)
 
-                    cand = {
-                        "game_title": name,
-                        "completed_bytes": b_dl,
-                        "total_bytes": b_tot,
-                        "progress_percent": pct,
-                    }
-
-                    # StateFlags:
-                    # 512 = StateUpdatePaused
-                    # 1048576 = StateUpdateStopping
-                    # 1024 = StateUpdateStarted, 256 = StateUpdateRunning, 131072 = StateDownloading, 262144 = StateStaging, 65536 = StatePreallocating
-                    is_paused = bool(state & 512)
-                    is_stopping = bool(state & 1048576)
-                    is_updating = bool((state & 1024) or (state & 256) or (state & 131072) or (state & 262144) or (state & 65536))
-
-                    if is_paused or is_stopping:
-                        paused_candidates.append(cand)
-                    elif is_updating:
-                        active_candidates.append(cand)
-                except Exception:
-                    pass
+        # Forget manifests for games that were uninstalled or moved to another library
+        for stale in set(self.manifest_cache) - seen_manifests:
+            self.manifest_cache.pop(stale, None)
 
         net_bps = self.get_network_rx_rate()
-        has_recent_writes = self._has_recent_download_writes(libs, max_age_seconds=6.0)
+
+        # Walking steamapps/downloading/ is the only expensive check here, so it only runs
+        # when a manifest or the network already hints that something may be downloading.
+        has_recent_writes = False
+        if active_candidates or paused_candidates or net_bps > 50000:
+            has_recent_writes = self._has_recent_download_writes(libs, max_age_seconds=8.0)
 
         # Case 1: Active updating candidate in manifests
         if active_candidates:
@@ -279,17 +357,29 @@ class Plugin:
         self.saved_gpu_dpm: Dict[str, str] = {}
         self.saved_leds: Dict[str, str] = {}
         self.saved_asus_ppt: Dict[str, str] = {}
-        self.saved_process_niceness: Dict[int, int] = {}
-        self.offlined_cpus: List[str] = []
+        self.saved_fan_boost: Dict[str, str] = {}
+        self.saved_ryzenadj: Optional[Dict[str, int]] = None
         self.grabbed_gamepad_fds: Dict[str, int] = {}
         self.power_device_paths: Set[str] = set()
+        self.power_grabbed_paths: Set[str] = set()
         self.unbound_hid_devices: List[Tuple[str, str]] = []
+        self.frozen_daemons: List[str] = []
+
+        # Only undo what we actually changed, so toggling a setting mid-session can
+        # never leave the console muted, dimmed or stuck on a power profile.
+        self.audio_muted_by_us: bool = False
+        self.power_profile_set_by_us: bool = False
+        self.display_slept_by_us: bool = False
+        self.power_saving_applied: bool = False
 
         self.inhibitor_proc: Optional[subprocess.Popen] = None
         self.power_button_thread: Optional[threading.Thread] = None
         self.logind_watcher_thread: Optional[threading.Thread] = None
         self.stop_threads: bool = False
         self.transition_lock = threading.Lock()
+        self.input_lock = threading.Lock()
+        self.transition_in_progress: bool = False
+        self.suspend_in_progress: bool = False
 
         self.detector = SteamDownloadDetector()
         self.download_info: Dict[str, Any] = {
@@ -307,6 +397,8 @@ class Plugin:
         self.last_suspend_intercept_time: float = 0
         self.wake_cooldown_until: float = 0.0
         self.background_mode_entered_time: float = 0.0
+        self.last_battery_info: Dict[str, Any] = {}
+        self.last_battery_time: float = 0.0
         self.saved_cpu_boost: Optional[str] = None
         self.saved_policy_boost: Dict[str, str] = {}
         self.last_loop_timestamp: float = time.time()
@@ -331,6 +423,17 @@ class Plugin:
         self.stop_threads = False
 
         logger.info("Download in Background plugin started.")
+
+        # 0. Undo anything a previous run (or a crash) may have left behind: masked
+        # sleep targets, frozen controller daemons and Steam processes stuck at idle
+        # scheduling priority all survive a plugin reload and make SteamOS feel broken.
+        self._clear_stale_sleep_masks()
+        if self._controller_daemons_look_frozen():
+            logger.info("Startup repair: controller daemons were left frozen; resuming them.")
+            self._resume_controller_daemons()
+        healed = self._heal_steam_scheduling()
+        if healed:
+            logger.info(f"Startup repair: restored normal scheduling for {healed} Steam process(es).")
 
         # 1. Hardware Power Button Listener Thread
         self.power_button_thread = threading.Thread(
@@ -359,9 +462,14 @@ class Plugin:
             self.monitor_task.cancel()
 
         if self.is_background_mode:
+            self.is_background_mode = False
             self._restore_system_power_and_display()
+        else:
+            # Never leave a device grabbed or a daemon frozen behind.
+            self._release_all_gamepad_inputs()
 
         self._release_sleep_inhibitor()
+        self._clear_stale_sleep_masks()
 
     async def _uninstall(self):
         await self._unload()
@@ -401,19 +509,20 @@ class Plugin:
         self._save_settings_sync()
         logger.info(f"Updated settings: {self.settings}")
 
-        if not self.settings.get("enabled", True):
-            if self.is_background_mode:
-                await self.exit_background_mode("disabled_in_settings")
-            self._release_sleep_inhibitor()
-        else:
-            self._update_inhibitor_state()
+        if not self.settings.get("enabled", True) and self.is_background_mode:
+            await self.exit_background_mode("disabled_in_settings")
 
+        self._update_inhibitor_state()
         return self.settings
 
     # ==========================================
     # Battery & Hardware Status Queries
     # ==========================================
-    def _get_battery_info(self) -> Dict[str, Any]:
+    def _get_battery_info(self, max_age: float = 2.0) -> Dict[str, Any]:
+        now = time.time()
+        if self.last_battery_info and (now - self.last_battery_time) < max_age:
+            return self.last_battery_info
+
         capacity = 100
         is_charging = False
         is_plugged = False
@@ -450,11 +559,13 @@ class Plugin:
                     pass
             break
 
-        return {
+        self.last_battery_info = {
             "capacity": capacity,
             "is_charging": is_charging,
             "is_plugged": is_plugged or is_charging,
         }
+        self.last_battery_time = now
+        return self.last_battery_info
 
     async def get_status(self) -> Dict[str, Any]:
         bat = self._get_battery_info()
@@ -464,6 +575,7 @@ class Plugin:
             "is_charging": bat["is_charging"],
             "power_plugged": bat["is_plugged"],
             "inhibitor_active": self.inhibitor_proc is not None,
+            "plugin_active": self._plugin_should_act(),
             "settings": self.settings,
             "download_info": self.download_info,
         }
@@ -489,39 +601,40 @@ class Plugin:
         return True
 
     # ==========================================
-    # Systemd Inhibitor & Sleep Target Masking Control
+    # Systemd Sleep Inhibitor
     # ==========================================
-    def _mask_sleep_targets(self):
-        try:
-            subprocess.run(
-                ["sudo", "systemctl", "mask", "--runtime", "sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target"],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            logger.info("Masked systemd sleep/suspend targets (runtime).")
-        except Exception as e:
-            logger.error(f"Failed to mask sleep targets: {e}")
+    SLEEP_TARGETS = ("sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target")
 
-    def _unmask_sleep_targets(self):
+    def _clear_stale_sleep_masks(self):
+        """
+        Removes runtime masks on the systemd sleep targets.
+
+        Earlier versions masked these targets to block suspend, which breaks suspend
+        system-wide for as long as the mask stays in place (and survives a plugin crash).
+        A logind 'block' inhibitor does the same job without that risk, so the masks are
+        only ever cleaned up here. Permanent masks made by the user live in /etc and are
+        not touched by --runtime.
+        """
+        stale = [t for t in self.SLEEP_TARGETS if os.path.islink(f"/run/systemd/system/{t}")]
+        if not stale:
+            return
         try:
             subprocess.run(
-                ["sudo", "systemctl", "unmask", "--runtime", "sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target"],
+                ["systemctl", "unmask", "--runtime"] + list(self.SLEEP_TARGETS),
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=10.0,
             )
-            logger.info("Unmasked systemd sleep/suspend targets (runtime).")
+            logger.info(f"Cleared leftover runtime mask on systemd sleep targets: {', '.join(stale)}.")
         except Exception as e:
-            logger.error(f"Failed to unmask sleep targets: {e}")
+            logger.error(f"Failed to clear sleep target masks: {e}")
 
     def _acquire_sleep_inhibitor(self):
-        self._mask_sleep_targets()
         if self.inhibitor_proc is not None:
             return
 
         cmd = [
-            "sudo",
             "systemd-inhibit",
             "--what=sleep:handle-power-key:handle-suspend-key",
             "--who=DownloadInBackground",
@@ -542,7 +655,6 @@ class Plugin:
             self.inhibitor_proc = None
 
     def _release_sleep_inhibitor(self):
-        self._unmask_sleep_targets()
         if self.inhibitor_proc is not None:
             try:
                 self.inhibitor_proc.terminate()
@@ -555,25 +667,34 @@ class Plugin:
             self.inhibitor_proc = None
             logger.info("Released sleep inhibitor lock.")
 
-    def _update_inhibitor_state(self):
-        if not self.settings.get("enabled", True):
-            self._release_sleep_inhibitor()
-            return
-
-        is_active_download = (
+    def _is_active_download(self) -> bool:
+        return bool(
             self.download_info.get("is_downloading", False)
             and not self.download_info.get("is_paused", False)
         )
-        should_inhibit = self.is_background_mode or is_active_download
-        if should_inhibit:
-            self._mask_sleep_targets()
-            if self.inhibitor_proc is None:
-                self._acquire_sleep_inhibitor()
-        elif not should_inhibit:
-            if self.inhibitor_proc is not None:
-                self._release_sleep_inhibitor()
-            else:
-                self._unmask_sleep_targets()
+
+    def _plugin_should_act(self) -> bool:
+        """
+        The single answer to 'may the plugin touch the system right now?'.
+
+        With the plugin enabled but nothing downloading, this is False and SteamOS is
+        left completely alone: no inhibitor, no grabbed power button, no masked targets,
+        so the stock suspend animation and behaviour are exactly as without the plugin.
+        """
+        if self.suspend_in_progress or not self.settings.get("enabled", True):
+            return False
+        return self.is_background_mode or self._is_active_download()
+
+    def _update_inhibitor_state(self):
+        # The inhibitor is a child process; if it ever dies, forget it so it can be retaken.
+        if self.inhibitor_proc is not None and self.inhibitor_proc.poll() is not None:
+            self.inhibitor_proc = None
+
+        should_inhibit = self._plugin_should_act()
+        if should_inhibit and self.inhibitor_proc is None:
+            self._acquire_sleep_inhibitor()
+        elif not should_inhibit and self.inhibitor_proc is not None:
+            self._release_sleep_inhibitor()
 
     # ==========================================
     # Suspend Interception & Logind Watcher
@@ -584,11 +705,11 @@ class Plugin:
         time_in_bg = (now - self.background_mode_entered_time) if self.is_background_mode else 999.0
         # If currently in background mode, any suspend attempt after grace period is a WAKE action!
         if self.is_background_mode:
-            if time_in_bg < 6.0:
+            if time_in_bg < LOGIND_GRACE_SECONDS:
                 logger.info(f"Ignoring suspend intercept during background entry grace period ({time_in_bg:.1f}s).")
                 return
             logger.info("Suspend attempt detected while in background mode -> Waking system!")
-            self.wake_cooldown_until = now + 12.0
+            self.wake_cooldown_until = now + WAKE_COOLDOWN_SECONDS
             if self.loop and self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(
                     self.exit_background_mode("suspend_attempt_wake"),
@@ -602,13 +723,9 @@ class Plugin:
             return
 
         # Double check: Is download REALLY actively downloading (not paused or idle)?
-        is_active_dl = (
-            self.download_info.get("is_downloading", False)
-            and not self.download_info.get("is_paused", False)
-        )
-        if not is_active_dl:
+        if not self._is_active_download():
             logger.info("Suspend attempt not intercepted: Download is paused or idle. Allowing normal suspend.")
-            self._release_sleep_inhibitor()
+            self._update_inhibitor_state()
             return
 
         # Debounce to prevent double trigger within 3 seconds
@@ -664,8 +781,8 @@ class Plugin:
                         or "system is resuming" in lower
                     ):
                         logger.info("Logind reported system resume from sleep -> Enforcing wake cooldown.")
-                        self.wake_cooldown_until = now + 12.0
-                        if self.is_background_mode and time_in_bg > 6.0:
+                        self.wake_cooldown_until = now + WAKE_COOLDOWN_SECONDS
+                        if self.is_background_mode and time_in_bg > LOGIND_GRACE_SECONDS:
                             if self.loop and self.loop.is_running():
                                 asyncio.run_coroutine_threadsafe(
                                     self.exit_background_mode("logind_resume"),
@@ -683,11 +800,11 @@ class Plugin:
                         logger.info(f"Logind journal suspend event: {line.strip()}")
                         # If in background mode, wake up after grace period
                         if self.is_background_mode:
-                            if time_in_bg < 6.0:
+                            if time_in_bg < LOGIND_GRACE_SECONDS:
                                 logger.info(f"Ignoring logind suspend event during background entry grace period ({time_in_bg:.1f}s).")
                                 continue
                             logger.info("Logind suspend event received while in background mode -> Waking system!")
-                            self.wake_cooldown_until = now + 12.0
+                            self.wake_cooldown_until = now + WAKE_COOLDOWN_SECONDS
                             if self.loop and self.loop.is_running():
                                 asyncio.run_coroutine_threadsafe(
                                     self.exit_background_mode("logind_wake"),
@@ -699,14 +816,11 @@ class Plugin:
                         if now < self.wake_cooldown_until:
                             continue
 
-                        is_active_dl = (
-                            self.download_info.get("is_downloading", False)
-                            and not self.download_info.get("is_paused", False)
-                        )
-                        if is_active_dl:
+                        if self._is_active_download():
                             self._trigger_suspend_intercepted()
                         else:
-                            self._release_sleep_inhibitor()
+                            # Nothing to protect: let SteamOS suspend exactly as it normally would.
+                            self._update_inhibitor_state()
 
             except Exception as e:
                 logger.error(f"Error in logind watcher: {e}")
@@ -721,8 +835,32 @@ class Plugin:
     # ==========================================
     # Hardware Power / Sleep Key Monitoring
     # ==========================================
+    def _is_real_power_button(self, path: str, name: str) -> bool:
+        """
+        True only for the physical power/sleep button of the machine.
+
+        These are the devices that must keep working while every other input is locked
+        out, and the only ones worth grabbing to intercept a suspend. Controllers and
+        keyboards also advertise KEY_POWER, so matching on the key alone would grab (and
+        silence) the whole keyboard.
+        """
+        name_lower = name.lower()
+        if "power button" in name_lower or "sleep button" in name_lower:
+            return True
+        try:
+            # ACPI buttons report a phys of 'PNP0C0C/button/input0' (power),
+            # 'PNP0C0E/...' (sleep) or the LNXPWRBN/LNXSLPBN fixed-feature equivalents.
+            with open(f"/sys/class/input/{os.path.basename(path)}/device/phys", "r") as f:
+                phys = f.read().strip().upper()
+            return any(tag in phys for tag in ("PNP0C0C", "PNP0C0E", "LNXPWRBN", "LNXSLPBN"))
+        except Exception:
+            return False
+
     def _find_power_sleep_devices(self) -> List[Tuple[str, str, bool]]:
-        """Finds all input devices with KEY_POWER or KEY_SLEEP using kernel EVIOCGBIT and EVIOCGNAME."""
+        """
+        Finds input devices exposing KEY_POWER or KEY_SLEEP using kernel EVIOCGBIT/EVIOCGNAME.
+        Returns (path, name, is_real_power_button) for each.
+        """
         devs = []
         for path in sorted(glob.glob("/dev/input/event*")):
             try:
@@ -733,63 +871,73 @@ class Plugin:
                     has_power = bool(buf[14] & (1 << 4))
                     # KEY_SLEEP = 142 (byte 17, bit 6)
                     has_sleep = bool(buf[17] & (1 << 6))
-                    if has_power or has_sleep:
-                        name_buf = bytearray(256)
-                        try:
-                            fcntl.ioctl(f.fileno(), 0x82004506, name_buf)  # EVIOCGNAME(256)
-                            name = name_buf.split(b"\x00")[0].decode("utf-8", errors="ignore")
-                        except Exception:
-                            name = "Unknown Device"
-
-                        name_lower = name.lower()
-                        # Power button device (e.g. 'Power Button', 'Sleep Button', 'gpio-keys', 'Asus WMI')
-                        # Must NOT be a keyboard (to avoid grabbing user's typing keyboard)
-                        is_keyboard = "keyboard" in name_lower
-                        is_grab_candidate = (
-                            not is_keyboard
-                            or "power" in name_lower
-                            or "button" in name_lower
-                        ) and "remapper" not in name_lower
-                        devs.append((path, name, is_grab_candidate))
+                    if not (has_power or has_sleep):
+                        continue
+                    name_buf = bytearray(256)
+                    try:
+                        fcntl.ioctl(f.fileno(), 0x82004506, name_buf)  # EVIOCGNAME(256)
+                        name = name_buf.split(b"\x00")[0].decode("utf-8", errors="ignore")
+                    except Exception:
+                        name = "Unknown Device"
+                devs.append((path, name, self._is_real_power_button(path, name)))
             except Exception:
                 pass
         return devs
 
+    def _power_key_candidates(self) -> List[Tuple[str, str]]:
+        """The devices to grab in order to intercept the power/sleep key."""
+        devices = self._find_power_sleep_devices()
+        real = [(p, n) for p, n, is_real in devices if is_real]
+        self.power_device_paths = {p for p, _ in real}
+        if real:
+            return real
+        # No ACPI button (some handhelds wire power through gpio-keys or an HID device):
+        # fall back to any non-keyboard device carrying the key, as before.
+        return [
+            (p, n) for p, n, _ in devices
+            if "keyboard" not in n.lower() and "remapper" not in n.lower()
+        ]
+
     def _power_button_listener_worker(self):
-        logger.info("Starting hardware power key listener worker...")
-        EVIOCGRAB = 0x40044590
+        """
+        Grabs the power key only while the plugin has a reason to intercept it.
+
+        While nothing is downloading, the device is left alone so systemd-logind and
+        Steam handle the power button natively, with the stock SteamOS suspend animation.
+        """
+        logger.info("Power key listener worker started (idle until a download is active).")
         while not self.stop_threads:
-            devices = self._find_power_sleep_devices()
-            if not devices:
-                time.sleep(3.0)
+            if not self._plugin_should_act():
+                time.sleep(0.5)
                 continue
 
-            fds = []
-            grabbed_fds = set()
-            for path, name, should_grab in devices:
-                if should_grab and ("power" in name.lower() or "sleep" in name.lower()):
-                    self.power_device_paths.add(path)
+            fds: Dict[str, int] = {}
+            for path, name in self._power_key_candidates():
                 try:
                     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-                    if should_grab:
-                        try:
-                            # EVIOCGRAB: Grab exclusively so systemd-logind and Steam never see KEY_POWER!
-                            fcntl.ioctl(fd, EVIOCGRAB, 1)
-                            grabbed_fds.add(fd)
-                            logger.info(f"Exclusively grabbed power device with EVIOCGRAB: {name} ({path})")
-                        except Exception as ge:
-                            logger.warning(f"Could not grab {name} ({path}): {ge}")
-                    fds.append(fd)
                 except Exception as e:
-                    logger.debug(f"Could not open {path}: {e}")
+                    logger.debug(f"Could not open power device {path}: {e}")
+                    continue
+                try:
+                    # EVIOCGRAB: grab exclusively so logind and Steam never see this press
+                    # and the plugin decides what it means (intercept suspend, or wake).
+                    fcntl.ioctl(fd, EVIOCGRAB, 1)
+                except Exception as ge:
+                    os.close(fd)
+                    logger.warning(f"Could not grab power device {name} ({path}): {ge}")
+                    continue
+                fds[path] = fd
+                logger.info(f"Exclusively grabbed power device: {name} ({path})")
 
             if not fds:
-                time.sleep(3.0)
+                logger.warning("No power/sleep key device could be grabbed; retrying shortly.")
+                time.sleep(2.0)
                 continue
 
+            self.power_grabbed_paths = set(fds)
             try:
-                while not self.stop_threads:
-                    rlist, _, _ = select.select(fds, [], [], 1.0)
+                while not self.stop_threads and self._plugin_should_act():
+                    rlist, _, _ = select.select(list(fds.values()), [], [], 0.3)
                     for fd in rlist:
                         try:
                             data = os.read(fd, INPUT_EVENT_SIZE * 16)
@@ -798,26 +946,31 @@ class Plugin:
                                 data = data[INPUT_EVENT_SIZE:]
                                 _, _, ev_type, ev_code, ev_value = struct.unpack(INPUT_EVENT_FORMAT, chunk)
 
-                                if ev_type == EV_KEY and (ev_code == KEY_POWER or ev_code == KEY_SLEEP) and ev_value == 1:
-                                    logger.info(f"Hardware key event intercepted exclusively: code={ev_code}")
+                                if ev_type == EV_KEY and ev_code in (KEY_POWER, KEY_SLEEP) and ev_value == 1:
+                                    logger.info(f"Hardware power key intercepted (code={ev_code}).")
                                     self._on_hardware_power_key()
                         except BlockingIOError:
                             pass
                         except Exception as e:
                             logger.error(f"Error reading hardware key event: {e}")
                             break
+            except Exception as e:
+                # Never let the thread die: without it the power button would stop
+                # working as a wake trigger for the rest of the session.
+                logger.error(f"Power key listener loop failed, restarting it: {e}")
+                time.sleep(1.0)
             finally:
-                for fd in fds:
+                for fd in fds.values():
                     try:
-                        if fd in grabbed_fds:
-                            try:
-                                fcntl.ioctl(fd, EVIOCGRAB, 0)
-                            except Exception:
-                                pass
+                        fcntl.ioctl(fd, EVIOCGRAB, 0)
+                    except Exception:
+                        pass
+                    try:
                         os.close(fd)
                     except Exception:
                         pass
-                time.sleep(1.0)
+                self.power_grabbed_paths = set()
+                logger.info("Released power key device(s); SteamOS handles the power button again.")
 
     def _on_hardware_power_key(self):
         if not self.settings.get("enabled", True):
@@ -832,11 +985,11 @@ class Plugin:
         time_in_bg = (now - self.background_mode_entered_time) if self.is_background_mode else 999.0
         if self.is_background_mode:
             # Grace period: ignore initial power key bounce/release right when entering mode
-            if time_in_bg < 2.0:
+            if time_in_bg < POWER_KEY_GRACE_SECONDS:
                 logger.info(f"Ignoring power key in background mode entry grace period ({time_in_bg:.1f}s).")
                 return
             logger.info("Power button pressed during background mode -> Full system wake!")
-            self.wake_cooldown_until = now + 12.0
+            self.wake_cooldown_until = now + WAKE_COOLDOWN_SECONDS
             if self.loop and self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(
                     self.exit_background_mode("power_button_wake"),
@@ -845,11 +998,7 @@ class Plugin:
             return
 
         net_rx = self.detector.get_network_rx_rate()
-        is_active_dl = (
-            (self.download_info.get("is_downloading", False)
-            and not self.download_info.get("is_paused", False))
-            or (net_rx > 20000)
-        )
+        is_active_dl = self._is_active_download() or (net_rx > 20000)
         if is_active_dl:
             self._trigger_suspend_intercepted()
         else:
@@ -924,127 +1073,208 @@ class Plugin:
 
     def _pause_controller_daemons(self):
         """
-        Freezes controller mapping daemons (InputPlumber and Handheld Daemon) with SIGSTOP and systemctl freeze.
-        Plugin runs as root (plugin.json flags), so signals are sent directly by PID.
+        Freezes controller mapping daemons (InputPlumber and Handheld Daemon) with SIGSTOP
+        and systemctl freeze, so they stop translating button presses into the virtual
+        controller Steam reads. Plugin runs as root (plugin.json flags), so signals are
+        sent directly by PID.
         """
+        self.frozen_daemons = []
         for daemon in ["inputplumber", "hhd"]:
             try:
                 pids = self._signal_daemon(daemon, signal.SIGSTOP)
-                subprocess.run(["systemctl", "freeze", f"{daemon}.service", f"{daemon}@*.service"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0)
-                logger.info(f"[DBG] Paused daemon {daemon} pids={pids}")
+                subprocess.run(
+                    ["systemctl", "freeze", f"{daemon}.service"],
+                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5.0,
+                )
+                if pids:
+                    self.frozen_daemons.append(daemon)
+                    logger.info(f"Froze controller daemon {daemon} (pids={pids}).")
             except Exception as e:
-                logger.warning(f"[DBG] Pause daemon {daemon} failed: {e}")
-        logger.info("Paused controller translation daemons (InputPlumber/HHD).")
+                logger.warning(f"Freezing daemon {daemon} failed: {e}")
 
-    def _resume_controller_daemons(self):
+    def _controller_daemons_look_frozen(self) -> bool:
+        """True if InputPlumber/HHD are sitting stopped, e.g. after a crash mid-lockout."""
+        for daemon in ["inputplumber", "hhd"]:
+            for pid in self._find_daemon_pids(daemon):
+                try:
+                    with open(f"/proc/{pid}/stat", "r") as f:
+                        stat = f.read()
+                    state = stat[stat.rfind(")") + 2:].split()[0]
+                except Exception:
+                    continue
+                if state in ("T", "t"):
+                    return True
+        return False
+
+    def _resume_controller_daemons(self, quiet: bool = False):
         """
-        Unfreezes controller mapping daemons (InputPlumber and Handheld Daemon).
+        Unfreezes the controller mapping daemons.
+
+        Called before the virtual controllers are rebound on purpose: a frozen daemon has
+        the button presses from the lockout still queued on its input fds, and it replays
+        them the moment it runs again. Letting it replay while its output device is still
+        unbound is what keeps a press made with the screen off from opening the Quick
+        Access Menu on wake.
         """
         for daemon in ["inputplumber", "hhd"]:
             try:
-                subprocess.run(["systemctl", "thaw", f"{daemon}.service", f"{daemon}@*.service"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0)
+                subprocess.run(
+                    ["systemctl", "thaw", f"{daemon}.service"],
+                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5.0,
+                )
                 pids = self._signal_daemon(daemon, signal.SIGCONT)
-                logger.info(f"[DBG] Resumed daemon {daemon} pids={pids}")
+                if pids and not quiet:
+                    logger.info(f"Resumed controller daemon {daemon} (pids={pids}).")
             except Exception as e:
-                logger.warning(f"[DBG] Resume daemon {daemon} failed: {e}")
-        logger.info("Resumed controller translation daemons (InputPlumber/HHD).")
+                logger.warning(f"Resuming daemon {daemon} failed: {e}")
+        self.frozen_daemons = []
 
-    def _is_compositor_pid(self, pid: int) -> bool:
-        """True for gamescope/compositor processes, which must keep normal priority to redraw on wake."""
-        try:
-            with open(f"/proc/{pid}/comm", "r") as f:
-                comm = f.read().strip().lower()
-            return "gamescope" in comm or "xwayland" in comm
-        except Exception:
-            return False
+    def _iter_process_scheduling(self) -> List[Tuple[int, str, int, int]]:
+        """Returns (pid, comm, nice, sched_policy) for every process, for the repair below."""
+        found: List[Tuple[int, str, int, int]] = []
+        my_pid = os.getpid()
+        for proc_dir in glob.glob("/proc/[0-9]*"):
+            try:
+                pid = int(os.path.basename(proc_dir))
+                if pid == my_pid:
+                    continue
+                with open(os.path.join(proc_dir, "stat"), "r") as f:
+                    stat = f.read()
+                # The comm field is wrapped in parentheses and may itself contain spaces.
+                close = stat.rfind(")")
+                comm = stat[stat.find("(") + 1:close]
+                fields = stat[close + 2:].split()
+                # /proc/pid/stat: field 19 is nice, field 41 is the scheduling policy;
+                # both are offset by 3 here because state is the first field after comm.
+                nice = int(fields[16])
+                policy = int(fields[38])
+                found.append((pid, comm, nice, policy))
+            except Exception:
+                continue
+        return found
 
-    def _throttle_steam_processes(self):
-        """Lowers Steam's process CPU and I/O scheduling priority so background downloads run calmly without heating."""
-        try:
-            out = subprocess.check_output(["pgrep", "-f", "steam"], stderr=subprocess.DEVNULL).decode()
-            pids = [int(p.strip()) for p in out.split() if p.strip().isdigit()]
-            pids = [p for p in pids if p != os.getpid() and not self._is_compositor_pid(p)]
-            if not pids:
-                return
-            pid_strs = [str(p) for p in pids]
-            subprocess.run(["sudo", "renice", "-n", "19", "-p"] + pid_strs, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            for pid in pids:
+    def _heal_steam_scheduling(self) -> int:
+        """
+        Puts Steam's own processes back on normal CPU and I/O scheduling.
+
+        Older versions of this plugin dropped everything matching 'steam' to SCHED_IDLE
+        and nice 19 while the screen was off. Processes Steam started during that window
+        inherited it and were never found again on wake, which left Gaming Mode
+        permanently sluggish. Nothing throttles Steam any more, and this runs on every
+        wake (and at startup) to repair consoles that are still in that state.
+        """
+        victims: List[int] = []
+        for pid, comm, nice, policy in self._iter_process_scheduling():
+            starved = nice > 0 or policy in (SCHED_BATCH, SCHED_IDLE)
+            if not starved:
+                continue
+            if comm.lower() in STEAM_UI_COMMS:
+                victims.append(pid)
+                continue
+            # Also rescue a running game that inherited idle scheduling from Steam.
+            if policy == SCHED_IDLE:
                 try:
-                    # SCHED_IDLE (Linux lowest priority scheduling class)
-                    subprocess.run(["sudo", "chrt", "-i", "-p", "0", str(pid)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    subprocess.run(["sudo", "ionice", "-c", "3", "-p", str(pid)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    with open(f"/proc/{pid}/cmdline", "rb") as f:
+                        cmdline = f.read().decode("utf-8", errors="ignore")
+                    if "/steamapps/common/" in cmdline:
+                        victims.append(pid)
                 except Exception:
                     pass
-            logger.info(f"Throttled CPU & IO priority to SCHED_IDLE/nice 19 for {len(pids)} Steam processes.")
-        except Exception:
-            pass
 
-    def _restore_steam_processes(self):
-        """Restores Steam processes back to standard priority."""
-        try:
-            out = subprocess.check_output(["pgrep", "-f", "steam"], stderr=subprocess.DEVNULL).decode()
-            pids = [int(p.strip()) for p in out.split() if p.strip().isdigit()]
-            if not pids:
-                return
-            pid_strs = [str(p) for p in pids]
-            subprocess.run(["sudo", "renice", "-n", "0", "-p"] + pid_strs, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            for pid in pids:
+        if not victims:
+            return 0
+
+        pid_strs = [str(p) for p in victims]
+        subprocess.run(
+            ["renice", "-n", "0", "-p"] + pid_strs,
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        for pid in pid_strs:
+            for cmd in (
+                ["chrt", "-o", "-p", "0", pid],
+                ["ionice", "-c", "2", "-n", "4", "-p", pid],
+            ):
                 try:
-                    subprocess.run(["sudo", "chrt", "-o", "-p", "0", str(pid)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    subprocess.run(["sudo", "ionice", "-c", "2", "-n", "4", "-p", str(pid)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0)
                 except Exception:
                     pass
-            logger.info(f"Restored CPU & IO priority to normal for {len(pids)} Steam processes.")
-        except Exception:
-            pass
+        logger.info(f"Reset CPU/IO scheduling to normal for {len(victims)} Steam process(es).")
+        return len(victims)
 
     def _flush_grabbed_inputs(self):
         """Drains any buffered events from all grabbed controllers to prevent input accumulation."""
-        for fd in list(self.grabbed_gamepad_fds.values()):
-            try:
-                while os.read(fd, 1024):
+        with self.input_lock:
+            for fd in list(self.grabbed_gamepad_fds.values()):
+                try:
+                    while os.read(fd, 1024):
+                        pass
+                except (BlockingIOError, OSError):
                     pass
-            except (BlockingIOError, OSError):
-                pass
 
     def _grab_all_gamepad_inputs(self):
         """
-        Exclusively grabs gamepad/controller input devices (/dev/input/event*) using EVIOCGRAB,
-        and pauses controller mapping daemons.
-        Only the real power/sleep button devices are excluded so the hardware power wake is never blocked.
-        """
-        self._pause_controller_daemons()
-        # Only true power/sleep buttons (e.g. ACPI 'Power Button') are excluded; keyboards and controller
-        # HID interfaces also declare KEY_POWER and MUST be grabbed, otherwise their buttons keep working.
-        for p, name, _ in self._find_power_sleep_devices():
-            name_lower = name.lower()
-            if "power button" in name_lower or "sleep button" in name_lower:
-                self.power_device_paths.add(p)
-        logger.info(f"[DBG] Power devices kept ungrabbed: {sorted(self.power_device_paths)}")
+        Locks out every input except the physical power button.
 
-        EVIOCGRAB = 0x40044590
-        count = 0
-        for path in sorted(glob.glob("/dev/input/event*")):
-            if path in self.grabbed_gamepad_fds or path in self.power_device_paths:
-                continue
-            name = self._get_input_name(path)
-            try:
-                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        Two layers, in this order on purpose:
+          1. External USB/Bluetooth pads are detached from their HID driver, which removes
+             their hidraw node too (Steam reads pads through hidraw, where EVIOCGRAB has
+             no effect). This happens BEFORE anything is frozen, because unbinding a
+             device whose owning daemon is stopped can block in the kernel.
+          2. The controller mapping daemons are frozen, so they stop translating presses,
+             and every remaining evdev node is grabbed exclusively.
+
+        The built-in controller of a handheld and the virtual devices HHD/InputPlumber
+        create over uhid are deliberately NOT unbound: tearing those down and rebuilding
+        them crashes the session on some consoles. Freezing their daemon already stops
+        them from reporting anything while the screen is off.
+        """
+        deep = bool(self.settings.get("deep_input_lockout", True))
+        if deep:
+            self._unbind_external_gamepads()
+            self._pause_controller_daemons()
+
+        # Refresh which devices are the real power/sleep buttons: those stay untouched so
+        # the hardware wake can never be blocked.
+        self._power_key_candidates()
+        logger.info(f"Input lockout: power devices kept free: {sorted(self.power_device_paths)}")
+
+        self._grab_new_inputs(verbose=True)
+
+    def _grab_new_inputs(self, verbose: bool = False):
+        """
+        Grabs every input device not already grabbed. Called on entry and periodically
+        while the screen is off, so a controller that connects (or a virtual device that
+        is recreated) mid-session is locked out too.
+        """
+        with self.input_lock:
+            count = 0
+            for path in sorted(glob.glob("/dev/input/event*")):
+                if (
+                    path in self.grabbed_gamepad_fds
+                    or path in self.power_device_paths
+                    or path in self.power_grabbed_paths
+                ):
+                    continue
+                try:
+                    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+                except Exception as oe:
+                    if verbose:
+                        logger.info(f"Input lockout: could not open {path}: {oe}")
+                    continue
                 try:
                     fcntl.ioctl(fd, EVIOCGRAB, 1)
-                    self.grabbed_gamepad_fds[path] = fd
-                    count += 1
-                    logger.info(f"[DBG] Grabbed {path} ({name})")
                 except Exception as ge:
                     os.close(fd)
-                    logger.info(f"[DBG] Could not grab {path} ({name}): {ge}")
-            except Exception as oe:
-                logger.info(f"[DBG] Could not open {path} ({name}): {oe}")
-        if count > 0:
-            logger.info(f"Exclusively grabbed {count} gamepad/button input devices (lockout active).")
-
-        # Steam reads USB/Bluetooth controllers through hidraw, which EVIOCGRAB does not block.
-        self._unbind_external_gamepads()
+                    if verbose:
+                        # Usually means a controller daemon already holds it exclusively,
+                        # which is fine: it is frozen and its output device is unbound.
+                        logger.info(f"Input lockout: {path} ({self._get_input_name(path)}) already held: {ge}")
+                    continue
+                self.grabbed_gamepad_fds[path] = fd
+                count += 1
+            if count:
+                logger.info(f"Input lockout: exclusively grabbed {count} input device(s).")
+            return count
 
     def _get_input_name(self, path: str) -> str:
         try:
@@ -1055,13 +1285,31 @@ class Plugin:
         except Exception:
             return "Unknown Device"
 
+    def _hid_provides_power_key(self, dev: str) -> bool:
+        """True if an HID device also carries the power/sleep button (never unbind those)."""
+        for name_file in glob.glob(os.path.join(dev, "input", "input*", "name")):
+            try:
+                with open(name_file, "r") as f:
+                    name = f.read().strip().lower()
+            except Exception:
+                continue
+            if "power button" in name or "sleep button" in name:
+                return True
+        return False
+
+    # ASUS ROG Ally, Valve Steam Deck, Lenovo Legion Go. Their built-in controllers are
+    # never unbound: on some consoles tearing the internal HID device down and probing it
+    # again on wake takes the whole session (or the kernel) with it. The same goes for the
+    # uhid devices HHD/InputPlumber create, whose driver teardown talks to a daemon that
+    # is frozen at that moment. Freezing those daemons already silences them.
+    INTERNAL_HID_VENDORS = {"0B05", "28DE", "17EF"}
+
     def _unbind_external_gamepads(self):
         """
-        Detaches external USB/Bluetooth gamepads from their HID driver (removes evdev + hidraw nodes),
-        so neither Steam nor games can receive their buttons. Built-in handheld controllers and
-        virtual (uhid) devices from InputPlumber/HHD are left alone (those daemons are frozen instead).
+        Detaches external USB/Bluetooth gamepads from their HID driver, which removes their
+        evdev AND hidraw nodes, so neither Steam nor a game can read them while the screen
+        is off. EVIOCGRAB alone cannot do this, because Steam talks to pads over hidraw.
         """
-        internal_vendors = {"0B05", "28DE", "17EF"}  # ASUS ROG Ally, Valve Steam Deck, Lenovo Legion Go
         for dev in sorted(glob.glob("/sys/bus/hid/devices/*")):
             try:
                 dev_id = os.path.basename(dev)
@@ -1069,58 +1317,74 @@ class Plugin:
                 if len(parts) < 3:
                     continue
                 bus, vendor = parts[0].upper(), parts[1].upper()
-                if bus not in ("0003", "0005") or vendor in internal_vendors:
-                    continue
+                if bus not in ("0003", "0005") or vendor in self.INTERNAL_HID_VENDORS:
+                    continue  # Not an external USB/Bluetooth pad
                 if "uhid" in os.path.realpath(dev):
-                    continue
+                    continue  # Virtual device from a controller daemon
                 if not glob.glob(os.path.join(dev, "input", "input*", "js*")):
                     continue  # Not a gamepad/joystick
+                if self._hid_provides_power_key(dev):
+                    continue
                 driver_link = os.path.join(dev, "driver")
                 if not os.path.exists(driver_link):
                     continue
                 driver = os.path.basename(os.path.realpath(driver_link))
-                ok = self._write_sysfs(f"/sys/bus/hid/drivers/{driver}/unbind", dev_id)
-                if ok:
+                if self._write_sysfs(f"/sys/bus/hid/drivers/{driver}/unbind", dev_id):
                     self.unbound_hid_devices.append((driver, dev_id))
-                logger.info(f"[DBG] Unbind external gamepad {dev_id} from {driver}: {'ok' if ok else 'failed'}")
+                    logger.info(f"Input lockout: unbound external pad {dev_id} from {driver}.")
+                else:
+                    logger.warning(f"Input lockout: failed to unbind external pad {dev_id} from {driver}.")
             except Exception as e:
-                logger.warning(f"[DBG] Error unbinding HID device {dev}: {e}")
+                logger.warning(f"Error unbinding HID device {dev}: {e}")
 
-    def _rebind_external_gamepads(self):
+    def _rebind_gamepad_hids(self):
         for driver, dev_id in list(self.unbound_hid_devices):
             ok = self._write_sysfs(f"/sys/bus/hid/drivers/{driver}/bind", dev_id)
             if not ok:
                 ok = self._write_sysfs("/sys/bus/hid/drivers_probe", dev_id)
-            logger.info(f"[DBG] Rebind external gamepad {dev_id} to {driver}: {'ok' if ok else 'failed'}")
+            logger.info(f"Rebound HID gamepad {dev_id} to {driver}: {'ok' if ok else 'failed'}.")
         self.unbound_hid_devices.clear()
 
     def _release_all_gamepad_inputs(self):
         """
-        Releases all grabbed input devices and unfreezes InputPlumber/HHD so gamepad,
-        touchscreen, and buttons immediately regain normal control upon waking up.
+        Gives input back in the order that keeps a press made during the lockout from
+        acting on the console.
+
+        A frozen controller daemon still has every button pressed during the lockout
+        queued on its input fds, and replays them as soon as it runs again. So the
+        daemons are thawed FIRST and given a moment to drain, which is the window the
+        frontend spends dismissing any menu that replay may open (see closeSteamSideMenus
+        in index.tsx). Only then are our own grabs flushed and dropped and the external
+        pads rebound, so nothing is still pending by the time the user's first real press
+        arrives.
         """
-        EVIOCGRAB = 0x40044590
+        was_frozen = bool(self.frozen_daemons)
+        had_lockout = bool(self.grabbed_gamepad_fds or self.unbound_hid_devices or was_frozen)
+
+        # 1. Let the daemons drain their queued presses into the still-unbound virtual device.
+        if was_frozen or self._controller_daemons_look_frozen():
+            self._resume_controller_daemons(quiet=not had_lockout)
+            time.sleep(0.4)
+
+        # 2. Drop everything queued on our own grabs, then release them.
         released_count = len(self.grabbed_gamepad_fds)
-        for path, fd in list(self.grabbed_gamepad_fds.items()):
-            try:
-                # Flush any pending events while grabbed so they don't fire on wake
+        self._flush_grabbed_inputs()
+        with self.input_lock:
+            for path, fd in list(self.grabbed_gamepad_fds.items()):
                 try:
-                    while os.read(fd, 1024):
-                        pass
-                except (BlockingIOError, OSError):
+                    fcntl.ioctl(fd, EVIOCGRAB, 0)
+                except Exception:
                     pass
-                fcntl.ioctl(fd, EVIOCGRAB, 0)
-            except Exception:
-                pass
-            try:
-                os.close(fd)
-            except Exception:
-                pass
-        self.grabbed_gamepad_fds.clear()
-        self._resume_controller_daemons()
-        self._rebind_external_gamepads()
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+            self.grabbed_gamepad_fds.clear()
+
+        # 3. Bring the controllers back, with no backlog behind them.
+        self._rebind_gamepad_hids()
         if released_count > 0:
-            logger.info(f"Released {released_count} input devices (gamepad controls fully restored).")
+            logger.info(f"Released {released_count} input devices (controls fully restored).")
 
     # ==========================================
     # Power Saving & Screen Control
@@ -1158,39 +1422,92 @@ class Plugin:
                     pass
 
     def _set_gamescope_display(self, sleep: bool):
+        """
+        Asks Gamescope to put the internal panel to sleep (or wake it).
+
+        Only runs if gamescopectl actually exists, so machines without it (a desktop PC
+        running SteamOS, where there is no internal panel anyway) do not pay for a dozen
+        failed process spawns on every transition.
+        """
+        gamescopectl = shutil.which("gamescopectl") or next(
+            (p for p in ("/usr/bin/gamescopectl", "/usr/local/bin/gamescopectl") if os.path.exists(p)),
+            None,
+        )
+        if not gamescopectl:
+            return
+
         arg = "1" if sleep else "0"
-        bool_arg = "true" if sleep else "false"
         user = self._get_session_user()
         for uid_dir in glob.glob("/run/user/*"):
-            if os.path.basename(uid_dir).isdigit():
-                env = os.environ.copy()
-                env["XDG_RUNTIME_DIR"] = uid_dir
-                for cmd in ["gamescopectl", "/usr/bin/gamescopectl", "/usr/local/bin/gamescopectl"]:
-                    for val in [arg, bool_arg]:
-                        try:
-                            subprocess.run(
-                                [cmd, "drm_sleep_internal_screen", val],
-                                env=env,
-                                check=False,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                timeout=1.0,
-                            )
-                            subprocess.run(
-                                ["sudo", "-u", user, "env", f"XDG_RUNTIME_DIR={uid_dir}", cmd, "drm_sleep_internal_screen", val],
-                                check=False,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                timeout=1.0,
-                            )
-                        except Exception:
-                            pass
+            if not os.path.basename(uid_dir).isdigit():
+                continue
+            env = os.environ.copy()
+            env["XDG_RUNTIME_DIR"] = uid_dir
+            for cmd in (
+                [gamescopectl, "drm_sleep_internal_screen", arg],
+                # Gamescope only answers on its own user session's socket.
+                ["sudo", "-u", user, "env", f"XDG_RUNTIME_DIR={uid_dir}", gamescopectl, "drm_sleep_internal_screen", arg],
+            ):
+                try:
+                    subprocess.run(
+                        cmd,
+                        env=env,
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=2.0,
+                    )
+                except Exception:
+                    pass
+
+    # ryzenadj option name -> multiplier to turn the reported value back into the unit
+    # ryzenadj expects on the command line (watts are reported, milliwatts are written).
+    RYZENADJ_RESTORE_KEYS = {
+        "stapm-limit": 1000,
+        "fast-limit": 1000,
+        "slow-limit": 1000,
+    }
+
+    def _read_ryzenadj_limits(self) -> Dict[str, int]:
+        """
+        Reads the APU power limits currently in force, so they can be put back exactly.
+        'ryzenadj -i' prints one table row per value: | STAPM LIMIT | 15.000 | stapm-limit |
+        """
+        limits: Dict[str, int] = {}
+        try:
+            res = subprocess.run(["ryzenadj", "-i"], capture_output=True, text=True, check=False, timeout=8.0)
+        except Exception as e:
+            logger.debug(f"Could not read ryzenadj limits: {e}")
+            return limits
+
+        for line in (res.stdout or "").splitlines():
+            parts = [p.strip() for p in line.split("|") if p.strip()]
+            if len(parts) < 3:
+                continue
+            scale = self.RYZENADJ_RESTORE_KEYS.get(parts[-1])
+            if scale is None:
+                continue
+            try:
+                value = float(parts[1])
+            except ValueError:
+                continue
+            if value > 0:
+                limits[parts[-1]] = int(round(value * scale))
+        return limits
 
     def _apply_power_saving_and_screen_off(self):
+        # Hard guard: applying twice would save the already-throttled values as the
+        # originals, and the console would stay at 6W / 800MHz even after waking up.
+        if self.power_saving_applied:
+            logger.warning("Power saving already applied; skipping to avoid saving throttled values as the originals.")
+            return
+        self.power_saving_applied = True
+
         logger.info("Applying smart suspend power saving and screen off...")
 
         # 1. Turn off backlight: prioritize amdgpu_bl* on ROG Ally / Steam Deck
         if self.settings.get("turn_off_backlight", True):
+            self.display_slept_by_us = True
             backlight_dirs = glob.glob("/sys/class/backlight/*")
             backlight_dirs.sort(key=lambda p: 0 if "amdgpu" in p else 1)
 
@@ -1274,8 +1591,15 @@ class Plugin:
                     except Exception:
                         pass
 
-            # Fan boost mode (Silent = 2)
+            # Fan boost mode (Silent = 2). Saved, because leaving the fans in silent mode
+            # after waking makes the console throttle and feel permanently slow.
+            self.saved_fan_boost.clear()
             for fan_boost in glob.glob("/sys/devices/platform/asus*/fan_boost_mode"):
+                try:
+                    with open(fan_boost, "r") as f:
+                        self.saved_fan_boost[fan_boost] = f.read().strip()
+                except Exception:
+                    continue
                 self._write_sysfs(fan_boost, "2")
 
             # C. ASUS Hardware PPT / SPL Power Limits (Hard limit to 6 Watts!)
@@ -1299,26 +1623,39 @@ class Plugin:
                     except Exception:
                         pass
 
-            # D. ryzenadj fallback (hardware-cap APU power to 6W via sudo)
+            # D. ryzenadj fallback (hardware-cap APU power to 6W)
+            # Only ever applied when the current limits can be read back first: a fixed
+            # "restore" value would cap the APU at the wrong wattage forever, which is
+            # exactly what used to leave the machine slow after waking up (and would cap
+            # a desktop APU far below its stock limits).
             if shutil.which("ryzenadj"):
-                try:
-                    subprocess.run(
-                        ["sudo", "ryzenadj", "--stapm-limit=6000", "--fast-limit=6000", "--slow-limit=6000", "--tctl-temp=55"],
-                        check=False,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    logger.info("Set Ryzen APU power limits to 6W via sudo ryzenadj.")
-                except Exception:
-                    pass
+                if self.saved_ryzenadj is None:
+                    self.saved_ryzenadj = self._read_ryzenadj_limits()
+                if self.saved_ryzenadj:
+                    try:
+                        subprocess.run(
+                            ["ryzenadj", "--stapm-limit=6000", "--fast-limit=6000", "--slow-limit=6000"],
+                            check=False,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=5.0,
+                        )
+                        logger.info(f"Capped APU power to 6W via ryzenadj (will restore {self.saved_ryzenadj}).")
+                    except Exception:
+                        pass
+                else:
+                    logger.info("Skipping ryzenadj: its current limits could not be read, so they could not be restored on wake.")
 
             # E. powerprofilesctl fallback (if available)
             if shutil.which("powerprofilesctl"):
                 try:
-                    res = subprocess.run(["powerprofilesctl", "get"], capture_output=True, text=True, check=False)
+                    res = subprocess.run(["powerprofilesctl", "get"], capture_output=True, text=True, check=False, timeout=5.0)
                     if res.returncode == 0:
-                        self.saved_power_profile = res.stdout.strip()
-                        subprocess.run(["powerprofilesctl", "set", "power-saver"], check=False)
+                        current = res.stdout.strip()
+                        if current and current != "power-saver":
+                            self.saved_power_profile = current
+                        subprocess.run(["powerprofilesctl", "set", "power-saver"], check=False, timeout=5.0)
+                        self.power_profile_set_by_us = True
                 except Exception:
                     pass
 
@@ -1393,8 +1730,9 @@ class Plugin:
                 except Exception:
                     pass
 
-            # J. Throttle Steam process CPU & IO priority so background operations run calmly
-            self._throttle_steam_processes()
+            # Note: Steam's own processes are deliberately left at normal CPU/IO priority.
+            # Dropping them to SCHED_IDLE slowed the download itself down, and anything
+            # Steam spawned inherited it and stayed starved long after waking up.
 
         # 3. AMD GPU DPM Clock Level (downclock GPU to minimum power floor)
         if self.settings.get("throttle_gpu", True):
@@ -1416,6 +1754,7 @@ class Plugin:
         # 4. Mute Audio (Hardware ALSA Master & PipeWire)
         if self.settings.get("mute_audio", True):
             self._set_audio_mute(True)
+            self.audio_muted_by_us = True
 
         # 5. LEDs / Gamepad Stick RGB Rings / Keyboard Backlight
         led_paths = glob.glob("/sys/class/leds/*/brightness")
@@ -1442,12 +1781,14 @@ class Plugin:
 
     def _restore_system_power_and_display(self):
         logger.info("Restoring system power and display settings...")
+        self.power_saving_applied = False
 
-        # 0. Release all gamepad & button locks FIRST so controls respond immediately
-        self._release_all_gamepad_inputs()
-
-        # 1. Restore Backlight
-        for brightness_path, val in list(self.saved_brightness.items()):
+        # 1. Restore the backlight FIRST, so pressing power lights the screen up at once
+        # instead of after every power limit and input device has been handed back.
+        # Only panels this plugin actually dimmed are touched, so a console whose
+        # backlight was never changed keeps exactly the brightness the user set.
+        dimmed_paths = list(self.saved_brightness.items())
+        for brightness_path, val in dimmed_paths:
             try:
                 if os.path.exists(brightness_path):
                     bdir = os.path.dirname(brightness_path)
@@ -1467,35 +1808,37 @@ class Plugin:
                 logger.error(f"Failed to restore backlight on {brightness_path}: {e}")
         self.saved_brightness.clear()
 
-        # Guarantee all backlight devices are unblanked and brightened
-        backlight_dirs = glob.glob("/sys/class/backlight/*")
-        for bdir in backlight_dirs:
+        # Second pass: a single failed sysfs write here is the difference between waking
+        # up and staring at a black screen, so any panel still dark gets another attempt.
+        for brightness_path, val in dimmed_paths:
             try:
-                bl_power_path = os.path.join(bdir, "bl_power")
-                if os.path.exists(bl_power_path):
-                    self._write_sysfs(bl_power_path, "0")
-
-                brightness_path = os.path.join(bdir, "brightness")
-                max_b_path = os.path.join(bdir, "max_brightness")
-                if os.path.exists(brightness_path) and os.path.exists(max_b_path):
-                    with open(max_b_path, "r") as mf:
-                        max_b = int(mf.read().strip())
-                    self._write_sysfs(brightness_path, str(int(max_b * 0.6)))
+                with open(brightness_path, "r") as f:
+                    if int(f.read().strip()) > 0:
+                        continue
+            except Exception:
+                continue
+            bdir = os.path.dirname(brightness_path)
+            self._write_sysfs(os.path.join(bdir, "bl_power"), "0")
+            max_b = 255
+            try:
+                with open(os.path.join(bdir, "max_brightness"), "r") as mf:
+                    max_b = int(mf.read().strip())
+            except Exception:
+                pass
+            self._write_sysfs(brightness_path, str(val if val > 0 else int(max_b * 0.6)))
+            try:
+                subprocess.run(["brightnessctl", "set", "60%"], capture_output=True, check=False, timeout=3.0)
             except Exception:
                 pass
 
-        # Wake up internal display via Gamescope
-        self._set_gamescope_display(sleep=False)
+        # Wake the internal display back up through Gamescope (only if we slept it)
+        if self.display_slept_by_us:
+            self._set_gamescope_display(sleep=False)
+            self.display_slept_by_us = False
 
-        # Fallback restore via brightnessctl
-        try:
-            subprocess.run(["brightnessctl", "set", "60%"], capture_output=True, check=False)
-            subprocess.run(["sudo", "brightnessctl", "set", "60%"], capture_output=True, check=False)
-        except Exception:
-            pass
-
-        # Restore Steam process priority back to normal
-        self._restore_steam_processes()
+        # Put Steam's processes back on normal scheduling. Nothing throttles them any
+        # more, but this also repairs consoles left starved by an earlier version.
+        self._heal_steam_scheduling()
 
         # Restore ASUS PPT power limits
         for pf, orig_ppt in list(self.saved_asus_ppt.items()):
@@ -1504,18 +1847,21 @@ class Plugin:
                 logger.info(f"Restored ASUS PPT limit on {pf} to {orig_ppt}.")
         self.saved_asus_ppt.clear()
 
-        # Restore ryzenadj APU power limits (if installed)
-        if shutil.which("ryzenadj"):
+        # Restore the exact APU power limits that were in force before the screen went off
+        if self.saved_ryzenadj and shutil.which("ryzenadj"):
+            args = [f"--{opt}={val}" for opt, val in sorted(self.saved_ryzenadj.items())]
             try:
                 subprocess.run(
-                    ["sudo", "ryzenadj", "--stapm-limit=15000", "--fast-limit=25000", "--slow-limit=20000", "--tctl-temp=85"],
+                    ["ryzenadj"] + args,
                     check=False,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    timeout=8.0,
                 )
-                logger.info("Restored Ryzen APU power limits to standard handheld profile via sudo ryzenadj.")
-            except Exception:
-                pass
+                logger.info(f"Restored APU power limits via ryzenadj: {' '.join(args)}.")
+            except Exception as e:
+                logger.error(f"Failed to restore ryzenadj limits: {e}")
+        self.saved_ryzenadj = None
 
         # 2. Restore CPU Frequencies, Governors & Power Profiles
         # A. Restore CPU Turbo Boost
@@ -1556,15 +1902,24 @@ class Plugin:
                 logger.info(f"Restored ASUS thermal policy on {asus_thermal_file} to {self.saved_asus_thermal}.")
         self.saved_asus_thermal = None
 
-        # F. Restore powerprofilesctl (if installed)
-        if shutil.which("powerprofilesctl"):
-            target_profile = self.saved_power_profile if self.saved_power_profile and self.saved_power_profile != "power-saver" else "balanced"
+        # E2. Restore the fan curve. Left in silent mode, the console throttles itself
+        # and feels permanently slow long after the download is over.
+        for fan_boost, orig_fan in list(self.saved_fan_boost.items()):
+            if os.path.exists(fan_boost):
+                self._write_sysfs(fan_boost, orig_fan)
+                logger.info(f"Restored fan mode on {fan_boost} to {orig_fan}.")
+        self.saved_fan_boost.clear()
+
+        # F. Restore powerprofilesctl (only if this plugin changed it)
+        if self.power_profile_set_by_us and shutil.which("powerprofilesctl"):
+            target_profile = self.saved_power_profile or "balanced"
             try:
-                subprocess.run(["powerprofilesctl", "set", target_profile], check=False)
+                subprocess.run(["powerprofilesctl", "set", target_profile], check=False, timeout=5.0)
                 logger.info(f"Restored platform power profile to {target_profile}.")
             except Exception:
                 pass
         self.saved_power_profile = None
+        self.power_profile_set_by_us = False
 
         # G. Restore CPU EPP
         for ep, orig_epp in list(self.saved_cpu_epp.items()):
@@ -1588,9 +1943,10 @@ class Plugin:
                 logger.error(f"Failed to restore GPU on {dpm_path}: {e}")
         self.saved_gpu_dpm.clear()
 
-        # 4. Unmute Audio (Hardware ALSA Master & PipeWire)
-        if self.settings.get("mute_audio", True):
+        # 4. Unmute Audio (only if this plugin muted it)
+        if self.audio_muted_by_us:
             self._set_audio_mute(False)
+            self.audio_muted_by_us = False
 
         # 5. Restore LEDs
         for lp, orig_val in list(self.saved_leds.items()):
@@ -1604,6 +1960,11 @@ class Plugin:
             except Exception:
                 pass
         self.saved_leds.clear()
+
+        # 6. Hand input back LAST, in the order that discards everything pressed during
+        # the lockout: by now the console is already lit and back at full speed, so the
+        # first button the user presses is answered immediately.
+        self._release_all_gamepad_inputs()
 
     # ==========================================
     # Background Mode Transitions
@@ -1625,7 +1986,11 @@ class Plugin:
 
         self._acquire_sleep_inhibitor()
         t0 = time.time()
-        await self.loop.run_in_executor(None, self._run_transition_locked, self._apply_power_saving_and_screen_off)
+        self.transition_in_progress = True
+        try:
+            await self.loop.run_in_executor(None, self._run_transition_locked, self._apply_power_saving_and_screen_off)
+        finally:
+            self.transition_in_progress = False
         logger.info(f"[DBG] Power saving applied in {time.time() - t0:.2f}s")
 
         # Reset loop timestamp immediately after setup to avoid false clock-jump
@@ -1640,10 +2005,14 @@ class Plugin:
             return False
 
         logger.info(f"Exiting Background Download Mode (reason: {reason}).")
-        self.wake_cooldown_until = time.time() + 12.0
+        self.wake_cooldown_until = time.time() + WAKE_COOLDOWN_SECONDS
         self.is_background_mode = False
         t0 = time.time()
-        await self.loop.run_in_executor(None, self._run_transition_locked, self._restore_system_power_and_display)
+        self.transition_in_progress = True
+        try:
+            await self.loop.run_in_executor(None, self._run_transition_locked, self._restore_system_power_and_display)
+        finally:
+            self.transition_in_progress = False
         logger.info(f"[DBG] System restored in {time.time() - t0:.2f}s")
         self._update_inhibitor_state()
 
@@ -1657,21 +2026,38 @@ class Plugin:
                 func()
             except Exception as e:
                 logger.error(f"[DBG] Transition {func.__name__} failed: {e}")
+                if func == self._restore_system_power_and_display:
+                    # A restore that died halfway must never leave input grabbed or the
+                    # controller daemons frozen: recovering from that needs a reboot.
+                    try:
+                        self._release_all_gamepad_inputs()
+                    except Exception as inner:
+                        logger.error(f"Emergency input release also failed: {inner}")
 
     async def trigger_suspend(self):
         logger.info("Executing systemctl suspend...")
-        if self.is_background_mode:
-            self._restore_system_power_and_display()
-            self.is_background_mode = False
-
-        self._release_sleep_inhibitor()
-        self._unmask_sleep_targets()
-        await asyncio.sleep(0.5)
-
+        # Makes _plugin_should_act() False, so the power key listener hands the button
+        # back to logind and the inhibitor is dropped before suspend is requested.
+        self.suspend_in_progress = True
         try:
-            subprocess.run(["sudo", "systemctl", "suspend"], check=False)
-        except Exception as e:
-            logger.error(f"Failed to execute systemctl suspend: {e}")
+            if self.is_background_mode:
+                self.is_background_mode = False
+                await self.loop.run_in_executor(None, self._run_transition_locked, self._restore_system_power_and_display)
+
+            self._release_sleep_inhibitor()
+            self._clear_stale_sleep_masks()
+            # Give the listener thread (0.3s poll) time to release the power device.
+            await asyncio.sleep(1.0)
+
+            try:
+                subprocess.run(["systemctl", "suspend"], check=False, timeout=15.0)
+            except Exception as e:
+                logger.error(f"Failed to execute systemctl suspend: {e}")
+            # Stay out of the way while the kernel actually goes down and comes back.
+            await asyncio.sleep(2.0)
+        finally:
+            self.suspend_in_progress = False
+            self.wake_cooldown_until = max(self.wake_cooldown_until, time.time() + WAKE_COOLDOWN_SECONDS)
 
     # ==========================================
     # Periodic Background Loop (Download & Battery)
@@ -1679,33 +2065,51 @@ class Plugin:
     async def _background_monitor_loop(self):
         logger.info("Starting background monitor loop...")
         self.last_loop_timestamp = time.time()
+        interval = ACTIVE_LOOP_INTERVAL
         while not self.stop_threads:
             try:
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(interval)
 
                 now = time.time()
                 dt = now - self.last_loop_timestamp
                 self.last_loop_timestamp = now
+                enabled = bool(self.settings.get("enabled", True))
+                slept_for = interval
 
-                # 0. Kernel Sleep Resume Detection
-                # Loop sleeps 1.5s. Only trigger if dt > 12.0s AND not during the 10s background entry grace period
+                # Poll fast only when there is something to watch over. Idle means the
+                # plugin stays out of the way and barely touches the disk.
+                if not enabled:
+                    interval = DISABLED_LOOP_INTERVAL
+                elif self.is_background_mode or self._is_active_download():
+                    interval = ACTIVE_LOOP_INTERVAL
+                else:
+                    interval = IDLE_LOOP_INTERVAL
+
+                # 0. Kernel Sleep Resume Detection: a gap far larger than the sleep we
+                # just did means the machine was actually suspended in between.
                 time_in_bg = (now - self.background_mode_entered_time) if self.is_background_mode else 999.0
-                if dt > 12.0 and time_in_bg > 10.0:
+                if dt > (slept_for + 10.0) and time_in_bg > 10.0:
                     logger.info(
                         f"System wake from kernel suspend detected (dt={dt:.1f}s, time_in_bg={time_in_bg:.1f}s)! "
                         "Enforcing wake cooldown and exiting background mode."
                     )
-                    self.wake_cooldown_until = now + 12.0
+                    self.wake_cooldown_until = now + WAKE_COOLDOWN_SECONDS
                     if self.is_background_mode:
                         self.is_background_mode = False
-                        self._restore_system_power_and_display()
+                        self.transition_in_progress = True
+                        try:
+                            await self.loop.run_in_executor(
+                                None, self._run_transition_locked, self._restore_system_power_and_display
+                            )
+                        finally:
+                            self.transition_in_progress = False
                         self._update_inhibitor_state()
                         await decky.emit("background_mode_changed", {
                             "is_background_mode": False,
                             "reason": "system_resume_clock_jump",
                         })
 
-                if not self.settings.get("enabled", True):
+                if not enabled:
                     continue
 
                 # 1. Native Download & Network Detection
@@ -1736,8 +2140,10 @@ class Plugin:
                     self.download_info.update(info)
 
                 self.download_info["is_downloading"] = is_dl
-                if detector_paused and not is_dl:
-                    self.download_info["is_paused"] = True
+                if not frontend_active:
+                    # Always recompute: a stuck is_paused=True used to keep the plugin
+                    # from ever protecting a download again.
+                    self.download_info["is_paused"] = bool(detector_paused and not is_dl)
 
                 if is_dl:
                     self.last_download_active_time = now
@@ -1748,25 +2154,28 @@ class Plugin:
                 self._update_inhibitor_state()
 
                 # 2. In Background Mode Checks
-                if self.is_background_mode:
-                    # Enforce screen backlight off and maintain gamepad lockout
-                    if self.settings.get("turn_off_backlight", True):
-                        for bdir in glob.glob("/sys/class/backlight/*"):
-                            bp = os.path.join(bdir, "brightness")
-                            bpow = os.path.join(bdir, "bl_power")
-                            try:
-                                with open(bp, "r") as f:
-                                    if int(f.read().strip()) > 0:
-                                        self._write_sysfs(bp, "0")
-                            except Exception:
-                                pass
-                            try:
-                                with open(bpow, "r") as pf:
-                                    if pf.read().strip() != "4":
-                                        self._write_sysfs(bpow, "4")
-                            except Exception:
-                                pass
+                if self.is_background_mode and not self.transition_in_progress:
+                    # Keep the panels we dimmed dark (Steam re-lights them on its own)
+                    for bp in list(self.saved_brightness.keys()):
+                        bpow = os.path.join(os.path.dirname(bp), "bl_power")
+                        try:
+                            with open(bp, "r") as f:
+                                if int(f.read().strip()) > 0:
+                                    self._write_sysfs(bp, "0")
+                        except Exception:
+                            pass
+                        try:
+                            with open(bpow, "r") as pf:
+                                if pf.read().strip() != "4":
+                                    self._write_sysfs(bpow, "4")
+                        except Exception:
+                            pass
+
+                    # Keep the lockout airtight: drop anything buffered, and grab devices
+                    # that showed up after entering (a pad waking up, a recreated virtual
+                    # controller) so they cannot reach Steam either.
                     self._flush_grabbed_inputs()
+                    self._grab_new_inputs()
 
                     bat = self._get_battery_info()
 
@@ -1788,7 +2197,7 @@ class Plugin:
                     # Condition B: Downloads finished or paused auto-suspend
                     if not is_dl:
                         elapsed_since_dl = now - self.last_download_active_time
-                        auto_sleep_delay = max(60.0, float(self.settings.get("auto_suspend_delay_seconds", 120)))
+                        auto_sleep_delay = max(30.0, float(self.settings.get("auto_suspend_delay_seconds", 120)))
 
                         if elapsed_since_dl >= auto_sleep_delay:
                             logger.info(

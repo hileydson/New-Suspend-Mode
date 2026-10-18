@@ -173,7 +173,7 @@ const SettingsPanel = ({ settings, setSettings, downloadInfo, isBackgroundMode, 
                                                 ? `Speed: ${formatSpeed(downloadInfo.bytes_per_second)}`
                                                 : "Paused" })] }), SP_JSX.jsx(DFL.ProgressBar, { nProgress: downloadInfo.progress_percent || 0 })] }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "Battery Level", description: `Auto-sleep threshold: ${settings.min_battery_threshold}%`, children: SP_JSX.jsxs("span", { style: { fontWeight: "bold" }, children: [batteryCapacity, "% ", isCharging ? "⚡ (Charging)" : "🔋"] }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "Background Download Mode", description: isBackgroundMode
                                 ? "Active (Screen off & power saving enabled)"
-                                : "Inactive (Normal operation)", children: SP_JSX.jsx("span", { className: `dib-status-tag ${isBackgroundMode ? "active" : "idle"}`, children: isBackgroundMode ? "ACTIVE" : "STANDBY" }) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Behavior Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Enable Plugin", description: "Intercepts suspend when downloading, turns off screen, and saves power.", checked: settings.enabled, onChange: (checked) => updateSetting("enabled", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Auto-Suspend Battery Threshold", description: "Console suspends automatically if battery drops below this limit during download.", value: settings.min_battery_threshold, min: 5, max: 30, step: 1, showValue: true, valueSuffix: "%", onChange: (val) => updateSetting("min_battery_threshold", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "HUD Display Countdown", description: "Seconds the download card shows on screen before turning display off.", value: settings.hud_timeout_seconds, min: 0, max: 15, step: 1, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("hud_timeout_seconds", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Completion Suspend Delay", description: "Seconds to wait after all downloads complete before automatically sleeping.", value: settings.auto_suspend_delay_seconds, min: 5, max: 60, step: 5, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("auto_suspend_delay_seconds", val) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Power Saving & Screen Options", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Turn Off Display Backlight", description: "Physically drops LCD/OLED panel backlight brightness to 0.", checked: settings.turn_off_backlight, onChange: (checked) => updateSetting("turn_off_backlight", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pitch Black OLED Mode", description: "Presents a pure black overlay, shutting off individual OLED pixels.", checked: settings.oled_black_screen, onChange: (checked) => updateSetting("oled_black_screen", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle CPU to Powersave", description: "Switches power profile to power-saver and lowers CPU clock frequencies.", checked: settings.throttle_cpu, onChange: (checked) => updateSetting("throttle_cpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle GPU to 200MHz", description: "Sets AMD GPU performance level to low, minimizing GPU power draw.", checked: settings.throttle_gpu, onChange: (checked) => updateSetting("throttle_gpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Mute Audio While Screen Off", description: "Silences audio output during background download to prevent disturbance.", checked: settings.mute_audio, onChange: (checked) => updateSetting("mute_audio", checked) }) })] })] }));
+                                : "Inactive (Normal operation)", children: SP_JSX.jsx("span", { className: `dib-status-tag ${isBackgroundMode ? "active" : "idle"}`, children: isBackgroundMode ? "ACTIVE" : "STANDBY" }) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Behavior Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Enable Plugin", description: "Intercepts suspend when downloading, turns off screen, and saves power.", checked: settings.enabled, onChange: (checked) => updateSetting("enabled", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Auto-Suspend Battery Threshold", description: "Console suspends automatically if battery drops below this limit during download.", value: settings.min_battery_threshold, min: 5, max: 30, step: 1, showValue: true, valueSuffix: "%", onChange: (val) => updateSetting("min_battery_threshold", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "HUD Display Countdown", description: "Seconds the download card shows on screen before turning display off.", value: settings.hud_timeout_seconds, min: 0, max: 15, step: 1, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("hud_timeout_seconds", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Completion Suspend Delay", description: "Seconds to wait after all downloads complete before automatically sleeping.", value: settings.auto_suspend_delay_seconds, min: 30, max: 600, step: 30, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("auto_suspend_delay_seconds", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Block All Input While Screen Is Off", description: "Freezes button mapping and disconnects external controllers so only the power button responds. Turn off if a controller misbehaves after waking.", checked: settings.deep_input_lockout, onChange: (checked) => updateSetting("deep_input_lockout", checked) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Power Saving & Screen Options", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Turn Off Display Backlight", description: "Physically drops LCD/OLED panel backlight brightness to 0.", checked: settings.turn_off_backlight, onChange: (checked) => updateSetting("turn_off_backlight", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pitch Black OLED Mode", description: "Presents a pure black overlay, shutting off individual OLED pixels.", checked: settings.oled_black_screen, onChange: (checked) => updateSetting("oled_black_screen", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle CPU to Powersave", description: "Switches power profile to power-saver and lowers CPU clock frequencies.", checked: settings.throttle_cpu, onChange: (checked) => updateSetting("throttle_cpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle GPU to 200MHz", description: "Sets AMD GPU performance level to low, minimizing GPU power draw.", checked: settings.throttle_gpu, onChange: (checked) => updateSetting("throttle_gpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Mute Audio While Screen Off", description: "Silences audio output during background download to prevent disturbance.", checked: settings.mute_audio, onChange: (checked) => updateSetting("mute_audio", checked) }) })] })] }));
 };
 
 const PLUGIN_STYLES = `
@@ -474,7 +474,16 @@ const DEFAULT_SETTINGS = {
     mute_audio: true,
     turn_off_backlight: true,
     oled_black_screen: true,
+    deep_input_lockout: true,
 };
+// Must match WAKE_COOLDOWN_SECONDS in main.py: the window after a wake in which
+// suspend requests are ignored, so the press that woke the console cannot re-sleep it.
+const WAKE_COOLDOWN_MS = 5000;
+// Backend round-trip cadence. While nothing is downloading the plugin polls slowly and
+// sends nothing, so an enabled plugin with no download costs SteamOS nothing.
+const POLL_ACTIVE_MS = 2000;
+const POLL_IDLE_MS = 5000;
+const POLL_DISABLED_MS = 10000;
 const DEFAULT_DOWNLOAD_INFO = {
     is_downloading: false,
     bytes_per_second: 0,
@@ -501,23 +510,44 @@ function notifyStateListeners() {
     stateListeners.forEach((cb) => cb());
 }
 /**
+ * Closes any open side menu / Quick Access panel, repeatedly, for ~4 seconds.
+ *
+ * A button pressed while the screen was off is queued by the frozen controller daemon
+ * and replayed when it is thawed during the wake, which lands a few hundred
+ * milliseconds to a few seconds in. So closing once is not enough: the panel would
+ * simply open again right afterwards. Retrying across that whole window is what stops
+ * the console from coming back with the sidebar exposed. The current screen is left
+ * alone on purpose, so waking up never interrupts a game that is running.
+ */
+const closeSteamSideMenus = () => {
+    const close = () => {
+        try {
+            DFL.Navigation.CloseSideMenus?.();
+        }
+        catch (e) { }
+    };
+    close();
+    [150, 400, 800, 1400, 2000, 2800, 3600].forEach((delay) => setTimeout(close, delay));
+};
+/**
  * Triggers a complete system wake:
  * 1. Synchronously drops any black screen or HUD from the DOM
- * 2. Activates 12-second cooldown against re-sleep
+ * 2. Activates the cooldown against re-sleep
  * 3. Calls backend exit_background_mode to restore hardware/backlight
- * 4. Navigates cleanly to the Steam Home screen
+ * 4. Keeps dismissing any menu a stray button press may have opened
  */
 const triggerFullWake = async (reason = "wake") => {
     console.log("[DownloadInBackground] triggerFullWake called! Reason:", reason);
     sharedIsBackgroundMode = false;
     sharedShowHud = false;
-    sharedWakeCooldownUntil = Date.now() + 12000;
+    sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
     if (sharedHudTimer) {
         clearInterval(sharedHudTimer);
         sharedHudTimer = null;
     }
     // Instantly unmounts overlay from the DOM
     notifyStateListeners();
+    closeSteamSideMenus();
     try {
         await call("exit_background_mode", reason);
     }
@@ -660,7 +690,8 @@ const PluginContent = () => {
 var index = definePlugin(() => {
     // Register global overlay in SteamOS DOM
     routerHook.addGlobalComponent("DownloadInBackgroundOverlay", GlobalOverlayContainer);
-    let pollInterval = null;
+    let pollTimer = null;
+    let pollStopped = false;
     let dlUnregister = null;
     let suspendUnregister = null;
     let modeUnregister = null;
@@ -676,12 +707,13 @@ var index = definePlugin(() => {
                 // System awakened from backend!
                 sharedIsBackgroundMode = false;
                 sharedShowHud = false;
-                sharedWakeCooldownUntil = Date.now() + 12000;
+                sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
                 if (sharedHudTimer) {
                     clearInterval(sharedHudTimer);
                     sharedHudTimer = null;
                 }
                 notifyStateListeners();
+                closeSteamSideMenus();
             }
             else {
                 sharedIsBackgroundMode = true;
@@ -738,6 +770,10 @@ var index = definePlugin(() => {
         });
     }
     catch (e) { }
+    // Last snapshot read straight from the Steam client, and when it was taken.
+    // It is more accurate than the backend's own detection, but only while it is fresh.
+    let lastFrontendInfo = null;
+    let lastFrontendInfoTime = 0;
     // Sync state with Python backend
     const syncBackendStatus = async () => {
         try {
@@ -748,12 +784,13 @@ var index = definePlugin(() => {
                     console.log("[DownloadInBackground] Backend woke up -> Synchronizing frontend!");
                     sharedIsBackgroundMode = false;
                     sharedShowHud = false;
-                    sharedWakeCooldownUntil = Date.now() + 12000;
+                    sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
                     if (sharedHudTimer) {
                         clearInterval(sharedHudTimer);
                         sharedHudTimer = null;
                     }
                     notifyStateListeners();
+                    closeSteamSideMenus();
                 }
                 else {
                     sharedIsBackgroundMode = backendIsBg;
@@ -765,15 +802,11 @@ var index = definePlugin(() => {
                     sharedSettings = { ...sharedSettings, ...status.settings };
                 }
                 if (status.download_info) {
-                    if (window.SteamClient?.Downloads?.GetDownloadOverview) {
-                        sharedDownloadInfo = {
-                            ...status.download_info,
-                            ...sharedDownloadInfo,
-                        };
-                    }
-                    else {
-                        sharedDownloadInfo = { ...sharedDownloadInfo, ...status.download_info };
-                    }
+                    const frontendIsFresh = Date.now() - lastFrontendInfoTime < 6000;
+                    sharedDownloadInfo =
+                        frontendIsFresh && lastFrontendInfo
+                            ? { ...status.download_info, ...lastFrontendInfo }
+                            : { ...sharedDownloadInfo, ...status.download_info };
                 }
                 notifyStateListeners();
             }
@@ -782,8 +815,33 @@ var index = definePlugin(() => {
             console.error("[DownloadInBackground] Error polling backend status:", e);
         }
     };
+    // Hand download metrics to the backend only when they actually changed, or every 8s
+    // while downloading so the backend knows the frontend is still reporting.
+    let lastSentKey = "";
+    let lastSentTime = 0;
+    const pushDownloadStatus = (info) => {
+        const key = [
+            info.is_downloading,
+            info.is_paused,
+            info.game_title,
+            Math.round(info.progress_percent),
+        ].join("|");
+        const now = Date.now();
+        const isIdle = !info.is_downloading && !info.is_paused;
+        if (key === lastSentKey && (isIdle || now - lastSentTime < 8000)) {
+            // Idle and unchanged: say nothing at all, so an enabled plugin with no download
+            // is completely silent instead of poking the backend twice a second.
+            return;
+        }
+        lastSentKey = key;
+        lastSentTime = now;
+        call("update_download_status", info).catch(() => { });
+    };
     // Poll / Query SteamClient Downloads API
     const querySteamDownloads = async () => {
+        if (sharedSettings.enabled === false) {
+            return;
+        }
         try {
             if (window.SteamClient?.Downloads?.GetDownloadOverview) {
                 const overview = window.SteamClient.Downloads.GetDownloadOverview();
@@ -843,9 +901,11 @@ var index = definePlugin(() => {
                         estimated_seconds_remaining: isDl ? etaSeconds : 0,
                     };
                     sharedDownloadInfo = updatedInfo;
+                    lastFrontendInfo = updatedInfo;
+                    lastFrontendInfoTime = Date.now();
                     notifyStateListeners();
                     // Sync download metrics to backend
-                    call("update_download_status", updatedInfo).catch(() => { });
+                    pushDownloadStatus(updatedInfo);
                 }
             }
         }
@@ -886,16 +946,24 @@ var index = definePlugin(() => {
                     await triggerFullWake("power_button_wake");
                     return false; // Prevent Steam from suspending
                 }
-                // 2. Cooldown check: ignore suspend request if system just woke up within 12 seconds
+                // 2. Cooldown check: ignore suspend request if the system just woke up
                 if (now < sharedWakeCooldownUntil) {
                     console.log("[DownloadInBackground] Ignoring suspend request: within wake cooldown period.");
                     return false;
                 }
-                // 3. Normal suspend check: refresh download metrics first
+                // 3. With the plugin off, or nothing downloading as of the last poll, get out of
+                // the way immediately: no backend round-trip, no HUD, so SteamOS suspends with
+                // its own animation exactly as it does without this plugin installed.
+                if (!sharedSettings.enabled) {
+                    return true;
+                }
+                if (!sharedDownloadInfo.is_downloading || sharedDownloadInfo.is_paused) {
+                    console.log("[DownloadInBackground] No active download -> Allowing stock SteamOS suspend.");
+                    return true;
+                }
+                // 4. Confirm against the Steam client before taking the suspend over
                 await querySteamDownloads();
-                const isDownloading = Boolean(sharedSettings.enabled &&
-                    sharedDownloadInfo.is_downloading &&
-                    !sharedDownloadInfo.is_paused);
+                const isDownloading = Boolean(sharedDownloadInfo.is_downloading && !sharedDownloadInfo.is_paused);
                 if (isDownloading) {
                     console.log("[DownloadInBackground] Active download running -> Intercepting suspend and showing HUD");
                     try {
@@ -918,13 +986,31 @@ var index = definePlugin(() => {
     catch (e) {
         console.warn("[DownloadInBackground] Could not hook SteamClient.System.RegisterForOnSuspendRequest:", e);
     }
-    // Initial fetch and start interval
-    syncBackendStatus();
-    querySteamDownloads();
-    pollInterval = setInterval(() => {
-        syncBackendStatus();
-        querySteamDownloads();
-    }, 1500);
+    // Poll the backend on an adaptive schedule instead of a fixed 1.5s interval
+    const scheduleNextPoll = () => {
+        const isActive = sharedIsBackgroundMode ||
+            sharedShowHud ||
+            Boolean(sharedDownloadInfo.is_downloading && !sharedDownloadInfo.is_paused);
+        const delay = !sharedSettings.enabled
+            ? POLL_DISABLED_MS
+            : isActive
+                ? POLL_ACTIVE_MS
+                : POLL_IDLE_MS;
+        pollTimer = setTimeout(runPoll, delay);
+    };
+    const runPoll = async () => {
+        try {
+            await syncBackendStatus();
+            await querySteamDownloads();
+        }
+        finally {
+            if (!pollStopped) {
+                scheduleNextPoll();
+            }
+        }
+    };
+    // Initial fetch, then keep polling
+    runPoll();
     // Kernel sleep resume detection via clock-jump heartbeat
     let lastHeartbeat = Date.now();
     const heartbeatInterval = setInterval(() => {
@@ -939,7 +1025,7 @@ var index = definePlugin(() => {
         }
         if (delta > 15000) {
             console.log(`[DownloadInBackground] Kernel resume detected (delta=${delta}ms)! Enforcing wake state.`);
-            sharedWakeCooldownUntil = Date.now() + 12000;
+            sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
             if (sharedHudTimer) {
                 clearInterval(sharedHudTimer);
                 sharedHudTimer = null;
@@ -949,15 +1035,17 @@ var index = definePlugin(() => {
             notifyStateListeners();
             call("exit_background_mode", "kernel_resume_clock_jump").catch(() => { });
         }
-    }, 1000);
+    }, 2000);
     return {
         name: "Download in Background",
         icon: SP_JSX.jsx(FaDownload, {}),
         content: SP_JSX.jsx(PluginContent, {}),
         onDismount() {
             routerHook.removeGlobalComponent("DownloadInBackgroundOverlay");
-            if (pollInterval) {
-                clearInterval(pollInterval);
+            pollStopped = true;
+            if (pollTimer) {
+                clearTimeout(pollTimer);
+                pollTimer = null;
             }
             if (heartbeatInterval) {
                 clearInterval(heartbeatInterval);

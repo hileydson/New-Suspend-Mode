@@ -37,7 +37,18 @@ const DEFAULT_SETTINGS: PluginSettings = {
   mute_audio: true,
   turn_off_backlight: true,
   oled_black_screen: true,
+  deep_input_lockout: true,
 };
+
+// Must match WAKE_COOLDOWN_SECONDS in main.py: the window after a wake in which
+// suspend requests are ignored, so the press that woke the console cannot re-sleep it.
+const WAKE_COOLDOWN_MS = 5000;
+
+// Backend round-trip cadence. While nothing is downloading the plugin polls slowly and
+// sends nothing, so an enabled plugin with no download costs SteamOS nothing.
+const POLL_ACTIVE_MS = 2000;
+const POLL_IDLE_MS = 5000;
+const POLL_DISABLED_MS = 10000;
 
 const DEFAULT_DOWNLOAD_INFO: DownloadInfo = {
   is_downloading: false,
@@ -68,54 +79,37 @@ function notifyStateListeners() {
 }
 
 /**
- * Forcibly navigates SteamOS Gaming Mode directly to the HOME screen,
- * closing any side menus and executing official route methods.
+ * Closes any open side menu / Quick Access panel, repeatedly, for ~4 seconds.
+ *
+ * A button pressed while the screen was off is queued by the frozen controller daemon
+ * and replayed when it is thawed during the wake, which lands a few hundred
+ * milliseconds to a few seconds in. So closing once is not enough: the panel would
+ * simply open again right afterwards. Retrying across that whole window is what stops
+ * the console from coming back with the sidebar exposed. The current screen is left
+ * alone on purpose, so waking up never interrupts a game that is running.
  */
-const navigateToSteamHome = () => {
-  console.log("[DownloadInBackground] Forcing navigation to Steam Home screen...");
-  try {
-    Navigation.CloseSideMenus?.();
-  } catch (e) {}
-
-  try {
-    Navigation.Navigate?.("/library/home");
-  } catch (e) {}
-
-  try {
-    Navigation.NavigateToLibraryTab?.();
-  } catch (e) {}
-
-  try {
-    window.SteamClient?.URL?.ExecuteSteamURL?.("steam://open/library/home");
-  } catch (e) {}
-
-  try {
-    window.SteamClient?.URL?.ExecuteSteamURL?.("steam://open/main");
-  } catch (e) {}
-
-  try {
-    window.SteamClient?.System?.NavigateToLibraryHome?.();
-  } catch (e) {}
-
-  try {
-    if (window.location && window.location.hash !== "#/library/home") {
-      window.location.hash = "#/library/home";
-    }
-  } catch (e) {}
+const closeSteamSideMenus = () => {
+  const close = () => {
+    try {
+      Navigation.CloseSideMenus?.();
+    } catch (e) {}
+  };
+  close();
+  [150, 400, 800, 1400, 2000, 2800, 3600].forEach((delay) => setTimeout(close, delay));
 };
 
 /**
  * Triggers a complete system wake:
  * 1. Synchronously drops any black screen or HUD from the DOM
- * 2. Activates 12-second cooldown against re-sleep
+ * 2. Activates the cooldown against re-sleep
  * 3. Calls backend exit_background_mode to restore hardware/backlight
- * 4. Navigates cleanly to the Steam Home screen
+ * 4. Keeps dismissing any menu a stray button press may have opened
  */
 const triggerFullWake = async (reason: string = "wake") => {
   console.log("[DownloadInBackground] triggerFullWake called! Reason:", reason);
   sharedIsBackgroundMode = false;
   sharedShowHud = false;
-  sharedWakeCooldownUntil = Date.now() + 12000;
+  sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
 
   if (sharedHudTimer) {
     clearInterval(sharedHudTimer);
@@ -124,6 +118,7 @@ const triggerFullWake = async (reason: string = "wake") => {
 
   // Instantly unmounts overlay from the DOM
   notifyStateListeners();
+  closeSteamSideMenus();
 
   try {
     await call("exit_background_mode", reason);
@@ -316,7 +311,8 @@ export default definePlugin(() => {
   // Register global overlay in SteamOS DOM
   routerHook.addGlobalComponent("DownloadInBackgroundOverlay", GlobalOverlayContainer);
 
-  let pollInterval: NodeJS.Timeout | null = null;
+  let pollTimer: NodeJS.Timeout | null = null;
+  let pollStopped = false;
   let dlUnregister: (() => void) | null = null;
   let suspendUnregister: (() => void) | null = null;
   let modeUnregister: any = null;
@@ -333,12 +329,13 @@ export default definePlugin(() => {
         // System awakened from backend!
         sharedIsBackgroundMode = false;
         sharedShowHud = false;
-        sharedWakeCooldownUntil = Date.now() + 12000;
+        sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
         if (sharedHudTimer) {
           clearInterval(sharedHudTimer);
           sharedHudTimer = null;
         }
         notifyStateListeners();
+        closeSteamSideMenus();
       } else {
         sharedIsBackgroundMode = true;
         sharedBackgroundModeEnteredTime = Date.now();
@@ -394,6 +391,11 @@ export default definePlugin(() => {
     });
   } catch (e) {}
 
+  // Last snapshot read straight from the Steam client, and when it was taken.
+  // It is more accurate than the backend's own detection, but only while it is fresh.
+  let lastFrontendInfo: DownloadInfo | null = null;
+  let lastFrontendInfoTime = 0;
+
   // Sync state with Python backend
   const syncBackendStatus = async () => {
     try {
@@ -404,12 +406,13 @@ export default definePlugin(() => {
           console.log("[DownloadInBackground] Backend woke up -> Synchronizing frontend!");
           sharedIsBackgroundMode = false;
           sharedShowHud = false;
-          sharedWakeCooldownUntil = Date.now() + 12000;
+          sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
           if (sharedHudTimer) {
             clearInterval(sharedHudTimer);
             sharedHudTimer = null;
           }
           notifyStateListeners();
+          closeSteamSideMenus();
         } else {
           sharedIsBackgroundMode = backendIsBg;
         }
@@ -421,14 +424,11 @@ export default definePlugin(() => {
           sharedSettings = { ...sharedSettings, ...status.settings };
         }
         if (status.download_info) {
-          if (window.SteamClient?.Downloads?.GetDownloadOverview) {
-            sharedDownloadInfo = {
-              ...status.download_info,
-              ...sharedDownloadInfo,
-            };
-          } else {
-            sharedDownloadInfo = { ...sharedDownloadInfo, ...status.download_info };
-          }
+          const frontendIsFresh = Date.now() - lastFrontendInfoTime < 6000;
+          sharedDownloadInfo =
+            frontendIsFresh && lastFrontendInfo
+              ? { ...status.download_info, ...lastFrontendInfo }
+              : { ...sharedDownloadInfo, ...status.download_info };
         }
         notifyStateListeners();
       }
@@ -437,8 +437,34 @@ export default definePlugin(() => {
     }
   };
 
+  // Hand download metrics to the backend only when they actually changed, or every 8s
+  // while downloading so the backend knows the frontend is still reporting.
+  let lastSentKey = "";
+  let lastSentTime = 0;
+  const pushDownloadStatus = (info: DownloadInfo) => {
+    const key = [
+      info.is_downloading,
+      info.is_paused,
+      info.game_title,
+      Math.round(info.progress_percent),
+    ].join("|");
+    const now = Date.now();
+    const isIdle = !info.is_downloading && !info.is_paused;
+    if (key === lastSentKey && (isIdle || now - lastSentTime < 8000)) {
+      // Idle and unchanged: say nothing at all, so an enabled plugin with no download
+      // is completely silent instead of poking the backend twice a second.
+      return;
+    }
+    lastSentKey = key;
+    lastSentTime = now;
+    call("update_download_status", info).catch(() => {});
+  };
+
   // Poll / Query SteamClient Downloads API
   const querySteamDownloads = async () => {
+    if (sharedSettings.enabled === false) {
+      return;
+    }
     try {
       if (window.SteamClient?.Downloads?.GetDownloadOverview) {
         const overview = window.SteamClient.Downloads.GetDownloadOverview();
@@ -510,10 +536,12 @@ export default definePlugin(() => {
           };
 
           sharedDownloadInfo = updatedInfo;
+          lastFrontendInfo = updatedInfo;
+          lastFrontendInfoTime = Date.now();
           notifyStateListeners();
 
           // Sync download metrics to backend
-          call("update_download_status", updatedInfo).catch(() => {});
+          pushDownloadStatus(updatedInfo);
         }
       }
     } catch (e) {
@@ -556,19 +584,28 @@ export default definePlugin(() => {
           return false; // Prevent Steam from suspending
         }
 
-        // 2. Cooldown check: ignore suspend request if system just woke up within 12 seconds
+        // 2. Cooldown check: ignore suspend request if the system just woke up
         if (now < sharedWakeCooldownUntil) {
           console.log("[DownloadInBackground] Ignoring suspend request: within wake cooldown period.");
           return false;
         }
 
-        // 3. Normal suspend check: refresh download metrics first
+        // 3. With the plugin off, or nothing downloading as of the last poll, get out of
+        // the way immediately: no backend round-trip, no HUD, so SteamOS suspends with
+        // its own animation exactly as it does without this plugin installed.
+        if (!sharedSettings.enabled) {
+          return true;
+        }
+        if (!sharedDownloadInfo.is_downloading || sharedDownloadInfo.is_paused) {
+          console.log("[DownloadInBackground] No active download -> Allowing stock SteamOS suspend.");
+          return true;
+        }
+
+        // 4. Confirm against the Steam client before taking the suspend over
         await querySteamDownloads();
 
         const isDownloading = Boolean(
-          sharedSettings.enabled &&
-          sharedDownloadInfo.is_downloading &&
-          !sharedDownloadInfo.is_paused
+          sharedDownloadInfo.is_downloading && !sharedDownloadInfo.is_paused
         );
 
         if (isDownloading) {
@@ -593,13 +630,33 @@ export default definePlugin(() => {
     console.warn("[DownloadInBackground] Could not hook SteamClient.System.RegisterForOnSuspendRequest:", e);
   }
 
-  // Initial fetch and start interval
-  syncBackendStatus();
-  querySteamDownloads();
-  pollInterval = setInterval(() => {
-    syncBackendStatus();
-    querySteamDownloads();
-  }, 1500);
+  // Poll the backend on an adaptive schedule instead of a fixed 1.5s interval
+  const scheduleNextPoll = () => {
+    const isActive =
+      sharedIsBackgroundMode ||
+      sharedShowHud ||
+      Boolean(sharedDownloadInfo.is_downloading && !sharedDownloadInfo.is_paused);
+    const delay = !sharedSettings.enabled
+      ? POLL_DISABLED_MS
+      : isActive
+      ? POLL_ACTIVE_MS
+      : POLL_IDLE_MS;
+    pollTimer = setTimeout(runPoll, delay);
+  };
+
+  const runPoll = async () => {
+    try {
+      await syncBackendStatus();
+      await querySteamDownloads();
+    } finally {
+      if (!pollStopped) {
+        scheduleNextPoll();
+      }
+    }
+  };
+
+  // Initial fetch, then keep polling
+  runPoll();
 
   // Kernel sleep resume detection via clock-jump heartbeat
   let lastHeartbeat = Date.now();
@@ -617,7 +674,7 @@ export default definePlugin(() => {
 
     if (delta > 15000) {
       console.log(`[DownloadInBackground] Kernel resume detected (delta=${delta}ms)! Enforcing wake state.`);
-      sharedWakeCooldownUntil = Date.now() + 12000;
+      sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
       if (sharedHudTimer) {
         clearInterval(sharedHudTimer);
         sharedHudTimer = null;
@@ -627,7 +684,7 @@ export default definePlugin(() => {
       notifyStateListeners();
       call("exit_background_mode", "kernel_resume_clock_jump").catch(() => {});
     }
-  }, 1000);
+  }, 2000);
 
   return {
     name: "Download in Background",
@@ -635,8 +692,10 @@ export default definePlugin(() => {
     content: <PluginContent />,
     onDismount() {
       routerHook.removeGlobalComponent("DownloadInBackgroundOverlay");
-      if (pollInterval) {
-        clearInterval(pollInterval);
+      pollStopped = true;
+      if (pollTimer) {
+        clearTimeout(pollTimer);
+        pollTimer = null;
       }
       if (heartbeatInterval) {
         clearInterval(heartbeatInterval);
