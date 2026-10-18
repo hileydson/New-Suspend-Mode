@@ -687,47 +687,19 @@ class Plugin:
     # ==========================================
     SLEEP_TARGETS = ("sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target")
 
-    # Masked while standby is armed. Only the suspend pair: a real hibernate stays
-    # possible, and our own low-battery suspend unmasks before asking for it.
-    SLEEP_BLOCK_TARGETS = ("sleep.target", "suspend.target")
-
-    def _set_sleep_block(self, block: bool):
-        """
-        Masks or unmasks the systemd sleep targets.
-
-        A logind 'block' inhibitor is not always enough on its own: a privileged caller
-        can be allowed to ignore inhibitor locks (polkit's suspend-ignore-inhibit), and
-        then picking Sleep in the SteamOS power menu suspends the console for real
-        instead of entering standby. Masking makes the operation fail at the systemd
-        level, whoever asks for it. Used ONLY while the standby setting is on, and undone
-        on exit, on unload, when the setting is turned off, and at startup.
-        """
-        action = "mask" if block else "unmask"
-        try:
-            subprocess.run(
-                ["systemctl", action, "--runtime"] + list(self.SLEEP_BLOCK_TARGETS),
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10.0,
-            )
-            self.sleep_targets_masked = block
-            logger.info(
-                f"{'Blocked' if block else 'Unblocked'} systemd sleep targets "
-                f"({', '.join(self.SLEEP_BLOCK_TARGETS)}) for standby mode."
-            )
-        except Exception as e:
-            logger.error(f"Failed to {action} sleep targets: {e}")
-
     def _clear_stale_sleep_masks(self):
         """
         Removes runtime masks on the systemd sleep targets.
 
-        Earlier versions masked these targets to block suspend, which breaks suspend
-        system-wide for as long as the mask stays in place (and survives a plugin crash).
-        A logind 'block' inhibitor does the same job without that risk, so the masks are
-        only ever cleaned up here. Permanent masks made by the user live in /etc and are
-        not touched by --runtime.
+        Earlier versions masked these targets to stop the power menu's Sleep from going
+        through. It did stop it, but in the worst possible way: Steam had already begun
+        its own suspend sequence and blanked the screen, the suspend then failed, and the
+        session was left on a black lit screen it could never come back from.
+
+        The menu is intercepted in the Steam client itself now, before any of that, so
+        nothing is ever masked. This only cleans up masks left behind by those versions
+        (and a plugin crash), which is also why it runs at startup. Permanent masks the
+        user made live in /etc and are not touched by --runtime.
         """
         stale = [t for t in self.SLEEP_TARGETS if os.path.islink(f"/run/systemd/system/{t}")]
         self.sleep_targets_masked = False
@@ -865,24 +837,28 @@ class Plugin:
         elif not should_inhibit and self.inhibitor_proc is not None:
             self._release_sleep_inhibitor()
 
-        # Standby replaces the system's sleep entirely, so it also needs the suspend
-        # targets blocked: that is what stops the power menu's Sleep from going through.
-        want_block = should_inhibit and bool(self.settings.get("standby_on_power_off", False))
-        if want_block != self.sleep_targets_masked:
-            self._set_sleep_block(want_block)
+        # Nothing is masked at the systemd level any more: the power menu's Sleep is taken
+        # over inside the Steam client instead, before it ever reaches logind.
 
     # ==========================================
     # Suspend Interception & Logind Watcher
     # ==========================================
-    def _trigger_suspend_intercepted(self):
-        """Called whenever a suspend attempt is detected while downloads are active."""
+    def _trigger_suspend_intercepted(self) -> str:
+        """
+        Called whenever a suspend attempt is detected while downloads are active.
+
+        Returns the verdict, so the caller knows what happened: 'wake', 'ignored',
+        'standby', 'hud', or 'allow' when the suspend should simply go ahead as usual.
+        The Steam power menu needs that last answer: it is the one path where the plugin
+        has to hand the suspend back after deciding not to take it.
+        """
         now = time.time()
         time_in_bg = (now - self.background_mode_entered_time) if self.is_background_mode else 999.0
         # If currently in background mode, any suspend attempt after grace period is a WAKE action!
         if self.is_background_mode:
             if time_in_bg < LOGIND_GRACE_SECONDS:
                 logger.info(f"Ignoring suspend intercept during background entry grace period ({time_in_bg:.1f}s).")
-                return
+                return "ignored"
             logger.info("Suspend attempt detected while in background mode -> Waking system!")
             self.wake_cooldown_until = now + WAKE_COOLDOWN_SECONDS
             if self.loop and self.loop.is_running():
@@ -890,33 +866,34 @@ class Plugin:
                     self.exit_background_mode("suspend_attempt_wake"),
                     self.loop
                 )
-            return
+            return "wake"
 
         # Cooldown: Ignore any suspend request if system just woke up within 12 seconds
         if now < self.wake_cooldown_until:
             logger.info("Ignoring suspend attempt because system just woke up from background mode.")
-            return
+            return "ignored"
 
         # Double check against the real state, not the last poll: a download paused a
         # moment ago must already count as idle here.
         if not self._refresh_download_state():
             if self.settings.get("standby_on_power_off", False):
                 if now - self.last_suspend_intercept_time < 3.0:
-                    return
+                    return "ignored"
                 self.last_suspend_intercept_time = now
                 logger.info("Sleep requested with standby enabled -> standby splash, then entering.")
                 if self.loop and self.loop.is_running():
                     asyncio.run_coroutine_threadsafe(
                         self.request_standby("standby_sleep_request"), self.loop
                     )
-                return
+                return "standby"
             logger.info("Suspend attempt not intercepted: Download is paused or idle. Allowing normal suspend.")
+            # The inhibitor goes first, or the suspend we just allowed would be blocked.
             self._update_inhibitor_state()
-            return
+            return "allow"
 
         # Debounce to prevent double trigger within 3 seconds
         if now - self.last_suspend_intercept_time < 3.0:
-            return
+            return "ignored"
         self.last_suspend_intercept_time = now
 
         logger.info("Suspend attempt intercepted while downloading -> Showing HUD!")
@@ -930,6 +907,7 @@ class Plugin:
                 }),
                 self.loop
             )
+        return "hud"
 
     async def request_standby(self, reason: str = "standby") -> bool:
         """
@@ -966,10 +944,20 @@ class Plugin:
         finally:
             self.standby_request_pending = False
 
-    async def trigger_suspend_intercept(self) -> bool:
-        """API called by frontend when SteamClient intercepts suspend."""
-        self._trigger_suspend_intercepted()
-        return True
+    async def trigger_suspend_intercept(self) -> Dict[str, Any]:
+        """
+        API called by the frontend when the Steam client intercepts a suspend.
+
+        The verdict comes back because the frontend is the only one that can hand a
+        suspend over to SteamOS after the fact: when this says 'allow', the Steam power
+        menu's Sleep has to go through as usual.
+        """
+        verdict = self._trigger_suspend_intercepted()
+        return {
+            "verdict": verdict,
+            "intercepted": verdict in ("hud", "standby", "wake"),
+            "download_info": self.download_info,
+        }
 
     def _logind_watcher_worker(self):
         """Watches systemd-logind journal logs to intercept UI suspend clicks."""
@@ -1580,19 +1568,147 @@ class Plugin:
             pass
         return None
 
-    def _bluetooth_controller_addresses(self) -> List[Tuple[str, str]]:
-        """(address, name) for each connected Bluetooth controller."""
-        found: List[Tuple[str, str]] = []
-        for pad in self._find_external_gamepads():
-            if pad["bustype"] != BUS_BLUETOOTH:
+    # bluez reports gamepads with one of these icons. Used to make sure a Bluetooth
+    # headset or keyboard is never dropped along with the controllers.
+    GAMEPAD_BT_ICONS = {"input-gaming", "input-gamepad", "input-joystick"}
+    MAC_RE = re.compile(r"^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$")
+
+    def _bt_adapters(self) -> List[str]:
+        """Adapter names (hci0, hci1, ...) present on this machine."""
+        return sorted(os.path.basename(p) for p in glob.glob("/sys/class/bluetooth/hci*"))
+
+    def _bt_get_property(self, object_path: str, name: str) -> Optional[str]:
+        """
+        Reads one org.bluez device property over D-Bus.
+
+        busctl is used instead of bluetoothctl on purpose: bluetoothctl drops into its
+        interactive shell whenever it does not like an argument, and then blocks reading
+        stdin until the timeout kills it. That is exactly how a disconnect can silently
+        end up doing nothing, which is why the controller stayed connected.
+        """
+        if not shutil.which("busctl"):
+            return None
+        try:
+            res = subprocess.run(
+                ["busctl", "--no-pager", "get-property", "org.bluez", object_path,
+                 "org.bluez.Device1", name],
+                capture_output=True, text=True, check=False, timeout=6.0,
+                stdin=subprocess.DEVNULL,
+            )
+        except Exception:
+            return None
+        if res.returncode != 0:
+            return None
+        # busctl prints '<signature> <value>', e.g. 'b true' or 's "input-gaming"'.
+        parts = (res.stdout or "").strip().split(" ", 1)
+        if len(parts) != 2:
+            return None
+        return parts[1].strip().strip('"')
+
+    def _bt_object_path(self, address: str) -> Optional[str]:
+        """The org.bluez object path of a remote device, found by asking each adapter."""
+        node = "dev_" + address.upper().replace(":", "_")
+        for hci in self._bt_adapters():
+            path = f"/org/bluez/{hci}/{node}"
+            if self._bt_get_property(path, "Connected") is not None:
+                return path
+        return None
+
+    def _bluetooth_input_addresses(self) -> Dict[str, str]:
+        """
+        {address: name} for every connected Bluetooth gamepad that has an input node.
+
+        Unlike the HID unbind path this does not filter by vendor: the built-in pad of a
+        handheld is never on Bluetooth, so whatever shows up here is an external pad.
+        """
+        found: Dict[str, str] = {}
+        have_busctl = bool(shutil.which("busctl"))
+        for input_dir, _event_path, name, phys in self._iter_input_devices():
+            if not glob.glob(os.path.join(input_dir, "js*")):
                 continue
-            # Bluetooth HID devices carry their address in the input device's uniq field.
-            address = self._read_attr(pad["input_dir"], "uniq").strip()
-            if address:
-                found.append((address.upper(), pad["name"]))
-            else:
-                logger.info(f"'{pad['name']}' is Bluetooth but reports no address; cannot disconnect it.")
+            if self._read_attr(os.path.join(input_dir, "id"), "bustype").lower() != BUS_BLUETOOTH:
+                continue
+            # Drivers disagree on which field holds the remote address and which holds
+            # the adapter's, so both are tried and bluez decides which one is real.
+            resolved = False
+            for raw in (self._read_attr(input_dir, "uniq"), phys):
+                address = (raw or "").strip().upper()
+                if not self.MAC_RE.match(address):
+                    continue
+                if have_busctl and self._bt_object_path(address) is None:
+                    continue  # The local adapter's own address, not the controller's
+                found[address] = name or address
+                resolved = True
+                break
+            if not resolved:
+                logger.info(f"'{name}' is a Bluetooth gamepad but its address could not be resolved.")
         return found
+
+    def _bluez_connected_gamepads(self) -> Dict[str, str]:
+        """
+        {address: name} for paired devices bluez itself reports as connected gamepads.
+
+        Second source, for a controller whose input node does not expose its address (or
+        whose evdev node Steam has already taken over). Paired devices are listed from
+        bluez's own state directory and then checked over D-Bus.
+        """
+        found: Dict[str, str] = {}
+        if not shutil.which("busctl"):
+            return found
+        for dev_dir in glob.glob("/var/lib/bluetooth/*/??:??:??:??:??:??"):
+            address = os.path.basename(dev_dir).upper()
+            if not self.MAC_RE.match(address) or address in found:
+                continue
+            path = self._bt_object_path(address)
+            if not path or self._bt_get_property(path, "Connected") != "true":
+                continue
+            icon = (self._bt_get_property(path, "Icon") or "").lower()
+            if icon in self.GAMEPAD_BT_ICONS:
+                found[address] = self._bt_get_property(path, "Alias") or address
+        return found
+
+    def _bluetooth_controller_addresses(self) -> List[Tuple[str, str]]:
+        """(address, name) for each connected Bluetooth controller, from both sources."""
+        candidates = dict(self._bluez_connected_gamepads())
+        candidates.update(self._bluetooth_input_addresses())  # Better names win
+        return sorted(candidates.items())
+
+    def _bt_disconnect(self, address: str, name: str) -> bool:
+        """Disconnects one Bluetooth device: D-Bus first, bluetoothctl as a fallback."""
+        path = self._bt_object_path(address)
+        if path:
+            try:
+                res = subprocess.run(
+                    ["busctl", "--no-pager", "call", "org.bluez", path,
+                     "org.bluez.Device1", "Disconnect"],
+                    capture_output=True, text=True, check=False, timeout=12.0,
+                    stdin=subprocess.DEVNULL,
+                )
+                if res.returncode == 0:
+                    logger.info(f"Disconnected Bluetooth controller '{name}' ({address}) over D-Bus.")
+                    return True
+                logger.warning(
+                    f"D-Bus disconnect of '{name}' ({address}) failed: {(res.stderr or '').strip()}"
+                )
+            except Exception as e:
+                logger.warning(f"D-Bus disconnect of '{name}' ({address}) failed: {e}")
+
+        if not shutil.which("bluetoothctl"):
+            return False
+        try:
+            res = subprocess.run(
+                ["bluetoothctl", "disconnect", address],
+                capture_output=True, text=True, check=False, timeout=12.0,
+                stdin=subprocess.DEVNULL,  # Never let it block waiting on its own shell
+            )
+            output = f"{res.stdout or ''} {res.stderr or ''}".strip()
+            if res.returncode == 0 and "fail" not in output.lower():
+                logger.info(f"Disconnected Bluetooth controller '{name}' ({address}) via bluetoothctl.")
+                return True
+            logger.warning(f"Could not disconnect '{name}' ({address}): {output}")
+        except Exception as e:
+            logger.warning(f"Could not disconnect '{name}' ({address}): {e}")
+        return False
 
     def _disconnect_bluetooth_controllers(self) -> List[str]:
         """
@@ -1602,25 +1718,28 @@ class Plugin:
         console that is supposed to be off, and a controller that stays connected can
         never produce the connection event that is meant to wake the console back up.
         """
-        if not shutil.which("bluetoothctl"):
-            logger.info("bluetoothctl not available; leaving Bluetooth controllers connected.")
+        targets = self._bluetooth_controller_addresses()
+        if not targets:
+            logger.info("No connected Bluetooth controller found to disconnect.")
             return []
 
-        disconnected: List[str] = []
-        for address, name in self._bluetooth_controller_addresses():
-            try:
-                res = subprocess.run(
-                    ["bluetoothctl", "disconnect", address],
-                    capture_output=True, text=True, check=False, timeout=10.0,
+        logger.info(f"Disconnecting Bluetooth controllers: {[f'{n} ({a})' for a, n in targets]}")
+        disconnected = [name or address for address, name in targets
+                        if self._bt_disconnect(address, name)]
+
+        if disconnected:
+            # Wait for the input nodes to actually go away before taking stock of what
+            # is left, otherwise the lockout still sees a pad that is already gone.
+            deadline = time.time() + 2.5
+            while time.time() < deadline and self._bluetooth_input_addresses():
+                time.sleep(0.2)
+            still_there = self._bluetooth_input_addresses()
+            if still_there:
+                logger.warning(
+                    f"Bluetooth controllers still connected after disconnect: {sorted(still_there)}"
                 )
-                output = f"{res.stdout or ''} {res.stderr or ''}".strip()
-                if res.returncode == 0 and "fail" not in output.lower():
-                    disconnected.append(name or address)
-                    logger.info(f"Disconnected Bluetooth controller '{name}' ({address}) for standby.")
-                else:
-                    logger.warning(f"Could not disconnect '{name}' ({address}): {output}")
-            except Exception as e:
-                logger.warning(f"Could not disconnect '{name}' ({address}): {e}")
+            else:
+                logger.info(f"Bluetooth controllers disconnected: {', '.join(disconnected)}")
         return disconnected
 
     def _ensure_bluetooth_powered(self):
@@ -1636,7 +1755,10 @@ class Plugin:
             if not shutil.which(cmd[0]):
                 continue
             try:
-                subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5.0)
+                subprocess.run(
+                    cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=5.0, stdin=subprocess.DEVNULL,
+                )
             except Exception as e:
                 logger.warning(f"Could not run {' '.join(cmd)}: {e}")
         logger.info("Standby: Bluetooth left powered on for controller wake.")
@@ -2029,7 +2151,7 @@ class Plugin:
         # Whatever mode this is, the Bluetooth controllers go first: it saves their
         # battery, and in standby their reconnection is the signal to come back.
         if self._disconnect_bluetooth_controllers():
-            time.sleep(1.2)  # Let the devices actually go away before taking stock
+            time.sleep(0.4)  # Short settle; the disconnect already waits for the nodes
 
         if self.standby_mode:
             # In standby the external controllers are the way back in, so they are never

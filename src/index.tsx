@@ -284,6 +284,156 @@ const startHudCountdown = (customTimeout?: number) => {
   }, 1000);
 };
 
+/**
+ * Takes over Sleep chosen from the SteamOS power menu, at the only point where it is
+ * safe to do so.
+ *
+ * Blocking the suspend lower down does not work. By the time logind sees the request,
+ * Steam has already begun its own suspend sequence and blanked the screen; making the
+ * suspend fail there (an inhibitor, or a masked systemd sleep target) leaves the session
+ * on a black, lit screen that it never comes back from. So the client's own suspend
+ * entry points are wrapped instead, and Steam never starts that sequence at all.
+ *
+ * When the plugin has no business taking the sleep over, the original method is called
+ * and SteamOS suspends exactly as it does without this plugin.
+ */
+const SUSPEND_METHODS: Array<[string, string]> = [
+  ["System", "SuspendPC"],
+  ["System", "Suspend"],
+  ["User", "StartSuspend"],
+  ["User", "SuspendPC"],
+];
+
+interface SuspendHook {
+  owner: any;
+  name: string;
+  original: (...args: any[]) => any;
+}
+
+let suspendHooks: SuspendHook[] = [];
+let suspendPassThrough = false;
+
+/**
+ * Calls the real Steam method. The flag covers the case of one suspend entry point
+ * calling another one that is also wrapped, which would otherwise loop back in here.
+ */
+const callOriginalSuspend = (hook: SuspendHook, args: any[]): any => {
+  suspendPassThrough = true;
+  try {
+    return hook.original.apply(hook.owner, args);
+  } finally {
+    setTimeout(() => {
+      suspendPassThrough = false;
+    }, 0);
+  }
+};
+
+const handleMenuSuspend = (hook: SuspendHook, args: any[]): any => {
+  // Our own pass-through, or the plugin is off: stock behaviour.
+  if (suspendPassThrough || !sharedSettings.enabled) {
+    return callOriginalSuspend(hook, args);
+  }
+
+  // Our screen is already up: a sleep request now is the way out of it, not a new one.
+  if (sharedIsBackgroundMode) {
+    const timeInBg = Date.now() - sharedBackgroundModeEnteredTime;
+    if (timeInBg >= 2000) {
+      console.log(`[DownloadInBackground] ${hook.name} while in our mode -> waking up.`);
+      triggerFullWake("menu_suspend_wake");
+    }
+    return Promise.resolve();
+  }
+
+  // The splash or the HUD is already counting down into our mode, or the console only
+  // just woke up: swallow it either way.
+  if (sharedShowSplash || sharedShowHud || Date.now() < sharedWakeCooldownUntil) {
+    return Promise.resolve();
+  }
+
+  // Nothing of ours would happen here, so do not even pause the menu: SteamOS sleeps
+  // with its own animation, as if the plugin were not installed.
+  const looksIdle = !sharedDownloadInfo.is_downloading || sharedDownloadInfo.is_paused;
+  if (looksIdle && !sharedSettings.standby_on_power_off) {
+    return callOriginalSuspend(hook, args);
+  }
+
+  // The backend decides, on state it re-reads right now rather than on the last poll,
+  // and starts the standby splash itself when standby is what takes over.
+  console.log(`[DownloadInBackground] Power menu sleep (${hook.name}) -> asking the backend.`);
+  call("trigger_suspend_intercept")
+    .then((res: any) => {
+      const verdict = String(res?.verdict ?? "");
+      console.log(`[DownloadInBackground] Power menu sleep verdict: ${verdict}`);
+      if (verdict === "hud") {
+        startHudCountdown(sharedSettings.hud_timeout_seconds ?? 5);
+      } else if (verdict === "allow") {
+        // Not ours after all (a download paused moments ago): hand the sleep back.
+        callOriginalSuspend(hook, args);
+      }
+    })
+    .catch((e) => {
+      console.error("[DownloadInBackground] trigger_suspend_intercept failed:", e);
+      callOriginalSuspend(hook, args);
+    });
+  return Promise.resolve();
+};
+
+const installSuspendMethodHooks = (): number => {
+  const sc: any = (window as any).SteamClient;
+  if (!sc || suspendHooks.length > 0) {
+    return suspendHooks.length;
+  }
+  const hooked: string[] = [];
+  for (const [group, name] of SUSPEND_METHODS) {
+    const owner = sc[group];
+    const original = owner?.[name];
+    if (typeof original !== "function") {
+      continue;
+    }
+    const hook: SuspendHook = { owner, name: `${group}.${name}`, original };
+    try {
+      owner[name] = function (...args: any[]) {
+        // Whatever goes wrong in here, the console must still be able to sleep.
+        try {
+          return handleMenuSuspend(hook, args);
+        } catch (e) {
+          console.error("[DownloadInBackground] Suspend hook failed, falling back to SteamOS:", e);
+          return callOriginalSuspend(hook, args);
+        }
+      };
+      if (owner[name] === original) {
+        // A read-only or proxied property: do not claim it was hooked.
+        console.warn(`[DownloadInBackground] SteamClient.${group}.${name} could not be replaced.`);
+        continue;
+      }
+      suspendHooks.push(hook);
+      hooked.push(hook.name);
+    } catch (e) {
+      console.warn(`[DownloadInBackground] Could not hook SteamClient.${group}.${name}:`, e);
+    }
+  }
+  console.log(
+    `[DownloadInBackground] Suspend entry points hooked: ${hooked.join(", ") || "none"}`
+  );
+  call("log_debug", {
+    kind: "suspend_hooks",
+    hooked,
+    system_methods: sc?.System ? Object.keys(sc.System).filter((k) => /susp|sleep|power/i.test(k)) : null,
+    user_methods: sc?.User ? Object.keys(sc.User).filter((k) => /susp|sleep|power/i.test(k)) : null,
+  }).catch(() => {});
+  return suspendHooks.length;
+};
+
+const removeSuspendMethodHooks = () => {
+  for (const hook of suspendHooks) {
+    try {
+      const [, name] = hook.name.split(".");
+      hook.owner[name] = hook.original;
+    } catch (e) {}
+  }
+  suspendHooks = [];
+};
+
 // Global Overlay Container Component registered in routerHook
 const GlobalOverlayContainer: FC = () => {
   const [, setTick] = useState<number>(0);
@@ -670,6 +820,24 @@ export default definePlugin(() => {
     console.warn("[DownloadInBackground] Could not register for download overview changes:", e);
   }
 
+  // Take over the power menu's Sleep before Steam starts suspending. SteamClient is not
+  // always populated the moment a plugin loads, so this retries for a while.
+  let suspendHookAttempts = 0;
+  let suspendHookTimer: NodeJS.Timeout | null = null;
+  const tryInstallSuspendHooks = () => {
+    suspendHookTimer = null;
+    let installed = 0;
+    try {
+      installed = installSuspendMethodHooks();
+    } catch (e) {
+      console.warn("[DownloadInBackground] Could not install suspend hooks:", e);
+    }
+    if (installed === 0 && ++suspendHookAttempts < 6) {
+      suspendHookTimer = setTimeout(tryInstallSuspendHooks, 3000);
+    }
+  };
+  tryInstallSuspendHooks();
+
   // Hook Steam Client Suspend Request if available
   try {
     if (window.SteamClient?.System?.RegisterForOnSuspendRequest) {
@@ -731,7 +899,12 @@ export default definePlugin(() => {
         if (isDownloading) {
           console.log("[DownloadInBackground] Active download running -> Intercepting suspend and showing HUD");
           try {
-            await call("trigger_suspend_intercept");
+            const res: any = await call("trigger_suspend_intercept");
+            if (String(res?.verdict ?? "") === "allow") {
+              // The backend re-read the state and found nothing running after all.
+              console.log("[DownloadInBackground] Backend says idle -> allowing stock suspend.");
+              return true;
+            }
           } catch (e) {
             console.error("[DownloadInBackground] Error calling trigger_suspend_intercept:", e);
           }
@@ -867,6 +1040,11 @@ export default definePlugin(() => {
         pollTimer = null;
       }
       clearTimeout(apiDumpTimer);
+      if (suspendHookTimer) {
+        clearTimeout(suspendHookTimer);
+        suspendHookTimer = null;
+      }
+      removeSuspendMethodHooks();
       if (heartbeatInterval) {
         clearInterval(heartbeatInterval);
       }
