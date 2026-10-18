@@ -791,18 +791,31 @@ let menuGuardWindow = null;
 let menuGuardHandler = null;
 let lastMenuInterception = 0;
 let activationsLogged = 0;
-/** The menu row under this event, if its text says it is the sleep entry. */
+/**
+ * The menu row under this event, if its text says it is the sleep entry.
+ *
+ * Runs on every click and key press while the plugin is armed, so it has to stay cheap:
+ * reading `textContent` serializes an element's whole subtree, and `getBoundingClientRect`
+ * forces the browser to lay the page out. Both are skipped unless the node is small
+ * enough to be a menu row in the first place, and the rectangle is only measured once the
+ * text has already matched.
+ */
 const sleepItemFromEvent = (target) => {
     let node = target;
     for (let depth = 0; node && depth < 5; depth++) {
         try {
-            const label = normalizeLabel(String(node.textContent ?? ""));
-            if (label && label.length <= 40 && SLEEP_LABELS.has(label)) {
-                const rect = node.getBoundingClientRect?.();
-                const win = uiWindow();
-                // A menu row, not a whole page that happens to contain the word.
-                if (!rect || (rect.height <= 200 && rect.width <= win.innerWidth * 0.7)) {
-                    return { el: node, label };
+            // A menu row holds a label, not a page. Anything bigger is not worth reading.
+            if ((node.childElementCount ?? 0) <= 4) {
+                const raw = String(node.textContent ?? "");
+                if (raw.length > 0 && raw.length <= 40) {
+                    const label = normalizeLabel(raw);
+                    if (SLEEP_LABELS.has(label)) {
+                        const rect = node.getBoundingClientRect?.();
+                        const win = uiWindow();
+                        if (!rect || (rect.height <= 200 && rect.width <= win.innerWidth * 0.7)) {
+                            return { el: node, label };
+                        }
+                    }
                 }
             }
         }
@@ -829,7 +842,7 @@ const installMenuItemGuard = (win) => {
     removeMenuItemGuard();
     menuGuardHandler = (e) => {
         try {
-            if (e.type === "keydown" && e.key !== "Enter" && e.key !== " ")
+            if (e.type === "keydown" && (e.repeat || (e.key !== "Enter" && e.key !== " ")))
                 return;
             if (!sharedSettings.enabled)
                 return;
@@ -847,7 +860,7 @@ const installMenuItemGuard = (win) => {
                 return;
             const hit = sleepItemFromEvent(e.target);
             if (!hit) {
-                if (activationsLogged < 25 && sharedSettings.debug_logging !== false) {
+                if (activationsLogged < 8 && sharedSettings.debug_logging !== false) {
                     activationsLogged += 1;
                     const t = String(e.target?.textContent ?? "").slice(0, 60);
                     call("log_debug", {
@@ -868,7 +881,7 @@ const installMenuItemGuard = (win) => {
             console.error("[DownloadInBackground] Menu guard failed:", err);
         }
     };
-    ["pointerdown", "click", "keydown"].forEach((type) => {
+    ["click", "keydown"].forEach((type) => {
         try {
             win.addEventListener(type, menuGuardHandler, true);
         }
@@ -880,7 +893,7 @@ const installMenuItemGuard = (win) => {
 const removeMenuItemGuard = () => {
     if (!menuGuardWindow || !menuGuardHandler)
         return;
-    ["pointerdown", "click", "keydown"].forEach((type) => {
+    ["click", "keydown"].forEach((type) => {
         try {
             menuGuardWindow.removeEventListener(type, menuGuardHandler, true);
         }
@@ -898,9 +911,14 @@ const overlayNodesInDom = () => {
         return 0;
     }
 };
+let lastCenterSample = 0;
 const sampleHealthyCenter = () => {
     if (sharedIsBackgroundMode || sharedShowSplash || sharedShowHud)
         return;
+    // elementFromPoint forces a layout, so this is kept well away from the poll cadence.
+    if (Date.now() - lastCenterSample < 10000)
+        return;
+    lastCenterSample = Date.now();
     const sig = centerSignature();
     if (sig === "ours" || sig === "none" || sig === "error")
         return;

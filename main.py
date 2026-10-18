@@ -73,6 +73,8 @@ DISABLED_LOOP_INTERVAL = 10.0
 # Seconds during which suspend/power events are ignored right after a wake, so the
 # key press (or logind event) that woke the console cannot put it straight back to sleep.
 WAKE_COOLDOWN_SECONDS = 5.0
+# How long after a restore the plugin keeps checking that it stayed restored.
+POST_RESTORE_WATCH_SECONDS = 25.0
 
 # Grace periods after entering background mode, before power/logind events count as a wake.
 POWER_KEY_GRACE_SECONDS = 2.5
@@ -418,6 +420,11 @@ class Plugin:
         # session can still be undone on the next start.
         self.saved_cpu_quota: Optional[Tuple[str, str]] = None
         self.last_cpu_quota_path: str = ""
+        # Kept for a short while after a restore, so a firmware that re-applies its own
+        # limits a second or two later does not get the last word.
+        self.post_restore_targets: Dict[str, str] = {}
+        self.post_restore_marks: Dict[str, str] = {}
+        self.post_restore_until: float = 0.0
         self.throttled_interfaces: List[str] = []
         self.runtime_state_file: str = ""
         self.last_telemetry_time: float = 0.0
@@ -3182,6 +3189,10 @@ class Plugin:
 
         stubborn = self._converge_restore(targets)
         forced = self._verify_and_force_restore()
+
+        # Keep watching for a short while: see _recheck_after_restore.
+        self.post_restore_targets = dict(targets)
+        self.post_restore_until = time.time() + POST_RESTORE_WATCH_SECONDS
         if failed or forced or stubborn:
             logger.warning(
                 f"Restore finished with problems. failed_stages={failed or 'none'} "
@@ -3441,6 +3452,71 @@ class Plugin:
                 pass
         self.saved_leds.clear()
 
+    # Safe values for settings this plugin is known to have written, used only when the
+    # original is gone. The scaling governor is deliberately absent: 'powersave' is the
+    # normal amd-pstate default, so forcing it would be fighting the system.
+    MARK_FALLBACKS = {
+        "power_dpm_force_performance_level": "auto",
+        "boost": "1",
+        "energy_performance_preference": "balance_performance",
+        "platform_profile": "balanced",
+    }
+
+    def _force_back_from_mark(self, path: str, mark: str) -> str:
+        """
+        Puts one setting back when it still holds exactly the value this plugin wrote and
+        there is no saved original left. Returns what it did, or "" for nothing.
+        """
+        if not os.path.exists(path):
+            return ""
+        try:
+            with open(path, "r") as f:
+                have = f.read().strip()
+        except Exception:
+            return ""
+        if have != mark:
+            return ""  # Already something else, so not ours any more
+
+        base = os.path.basename(path)
+        if base == "scaling_max_freq":
+            ceiling = self._read_attr(os.path.dirname(path), "cpuinfo_max_freq")
+            if ceiling and ceiling != mark and self._write_sysfs(path, ceiling):
+                return f"{path} was still capped at {mark}, raised to {ceiling}"
+            return ""
+        fallback = self.MARK_FALLBACKS.get(base)
+        if fallback and fallback != mark and self._write_sysfs(path, fallback):
+            return f"{path} was still at {mark}, set to {fallback}"
+        return ""
+
+    def _recheck_after_restore(self) -> List[str]:
+        """
+        Looks again, a few seconds after a restore, and puts back anything that has been
+        undone since.
+
+        The restore itself re-reads and re-writes until the machine agrees, but it stops
+        looking after a fraction of a second. Changing the ACPI platform profile or the
+        ASUS thermal policy makes the firmware re-apply its own clock and power limits,
+        and it does not always do that immediately - so without this, the machine can
+        agree with the restore and then quietly undo it once nobody is watching.
+        """
+        fixed: List[str] = []
+        for path, want in self.post_restore_targets.items():
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r") as f:
+                    if f.read().strip() == want:
+                        continue
+            except Exception:
+                continue
+            if self._write_sysfs(path, want):
+                fixed.append(f"{path} -> {want}")
+        for path, mark in self.post_restore_marks.items():
+            note = self._force_back_from_mark(path, mark)
+            if note:
+                fixed.append(note)
+        return fixed
+
     def _verify_and_force_restore(self) -> List[str]:
         """
         Last line of defence against a console left slow after waking up.
@@ -3458,31 +3534,14 @@ class Plugin:
         # mid-session) or something overwrote them. Only paths with a safe, known-good
         # fallback are forced. The scaling governor is not one of them: 'powersave' is
         # the normal amd-pstate default, so forcing it would fight the system.
-        fallbacks = {
-            "power_dpm_force_performance_level": "auto",
-            "boost": "1",
-            "energy_performance_preference": "balance_performance",
-            "platform_profile": "balanced",
-        }
         for path, mark in list(self.applied_marks.items()):
-            if not os.path.exists(path):
-                continue
-            try:
-                with open(path, "r") as f:
-                    have = f.read().strip()
-            except Exception:
-                continue
-            if have != mark:
-                continue  # Already back to something else, so not ours any more
-            base = os.path.basename(path)
-            if base == "scaling_max_freq":
-                ceiling = self._read_attr(os.path.dirname(path), "cpuinfo_max_freq")
-                if ceiling and ceiling != mark and self._write_sysfs(path, ceiling):
-                    forced.append(f"{path} was still capped at {mark}, raised to {ceiling}")
-                continue
-            fallback = fallbacks.get(base)
-            if fallback and fallback != mark and self._write_sysfs(path, fallback):
-                forced.append(f"{path} was still at {mark}, set to {fallback}")
+            note = self._force_back_from_mark(path, mark)
+            if note:
+                forced.append(note)
+
+        # Handed to the delayed re-check below, which runs for a few seconds after the
+        # restore has finished, then cleared.
+        self.post_restore_marks = dict(self.applied_marks)
         self.applied_marks.clear()
 
         # 1. The cgroup CPU quota: a leftover here throttles Steam until reboot.
@@ -3722,6 +3781,22 @@ class Plugin:
                     logger.warning("Input was still blocked outside background mode; releasing it now.")
                     self._uninhibit_all_inputs()
                     self._release_all_gamepad_inputs()
+
+                # A restore can be undone a second or two AFTER it finishes, because
+                # changing the ACPI profile makes the firmware re-apply its own limits on
+                # its own schedule. The restore itself has stopped looking by then, so a
+                # console that was verified back to normal can quietly go slow again.
+                if self.post_restore_until and not self.is_background_mode and not self.transition_in_progress:
+                    if now < self.post_restore_until:
+                        undone = self._recheck_after_restore()
+                        if undone:
+                            logger.warning(
+                                f"[DIB POST-RESTORE] Something undid the restore; put back: {undone}"
+                            )
+                    else:
+                        self.post_restore_until = 0.0
+                        self.post_restore_targets = {}
+                        self.post_restore_marks = {}
 
                 # 2. In Background Mode Checks
                 if self.is_background_mode and not self.transition_in_progress:
