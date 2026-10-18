@@ -27,29 +27,34 @@ export const Overlay: FC<OverlayProps> = ({
   onWake,
   onEnterBlackout,
 }) => {
-  // If neither HUD nor blackout is active, do not render anything
-  if (!showHud && !isBackgroundMode) {
+  // If nothing is active, do not render anything
+  if (!showHud && !isBackgroundMode && !showSplash) {
     return null;
   }
 
-  // Pure black screen mode. With nothing downloading there is no HUD to show, so the
-  // plugin mark appears for a moment to say which standby this is, then fades to black.
+  // Pure black screen mode (hardware power button, or a controller, is the wake trigger)
   if (isBackgroundMode) {
     return (
       <div
         className="dib-overlay-container dib-overlay-blackout"
         tabIndex={-1}
         aria-hidden="true"
-      >
-        {showSplash && (
-          <div className="dib-splash">
-            <FaDownload className="dib-splash-icon" />
-            <div className="dib-splash-title">Download in Background</div>
-            <div className="dib-splash-subtitle">
-              Standby &middot; press POWER or use a controller to wake
-            </div>
+      />
+    );
+  }
+
+  // Standby splash: shown while the panel is still lit, just before the screen goes
+  // dark. Takes the place of the download card when there is no download to report.
+  if (showSplash) {
+    return (
+      <div className="dib-overlay-container dib-overlay-splash" tabIndex={-1} aria-hidden="true">
+        <div className="dib-splash">
+          <FaDownload className="dib-splash-icon" />
+          <div className="dib-splash-title">New Suspend Mode</div>
+          <div className="dib-splash-subtitle">
+            Press POWER or use a controller to wake
           </div>
-        )}
+        </div>
       </div>
     );
   }

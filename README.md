@@ -15,7 +15,7 @@
 ### 💡 O que o plugin faz?
 
 Quando você está baixando jogos no Steam Deck e aciona a ação de suspender (botão Power ou menu de energia):
-1. **Intercepta a Suspensão:** Não deixa o console entrar em suspensão imediatamente se houver downloads em andamento.
+1. **Intercepta a Suspensão:** Não deixa o console entrar em suspensão imediatamente se houver downloads em andamento. O estado do download é relido **no instante** em que você pede para suspender — então pausar e apertar o Power logo em seguida já conta como pausado, sem esperar o próximo ciclo de verificação.
 2. **Exibe o Status do Download (HUD):** Mostra um card elegante e translúcido na tela com o nome do jogo, velocidade atual (MB/s), barra de progresso (%), tempo restante e nível da bateria com uma contagem regressiva de alguns segundos (padrão: 5s, configurável).
 3. **Apaga a Tela & Economia Máxima:**
    - Reduz o brilho físico da luz de fundo (backlight) para `0` (LCD).
@@ -37,17 +37,19 @@ Quando você está baixando jogos no Steam Deck e aciona a ação de suspender (
 
 Opção nova e opcional (desligada por padrão). Com ela ativada, **o sleep do SteamOS é substituído** pelo **Modo Standby**: a tela apaga, o consumo cai ao mínimo, o download (se houver) continua, e o console fica esperando um controle pedir ele de volta — igual a um console de mesa.
 
-Isso vale tanto para o **botão Power físico** quanto para a opção **Sleep** escolhida à mão no menu de energia do SteamOS — são o mesmo evento e os dois são interceptados.
+Isso vale tanto para o **botão Power físico** quanto para a opção **Sleep** escolhida à mão no menu de energia do SteamOS. Para o menu funcionar, enquanto o standby está armado o plugin **mascara os targets de suspensão do systemd** (`sleep.target` e `suspend.target`): um inibidor do logind sozinho pode ser ignorado por quem tem privilégio de polkit, e aí o console suspendia de verdade em vez de entrar no nosso modo. O mascaramento é desfeito ao sair do modo, ao desligar a opção, ao descarregar o plugin e na inicialização — e a suspensão real por bateria baixa desmascara antes de pedir.
 
 **O que aparece na tela depende de qual recurso está em jogo:**
 
 | Situação | O que o plugin faz |
 | --- | --- |
 | Download ativo (com ou sem o standby ligado) | Mostra o **card do download** (nome, velocidade, progresso, contagem regressiva) e depois apaga |
-| Standby ligado, **sem** download ativo | Mostra **só o logo do plugin** por alguns segundos e depois apaga |
+| Standby ligado, **sem** download ativo | Mostra o **logo do plugin com "New Suspend Mode"** por alguns segundos e depois apaga |
 | Standby desligado, sem download | Não interfere: o SteamOS suspende normalmente, com a animação dele |
 
-Ou seja: basta **um dos dois** recursos estar em jogo para o nosso modo substituir o sleep original. Com os dois ligados, o nosso modo é sempre usado.
+Ou seja: basta **um dos dois** recursos estar em jogo para o nosso modo substituir o sleep original. Com os dois ligados, o nosso modo é sempre usado. O tempo do logo na tela usa o mesmo ajuste do HUD de download (padrão 5s; em 0s entra na hora).
+
+**O controle Bluetooth é desconectado ao entrar no modo.** Dois motivos: o controle se desliga em vez de gastar bateria ao lado de um console que está "desligado", e um controle que continua conectado nunca poderia gerar o evento de conexão que deveria acordar o console. Reconexões automáticas nos primeiros 12 segundos são ignoradas, para o console não acordar sozinho logo depois de apagar.
 
 **Como o console volta:**
 
@@ -166,7 +168,7 @@ O script copia os arquivos diretamente para `~/homebrew/plugins/DownloadInBackgr
   - Audio sinks muted.
 - **Total Button Lockout:** With the screen off, no console button registers anything. Done with the kernel input core's `inhibited` attribute, which drops events before any client receives them — including clients that already hold the device exclusively, such as Steam Input. Only the power button stays live.
 - **Calm Download Pace (fans stay off):** Clock limits alone do not keep a console cool, because Steam uses every cycle it is given. So the plugin caps the **bytes per second** (`tc` ingress policer) and Steam's **CPU budget** (a `cpu.max` quota on its own cgroup). Fewer bytes per second means less decompression, less SSD writing and far less heat: the download takes longer and the console stays cold.
-- **Standby Instead Of Sleep** (optional, off by default): replaces the system's own sleep — both the physical power button and the Sleep option in the SteamOS power menu — with a standby that turns the console "off" like a desk console: screen black, downloads continuing, waiting for a controller. With a download running you get the download card; with nothing downloading you get just the plugin logo, then black.
+- **Standby Instead Of Sleep** (optional, off by default): replaces the system's own sleep — both the physical power button and the Sleep option in the SteamOS power menu — with a standby that turns the console "off" like a desk console: screen black, downloads continuing, waiting for a controller. With a download running you get the download card; with nothing downloading you get the plugin logo and "New Suspend Mode", then black. While armed it masks `sleep.target` and `suspend.target`, because a logind inhibitor alone can be overridden by a privileged caller; the masks are removed on exit, on unload and at startup. Connected Bluetooth controllers are disconnected on the way in, so they power down and their return can be the wake signal.
   - **Bluetooth pad:** just connecting it wakes the console. Bluetooth stays powered in standby.
   - **USB / dongle pad:** press Guide/Home, Select or Start. Connecting alone does not wake it.
   - **Built-in pad:** stays dead on purpose. Only the power button.

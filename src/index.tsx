@@ -109,25 +109,6 @@ const closeSteamSideMenus = () => {
   [150, 400, 800, 1400, 2000, 2800, 3600].forEach((delay) => setTimeout(close, delay));
 };
 
-/**
- * Shows the plugin mark over the black screen for a moment.
- *
- * Used when standby replaces the system's own sleep and there is no download to put in
- * the HUD: something has to say which standby this is, since it looks identical to the
- * console being off.
- */
-const showStandbySplash = (durationMs: number = 2500) => {
-  sharedShowSplash = true;
-  if (sharedSplashTimer) {
-    clearTimeout(sharedSplashTimer);
-  }
-  sharedSplashTimer = setTimeout(() => {
-    sharedShowSplash = false;
-    sharedSplashTimer = null;
-    notifyStateListeners();
-  }, durationMs);
-};
-
 const clearStandbySplash = () => {
   if (sharedSplashTimer) {
     clearTimeout(sharedSplashTimer);
@@ -137,11 +118,7 @@ const clearStandbySplash = () => {
 };
 
 /**
- * Enters standby straight away, with the logo instead of the download HUD.
- *
- * This is the path taken when the user picks Sleep from the SteamOS power menu (or
- * presses power) with standby enabled and nothing downloading: there is no countdown to
- * show, the console is simply going off.
+ * Enters standby, replacing the HUD with nothing: the splash has already been shown.
  */
 const triggerEnterStandby = async (reason: string) => {
   if (Date.now() < sharedWakeCooldownUntil) {
@@ -152,23 +129,52 @@ const triggerEnterStandby = async (reason: string) => {
     clearInterval(sharedHudTimer);
     sharedHudTimer = null;
   }
+  clearStandbySplash();
   sharedShowHud = false;
   sharedIsBackgroundMode = true;
   sharedStandbyMode = true;
   sharedBackgroundModeEnteredTime = Date.now();
-  showStandbySplash();
   notifyStateListeners();
 
   try {
     const success: any = await call("enter_background_mode", reason);
     if (success === false) {
       sharedIsBackgroundMode = false;
-      clearStandbySplash();
       notifyStateListeners();
     }
   } catch (e) {
     console.error("[DownloadInBackground] Error entering standby:", e);
   }
+};
+
+/**
+ * Shows the plugin mark, THEN enters standby a few seconds later.
+ *
+ * The order matters: the backlight is driven to zero as part of entering, so anything
+ * drawn after that is invisible. This mirrors the download HUD countdown, which is why
+ * a download shows its card but standby used to appear to show nothing at all.
+ */
+const startStandbySplash = (seconds: number, reason: string = "standby_splash") => {
+  if (sharedIsBackgroundMode || Date.now() < sharedWakeCooldownUntil) {
+    return;
+  }
+  if (seconds <= 0) {
+    triggerEnterStandby(reason);
+    return;
+  }
+  if (sharedHudTimer) {
+    clearInterval(sharedHudTimer);
+    sharedHudTimer = null;
+  }
+  clearStandbySplash();
+  sharedShowHud = false;
+  sharedShowSplash = true;
+  notifyStateListeners();
+
+  sharedSplashTimer = setTimeout(() => {
+    sharedSplashTimer = null;
+    triggerEnterStandby(reason);
+  }, seconds * 1000);
 };
 
 /**
@@ -396,6 +402,7 @@ export default definePlugin(() => {
   let suspendUnregister: (() => void) | null = null;
   let modeUnregister: any = null;
   let suspendEventUnregister: any = null;
+  let standbyRequestUnregister: any = null;
   let batteryCriticalUnregister: any = null;
   let downloadsCompletedUnregister: any = null;
 
@@ -419,13 +426,9 @@ export default definePlugin(() => {
         sharedIsBackgroundMode = true;
         sharedBackgroundModeEnteredTime = Date.now();
         sharedShowHud = false;
-        // Entered from the backend (power key, or Sleep caught by logind). With standby
-        // on and nothing downloading there is no HUD to show, so show the logo instead.
+        clearStandbySplash();
         if (Boolean(data?.standby)) {
           sharedStandbyMode = true;
-          if (!data?.has_download) {
-            showStandbySplash();
-          }
         }
         notifyStateListeners();
       }
@@ -453,6 +456,20 @@ export default definePlugin(() => {
     });
   } catch (e) {
     console.warn("[DownloadInBackground] Could not register on_suspend_intercepted listener:", e);
+  }
+
+  // Backend asked for standby: draw the plugin mark first, then go dark
+  try {
+    standbyRequestUnregister = addEventListener("on_standby_requested", (data: any) => {
+      console.log("[DownloadInBackground] on_standby_requested received:", data);
+      if (sharedIsBackgroundMode) {
+        return;
+      }
+      const seconds = Number(data?.splash_seconds ?? sharedSettings.hud_timeout_seconds ?? 5);
+      startStandbySplash(seconds, String(data?.reason ?? "standby_splash"));
+    });
+  } catch (e) {
+    console.warn("[DownloadInBackground] Could not register on_standby_requested listener:", e);
   }
 
   // Critical battery auto-suspend notification
@@ -700,8 +717,14 @@ export default definePlugin(() => {
         );
 
         if (!isDownloading && sharedSettings.standby_on_power_off) {
-          console.log("[DownloadInBackground] Sleep requested with standby enabled -> entering standby with logo.");
-          await triggerEnterStandby("standby_sleep_request");
+          console.log("[DownloadInBackground] Sleep requested with standby enabled -> splash, then standby.");
+          call("log_debug", {
+            kind: "suspend_request",
+            source: "RegisterForOnSuspendRequest",
+            standby: true,
+            download_info: sharedDownloadInfo,
+          }).catch(() => {});
+          startStandbySplash(sharedSettings.hud_timeout_seconds ?? 5, "standby_sleep_request");
           return false;
         }
 
@@ -871,6 +894,12 @@ export default definePlugin(() => {
           removeEventListener("on_suspend_intercepted", suspendEventUnregister);
         } catch (e) {}
       }
+      if (standbyRequestUnregister) {
+        try {
+          removeEventListener("on_standby_requested", standbyRequestUnregister);
+        } catch (e) {}
+      }
+      clearStandbySplash();
       if (batteryCriticalUnregister) {
         try {
           removeEventListener("battery_critical_suspend", batteryCriticalUnregister);

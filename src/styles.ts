@@ -25,14 +25,19 @@ export const PLUGIN_STYLES = `
   touch-action: none;
 }
 
-/* Standby splash: just the plugin mark, shown over the black screen when the console
-   goes into standby with nothing downloading, then it fades out into pure black. */
+/* Standby splash: the plugin mark on a black screen, shown while the panel is still lit,
+   just before the console goes dark. Takes the place of the download card. */
+.dib-overlay-splash {
+  background-color: #000000;
+  animation: dibFadeIn 0.25s ease-out;
+}
+
 .dib-splash {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 14px;
-  animation: dibSplash 2.5s ease-in-out forwards;
+  animation: dibSplashIn 0.5s ease-out;
 }
 
 .dib-splash-icon {
@@ -53,11 +58,9 @@ export const PLUGIN_STYLES = `
   color: #93a4c4;
 }
 
-@keyframes dibSplash {
-  0% { opacity: 0; transform: scale(0.96); }
-  12% { opacity: 1; transform: scale(1); }
-  78% { opacity: 1; }
-  100% { opacity: 0; }
+@keyframes dibSplashIn {
+  from { opacity: 0; transform: scale(0.94); }
+  to { opacity: 1; transform: scale(1); }
 }
 
 /* HUD Mode: Dark glassmorphic overlay */

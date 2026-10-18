@@ -77,6 +77,11 @@ WAKE_COOLDOWN_SECONDS = 5.0
 POWER_KEY_GRACE_SECONDS = 2.5
 LOGIND_GRACE_SECONDS = 5.0
 
+# A controller dropped on the way into standby may retry the connection on its own for a
+# few seconds. Only a connection after this window counts as the user asking for the
+# console back, so the console cannot wake itself up the moment it goes dark.
+BT_CONNECT_GRACE_SECONDS = 12.0
+
 # Linux scheduling policies that leave a process starved of CPU time.
 SCHED_BATCH = 3
 SCHED_IDLE = 5
@@ -431,6 +436,8 @@ class Plugin:
         self.input_lock = threading.Lock()
         self.transition_in_progress: bool = False
         self.suspend_in_progress: bool = False
+        self.sleep_targets_masked: bool = False
+        self.standby_request_pending: bool = False
 
         self.detector = SteamDownloadDetector()
         self.download_info: Dict[str, Any] = {
@@ -680,6 +687,38 @@ class Plugin:
     # ==========================================
     SLEEP_TARGETS = ("sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target")
 
+    # Masked while standby is armed. Only the suspend pair: a real hibernate stays
+    # possible, and our own low-battery suspend unmasks before asking for it.
+    SLEEP_BLOCK_TARGETS = ("sleep.target", "suspend.target")
+
+    def _set_sleep_block(self, block: bool):
+        """
+        Masks or unmasks the systemd sleep targets.
+
+        A logind 'block' inhibitor is not always enough on its own: a privileged caller
+        can be allowed to ignore inhibitor locks (polkit's suspend-ignore-inhibit), and
+        then picking Sleep in the SteamOS power menu suspends the console for real
+        instead of entering standby. Masking makes the operation fail at the systemd
+        level, whoever asks for it. Used ONLY while the standby setting is on, and undone
+        on exit, on unload, when the setting is turned off, and at startup.
+        """
+        action = "mask" if block else "unmask"
+        try:
+            subprocess.run(
+                ["systemctl", action, "--runtime"] + list(self.SLEEP_BLOCK_TARGETS),
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10.0,
+            )
+            self.sleep_targets_masked = block
+            logger.info(
+                f"{'Blocked' if block else 'Unblocked'} systemd sleep targets "
+                f"({', '.join(self.SLEEP_BLOCK_TARGETS)}) for standby mode."
+            )
+        except Exception as e:
+            logger.error(f"Failed to {action} sleep targets: {e}")
+
     def _clear_stale_sleep_masks(self):
         """
         Removes runtime masks on the systemd sleep targets.
@@ -691,6 +730,7 @@ class Plugin:
         not touched by --runtime.
         """
         stale = [t for t in self.SLEEP_TARGETS if os.path.islink(f"/run/systemd/system/{t}")]
+        self.sleep_targets_masked = False
         if not stale:
             return
         try:
@@ -748,6 +788,55 @@ class Plugin:
             and not self.download_info.get("is_paused", False)
         )
 
+    def _refresh_download_state(self) -> bool:
+        """
+        Reads the real download state now and returns whether one is actually running.
+
+        Called from the monitor loop and, importantly, the instant the user asks to sleep:
+        pausing a download rewrites its appmanifest immediately, so reading it right then
+        catches a pause made a second ago instead of waiting for the next poll. That is
+        the difference between the plugin showing the download card and letting the
+        console go into standby as the user intended.
+        """
+        now = time.time()
+        info = self.detector.detect()
+        detector_is_dl = bool(info.get("is_downloading", False))
+        detector_paused = bool(info.get("is_paused", False))
+        net_rx = self.detector.get_network_rx_rate()
+
+        # Did the frontend report an active download recently? Its own report is dropped
+        # the moment Steam says paused, so a stale "downloading" cannot survive a pause.
+        frontend_active = (
+            (now - self.last_frontend_dl_time < 30.0)
+            and bool(self.download_info.get("is_downloading", False))
+            and not bool(self.download_info.get("is_paused", False))
+            and not detector_paused
+        )
+
+        is_dl = (
+            (detector_is_dl and not detector_paused)
+            or frontend_active
+            or (net_rx > 30000 and not detector_paused)
+        )
+
+        # If the detector provided richer info (game title, progress), keep it
+        if not frontend_active and info:
+            self.download_info.update(info)
+
+        self.download_info["is_downloading"] = is_dl
+        if not frontend_active:
+            # Always recompute: a stuck is_paused=True used to keep the plugin from ever
+            # protecting a download again.
+            self.download_info["is_paused"] = bool(detector_paused and not is_dl)
+
+        if is_dl:
+            self.last_download_active_time = now
+            if net_rx > 0:
+                self.download_info["bytes_per_second"] = max(
+                    net_rx, self.download_info.get("bytes_per_second", 0)
+                )
+        return is_dl
+
     def _plugin_should_act(self) -> bool:
         """
         The single answer to 'may the plugin touch the system right now?'.
@@ -776,6 +865,12 @@ class Plugin:
         elif not should_inhibit and self.inhibitor_proc is not None:
             self._release_sleep_inhibitor()
 
+        # Standby replaces the system's sleep entirely, so it also needs the suspend
+        # targets blocked: that is what stops the power menu's Sleep from going through.
+        want_block = should_inhibit and bool(self.settings.get("standby_on_power_off", False))
+        if want_block != self.sleep_targets_masked:
+            self._set_sleep_block(want_block)
+
     # ==========================================
     # Suspend Interception & Logind Watcher
     # ==========================================
@@ -802,16 +897,17 @@ class Plugin:
             logger.info("Ignoring suspend attempt because system just woke up from background mode.")
             return
 
-        # Double check: Is download REALLY actively downloading (not paused or idle)?
-        if not self._is_active_download():
+        # Double check against the real state, not the last poll: a download paused a
+        # moment ago must already count as idle here.
+        if not self._refresh_download_state():
             if self.settings.get("standby_on_power_off", False):
                 if now - self.last_suspend_intercept_time < 3.0:
                     return
                 self.last_suspend_intercept_time = now
-                logger.info("Sleep requested with standby enabled -> entering standby instead of suspending.")
+                logger.info("Sleep requested with standby enabled -> standby splash, then entering.")
                 if self.loop and self.loop.is_running():
                     asyncio.run_coroutine_threadsafe(
-                        self.enter_background_mode("standby_sleep_request"), self.loop
+                        self.request_standby("standby_sleep_request"), self.loop
                     )
                 return
             logger.info("Suspend attempt not intercepted: Download is paused or idle. Allowing normal suspend.")
@@ -834,6 +930,41 @@ class Plugin:
                 }),
                 self.loop
             )
+
+    async def request_standby(self, reason: str = "standby") -> bool:
+        """
+        Shows the standby splash first, then enters the mode.
+
+        The splash has to be drawn while the panel is still lit. Entering the mode first
+        and drawing after put the logo on a screen whose backlight was already at zero,
+        which is why nothing appeared to show up at all.
+        """
+        if self.is_background_mode or self.standby_request_pending:
+            return False
+        if time.time() < self.wake_cooldown_until:
+            logger.info("Standby request ignored: the console just woke up.")
+            return False
+
+        self.standby_request_pending = True
+        try:
+            splash_seconds = max(0, int(self.settings.get("hud_timeout_seconds", 5)))
+            await decky.emit("on_standby_requested", {
+                "splash_seconds": splash_seconds,
+                "reason": reason,
+            })
+            if splash_seconds <= 0:
+                return await self.enter_background_mode(reason)
+
+            # The frontend draws the splash and then enters. If it never does (not
+            # running, or an error), the mode is entered here so the power button is
+            # never a no-op.
+            await asyncio.sleep(splash_seconds + 2.5)
+            if not self.is_background_mode and time.time() >= self.wake_cooldown_until:
+                logger.info("Frontend did not enter standby in time; entering from the backend.")
+                return await self.enter_background_mode(reason)
+            return True
+        finally:
+            self.standby_request_pending = False
 
     async def trigger_suspend_intercept(self) -> bool:
         """API called by frontend when SteamClient intercepts suspend."""
@@ -1185,17 +1316,23 @@ class Plugin:
                 )
             return
 
-        net_rx = self.detector.get_network_rx_rate()
-        is_active_dl = self._is_active_download() or (net_rx > 20000)
+        # Read the download state right now instead of trusting the last poll: the user
+        # may have paused it a second ago and pressed power straight after.
+        is_active_dl = self._refresh_download_state()
+        if not is_active_dl and not self.download_info.get("is_paused", False):
+            # Nothing known and nothing says paused: a download that started seconds ago
+            # may not be in a manifest yet, so only a strong sustained rate counts here.
+            is_active_dl = self.detector.get_network_rx_rate() > 300000
+
         if is_active_dl:
             self._trigger_suspend_intercepted()
             return
 
         if self.settings.get("standby_on_power_off", False):
-            logger.info("Power key pressed with standby enabled -> entering standby (a controller brings it back).")
+            logger.info("Power key pressed with standby enabled -> showing standby splash, then entering.")
             if self.loop and self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(
-                    self.enter_background_mode("standby_power_off"), self.loop
+                    self.request_standby("standby_power_off"), self.loop
                 )
             return
 
@@ -1442,6 +1579,49 @@ class Plugin:
         except Exception:
             pass
         return None
+
+    def _bluetooth_controller_addresses(self) -> List[Tuple[str, str]]:
+        """(address, name) for each connected Bluetooth controller."""
+        found: List[Tuple[str, str]] = []
+        for pad in self._find_external_gamepads():
+            if pad["bustype"] != BUS_BLUETOOTH:
+                continue
+            # Bluetooth HID devices carry their address in the input device's uniq field.
+            address = self._read_attr(pad["input_dir"], "uniq").strip()
+            if address:
+                found.append((address.upper(), pad["name"]))
+            else:
+                logger.info(f"'{pad['name']}' is Bluetooth but reports no address; cannot disconnect it.")
+        return found
+
+    def _disconnect_bluetooth_controllers(self) -> List[str]:
+        """
+        Drops the connected Bluetooth controllers as the console goes dark.
+
+        Two reasons: the pad powers itself down instead of draining its battery next to a
+        console that is supposed to be off, and a controller that stays connected can
+        never produce the connection event that is meant to wake the console back up.
+        """
+        if not shutil.which("bluetoothctl"):
+            logger.info("bluetoothctl not available; leaving Bluetooth controllers connected.")
+            return []
+
+        disconnected: List[str] = []
+        for address, name in self._bluetooth_controller_addresses():
+            try:
+                res = subprocess.run(
+                    ["bluetoothctl", "disconnect", address],
+                    capture_output=True, text=True, check=False, timeout=10.0,
+                )
+                output = f"{res.stdout or ''} {res.stderr or ''}".strip()
+                if res.returncode == 0 and "fail" not in output.lower():
+                    disconnected.append(name or address)
+                    logger.info(f"Disconnected Bluetooth controller '{name}' ({address}) for standby.")
+                else:
+                    logger.warning(f"Could not disconnect '{name}' ({address}): {output}")
+            except Exception as e:
+                logger.warning(f"Could not disconnect '{name}' ({address}): {e}")
+        return disconnected
 
     def _ensure_bluetooth_powered(self):
         """
@@ -1845,6 +2025,12 @@ class Plugin:
         """
         self.lockout_event_counts.clear()
         deep = bool(self.settings.get("deep_input_lockout", True))
+
+        # Whatever mode this is, the Bluetooth controllers go first: it saves their
+        # battery, and in standby their reconnection is the signal to come back.
+        if self._disconnect_bluetooth_controllers():
+            time.sleep(1.2)  # Let the devices actually go away before taking stock
+
         if self.standby_mode:
             # In standby the external controllers are the way back in, so they are never
             # detached here, and they are opened as wake sources before the inhibit runs.
@@ -3215,42 +3401,7 @@ class Plugin:
                     continue
 
                 # 1. Native Download & Network Detection
-                info = self.detector.detect()
-                detector_is_dl = bool(info.get("is_downloading", False))
-                detector_paused = bool(info.get("is_paused", False))
-                net_rx = self.detector.get_network_rx_rate()
-
-                # Check if frontend reported download recently (within 30 seconds)
-                frontend_active = (
-                    (now - self.last_frontend_dl_time < 30.0)
-                    and bool(self.download_info.get("is_downloading", False))
-                    and not bool(self.download_info.get("is_paused", False))
-                )
-
-                # Has active network traffic (> 30 KB/s)
-                has_net_traffic = (net_rx > 30000)
-
-                # Active download if detector says so, or frontend reported so recently, or network traffic exists
-                is_dl = (
-                    (detector_is_dl and not detector_paused)
-                    or frontend_active
-                    or (has_net_traffic and not detector_paused)
-                )
-
-                # If frontend provided richer info (game title, eta), keep it
-                if not frontend_active and info:
-                    self.download_info.update(info)
-
-                self.download_info["is_downloading"] = is_dl
-                if not frontend_active:
-                    # Always recompute: a stuck is_paused=True used to keep the plugin
-                    # from ever protecting a download again.
-                    self.download_info["is_paused"] = bool(detector_paused and not is_dl)
-
-                if is_dl:
-                    self.last_download_active_time = now
-                    if net_rx > 0:
-                        self.download_info["bytes_per_second"] = max(net_rx, self.download_info.get("bytes_per_second", 0))
+                is_dl = self._refresh_download_state()
 
                 # Sync inhibitor state
                 self._update_inhibitor_state()
@@ -3294,7 +3445,7 @@ class Plugin:
                     # no button to press, the pairing is the request for the console back.
                     if self.standby_mode and self.settings.get("wake_on_bluetooth_connect", True):
                         connected = self._newly_connected_bluetooth_gamepads()
-                        if connected and time_in_bg > POWER_KEY_GRACE_SECONDS:
+                        if connected and time_in_bg > BT_CONNECT_GRACE_SECONDS:
                             logger.info(f"Bluetooth controller connected in standby ({', '.join(connected)}) -> waking.")
                             await self.exit_background_mode("bluetooth_controller_connected")
                             continue
