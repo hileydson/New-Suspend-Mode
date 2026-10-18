@@ -382,6 +382,7 @@ class Plugin:
         # Download pacing state, both reversible and recorded on disk so a crash mid
         # session can still be undone on the next start.
         self.saved_cpu_quota: Optional[Tuple[str, str]] = None
+        self.last_cpu_quota_path: str = ""
         self.throttled_interfaces: List[str] = []
         self.runtime_state_file: str = ""
         self.last_telemetry_time: float = 0.0
@@ -1796,25 +1797,17 @@ class Plugin:
                     continue  # Only the unified (v2) hierarchy carries cpu.max
                 rel = line.strip().split("::", 1)[1]
                 path = os.path.join("/sys/fs/cgroup", rel.lstrip("/"))
+                # Steam's own cgroup, and only if the cpu controller is already enabled
+                # there. Walking up to an ancestor would quietly throttle every other app
+                # in that slice, and enabling the controller ourselves changes a cgroup
+                # that belongs to systemd. Neither is worth the risk for a download.
                 if os.path.exists(os.path.join(path, "cpu.max")):
                     return path
-
-                # cpu.max only exists where the parent enabled the cpu controller.
-                # Enabling it is what systemd itself does for a unit with a CPU quota.
-                parent = os.path.dirname(path)
-                if os.path.exists(os.path.join(parent, "cgroup.subtree_control")):
-                    self._write_sysfs(os.path.join(parent, "cgroup.subtree_control"), "+cpu")
-                    if os.path.exists(os.path.join(path, "cpu.max")):
-                        logger.info(f"Enabled the cpu controller on {parent} so Steam can be paced.")
-                        return path
-
-                # Last resort: the nearest ancestor that does have it. Safe because the
-                # caller refuses any cgroup the compositor also lives in.
-                probe = parent
-                while probe.startswith("/sys/fs/cgroup") and probe != "/sys/fs/cgroup":
-                    if os.path.exists(os.path.join(probe, "cpu.max")):
-                        return probe
-                    probe = os.path.dirname(probe)
+                logger.info(
+                    f"CPU pacing unavailable: no cpu.max in Steam's own cgroup ({path}). "
+                    "The download speed cap and the clock limits still apply."
+                )
+                return None
         return None
 
     def _cgroup_subtree_comms(self, cgroup_dir: str) -> Set[str]:
@@ -1868,6 +1861,9 @@ class Plugin:
         quota = int(CPU_QUOTA_PERIOD * percent / 100)
         if self._write_sysfs(cpu_max, f"{quota} {CPU_QUOTA_PERIOD}"):
             self.saved_cpu_quota = (cpu_max, original)
+            # Remembered separately so the final check can still verify this file even
+            # after the restore has cleared saved_cpu_quota.
+            self.last_cpu_quota_path = cpu_max
             logger.info(f"Paced Steam to {percent}% of one CPU core via {cpu_max} (was '{original}').")
         else:
             logger.warning(f"Could not write CPU quota to {cpu_max}.")
@@ -1877,9 +1873,13 @@ class Plugin:
         if not entry:
             return
         cpu_max, original = entry
+        self.last_cpu_quota_path = cpu_max
         if os.path.exists(cpu_max):
-            self._write_sysfs(cpu_max, original)
-            logger.info(f"Restored CPU quota on {cpu_max} to '{original}'.")
+            # An unreadable original would have been stored as the safe default, so this
+            # always ends in an uncapped cgroup rather than a guess.
+            target = original if original and not original.startswith("0 ") else f"max {CPU_QUOTA_PERIOD}"
+            self._write_sysfs(cpu_max, target)
+            logger.info(f"Restored CPU quota on {cpu_max} to '{target}'.")
         self.saved_cpu_quota = None
 
     def _network_interfaces(self, default_only: bool = True) -> List[str]:
@@ -1973,11 +1973,16 @@ class Plugin:
         if not tc:
             self.throttled_interfaces.clear()
             return
+        # Deleted unconditionally, never gated on detecting the qdisc first: if the
+        # detection ever misreads, the cap would stay on and the console would look
+        # permanently slow. Deleting a qdisc that is not there just returns an error.
         for iface in (interfaces if interfaces is not None else list(self.throttled_interfaces)):
             try:
-                if self._tc_has_ingress(tc, iface):
-                    subprocess.run([tc, "qdisc", "del", "dev", iface, "ingress"],
-                                   check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5.0)
+                res = subprocess.run(
+                    [tc, "qdisc", "del", "dev", iface, "ingress"],
+                    capture_output=True, text=True, check=False, timeout=5.0,
+                )
+                if res.returncode == 0:
                     logger.info(f"Removed download speed cap on {iface}.")
             except Exception as e:
                 logger.error(f"Failed to clear download cap on {iface}: {e}")
@@ -1986,21 +1991,68 @@ class Plugin:
     # ==========================================
     # Crash-safe record of the reversible changes
     # ==========================================
+    def _runtime_state_snapshot(self) -> Dict[str, Any]:
+        """Everything needed to undo a session, in a form that survives a restart."""
+        return {
+            "cpu_quota": list(self.saved_cpu_quota) if self.saved_cpu_quota else None,
+            "throttled_interfaces": list(self.throttled_interfaces),
+            "brightness": dict(self.saved_brightness),
+            "cpu_freqs": dict(self.saved_cpu_freqs),
+            "cpu_governors": dict(self.saved_cpu_governors),
+            "cpu_epp": dict(self.saved_cpu_epp),
+            "policy_boost": dict(self.saved_policy_boost),
+            "gpu_dpm": dict(self.saved_gpu_dpm),
+            "leds": dict(self.saved_leds),
+            "asus_ppt": dict(self.saved_asus_ppt),
+            "fan_boost": dict(self.saved_fan_boost),
+            "cpu_boost": self.saved_cpu_boost,
+            "platform_profile": self.saved_platform_profile,
+            "asus_thermal": self.saved_asus_thermal,
+            "power_profile": self.saved_power_profile,
+            "power_profile_set_by_us": self.power_profile_set_by_us,
+            "audio_muted": self.audio_muted_by_us,
+            "display_slept": self.display_slept_by_us,
+            "ryzenadj": dict(self.saved_ryzenadj) if self.saved_ryzenadj else None,
+        }
+
+    def _load_runtime_state(self, state: Dict[str, Any]):
+        """Rebuilds the saved_* values from disk so the normal restore path can run."""
+        quota = state.get("cpu_quota")
+        self.saved_cpu_quota = (quota[0], quota[1]) if isinstance(quota, list) and len(quota) == 2 else None
+        self.throttled_interfaces = list(state.get("throttled_interfaces") or [])
+        self.saved_brightness = {
+            k: int(v) for k, v in (state.get("brightness") or {}).items() if str(v).lstrip("-").isdigit()
+        }
+        self.saved_cpu_freqs = dict(state.get("cpu_freqs") or {})
+        self.saved_cpu_governors = dict(state.get("cpu_governors") or {})
+        self.saved_cpu_epp = dict(state.get("cpu_epp") or {})
+        self.saved_policy_boost = dict(state.get("policy_boost") or {})
+        self.saved_gpu_dpm = dict(state.get("gpu_dpm") or {})
+        self.saved_leds = dict(state.get("leds") or {})
+        self.saved_asus_ppt = dict(state.get("asus_ppt") or {})
+        self.saved_fan_boost = dict(state.get("fan_boost") or {})
+        self.saved_cpu_boost = state.get("cpu_boost")
+        self.saved_platform_profile = state.get("platform_profile")
+        self.saved_asus_thermal = state.get("asus_thermal")
+        self.saved_power_profile = state.get("power_profile")
+        self.power_profile_set_by_us = bool(state.get("power_profile_set_by_us"))
+        self.audio_muted_by_us = bool(state.get("audio_muted"))
+        self.display_slept_by_us = bool(state.get("display_slept"))
+        ryzenadj = state.get("ryzenadj")
+        self.saved_ryzenadj = {k: int(v) for k, v in ryzenadj.items()} if isinstance(ryzenadj, dict) else None
+
     def _save_runtime_state(self):
         """
         Records the changes that outlive a plugin crash, so the next start can undo them.
-        A CPU quota or a network cap left behind would look like a permanently slow
-        console, which is exactly the class of bug this plugin has to stop causing.
+        A CPU quota, a network cap or a clock ceiling left behind looks exactly like a
+        permanently slow console, which is the one failure this plugin must never cause.
         """
         if not self.runtime_state_file:
             return
-        state = {
-            "cpu_quota": list(self.saved_cpu_quota) if self.saved_cpu_quota else None,
-            "throttled_interfaces": list(self.throttled_interfaces),
-        }
         try:
+            os.makedirs(os.path.dirname(self.runtime_state_file), exist_ok=True)
             with open(self.runtime_state_file, "w", encoding="utf-8") as f:
-                json.dump(state, f)
+                json.dump(self._runtime_state_snapshot(), f, indent=2)
         except Exception as e:
             logger.error(f"Could not write runtime state: {e}")
 
@@ -2012,18 +2064,28 @@ class Plugin:
             logger.error(f"Could not clear runtime state: {e}")
 
     def _heal_runtime_state(self):
+        """
+        Undoes a session that never got its restore, by replaying the normal restore with
+        the values read back from disk. This is what makes a plugin crash (or a forced
+        reload) while the screen was off recoverable without rebooting the console.
+        """
         if not self.runtime_state_file or not os.path.exists(self.runtime_state_file):
             return
         try:
             with open(self.runtime_state_file, "r", encoding="utf-8") as f:
                 state = json.load(f)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Leftover runtime state could not be read ({e}); clearing caps generically.")
             state = {}
-        logger.info(f"Startup repair: undoing leftover download pacing {state}.")
-        quota = state.get("cpu_quota")
-        if isinstance(quota, list) and len(quota) == 2:
-            self._restore_cpu_quota((quota[0], quota[1]))
+
+        logger.warning(
+            "Startup repair: a previous session was never restored. Undoing it now: "
+            f"{ {k: (len(v) if isinstance(v, (dict, list)) else v) for k, v in state.items()} }"
+        )
+        self._load_runtime_state(state)
+        # Always clear the network cap on every interface, tracked or not.
         self._clear_download_bandwidth_limit(self._network_interfaces(default_only=False))
+        self._restore_system_power_and_display()
         self._clear_runtime_state()
 
     # ryzenadj option name -> multiplier to turn the reported value back into the unit
@@ -2322,7 +2384,6 @@ class Plugin:
         # second and the CPU it may spend on them is what keeps the console cold.
         self._limit_download_bandwidth()
         self._apply_cpu_quota()
-        self._save_runtime_state()
 
         # 4. Mute Audio (Hardware ALSA Master & PipeWire)
         if self.settings.get("mute_audio", True):
@@ -2348,15 +2409,58 @@ class Plugin:
             except Exception:
                 pass
 
-        # 6. Exclusive Gamepad & Button Lockout (EVIOCGRAB on all controllers)
+        # 6. Write down everything that now needs undoing, before touching input. If the
+        # plugin dies from here on, the next start replays this exact restore.
+        self._save_runtime_state()
+
+        # 7. Exclusive Gamepad & Button Lockout (EVIOCGRAB on all controllers)
         # Prevents any button, trigger, joystick, or touch from waking the display or triggering menus!
         self._grab_all_gamepad_inputs()
 
     def _restore_system_power_and_display(self):
+        """
+        Puts everything back, with every stage isolated from the others.
+
+        A failure in one stage must never skip the stages after it. That is exactly how a
+        console ends up stuck at 800 MHz, capped at 6 W, or paced to a few MB/s until the
+        next reboot: one unlucky exception early on, and nothing below it ever ran. So
+        each stage runs no matter what the previous one did, and a final check forces back
+        anything measurable that is still throttled.
+        """
         logger.info("Restoring system power and display settings...")
         self.power_saving_applied = False
 
-        # 1. Restore the backlight FIRST, so pressing power lights the screen up at once
+        stages = (
+            ("backlight", self._restore_backlight),
+            ("download pacing", self._restore_download_pacing),
+            ("steam scheduling", self._heal_steam_scheduling),
+            ("apu power limits", self._restore_apu_power_limits),
+            ("cpu", self._restore_cpu_settings),
+            ("platform profile", self._restore_platform_profile),
+            ("gpu", self._restore_gpu_settings),
+            ("audio", self._restore_audio),
+            ("leds", self._restore_leds),
+            ("input", self._release_all_gamepad_inputs),
+        )
+
+        failed: List[str] = []
+        for label, stage in stages:
+            try:
+                stage()
+            except Exception as e:
+                failed.append(label)
+                logger.error(f"Restore stage '{label}' FAILED: {e}")
+
+        forced = self._verify_and_force_restore()
+        if failed or forced:
+            logger.warning(
+                f"Restore finished with problems. failed_stages={failed or 'none'} forced_fixes={forced or 'none'}"
+            )
+        else:
+            logger.info("Restore complete; everything verified back to normal.")
+
+    def _restore_backlight(self):
+        # Restore the backlight FIRST, so pressing power lights the screen up at once
         # instead of after every power limit and input device has been handed back.
         # Only panels this plugin actually dimmed are touched, so a console whose
         # backlight was never changed keeps exactly the brightness the user set.
@@ -2409,16 +2513,13 @@ class Plugin:
             self._set_gamescope_display(sleep=False)
             self.display_slept_by_us = False
 
-        # Let the download run at full speed again, and drop the CPU quota, before
-        # anything slower happens: these two are what the user feels as "still slow".
+    def _restore_download_pacing(self):
+        """Full speed again: the CPU quota and the network cap both go away here."""
         self._restore_cpu_quota()
         self._clear_download_bandwidth_limit()
         self._clear_runtime_state()
 
-        # Put Steam's processes back on normal scheduling. Nothing throttles them any
-        # more, but this also repairs consoles left starved by an earlier version.
-        self._heal_steam_scheduling()
-
+    def _restore_apu_power_limits(self):
         # Restore ASUS PPT power limits
         for pf, orig_ppt in list(self.saved_asus_ppt.items()):
             if os.path.exists(pf):
@@ -2442,7 +2543,8 @@ class Plugin:
                 logger.error(f"Failed to restore ryzenadj limits: {e}")
         self.saved_ryzenadj = None
 
-        # 2. Restore CPU Frequencies, Governors & Power Profiles
+    def _restore_cpu_settings(self):
+        # Restore CPU turbo boost, frequency ceilings, governors and EPP
         # A. Restore CPU Turbo Boost
         if self.saved_cpu_boost is not None:
             self._write_sysfs("/sys/devices/system/cpu/cpufreq/boost", self.saved_cpu_boost)
@@ -2465,6 +2567,14 @@ class Plugin:
                 self._write_sysfs(gov_file, orig_gov)
         self.saved_cpu_governors.clear()
 
+        # G. Restore CPU EPP
+        for ep, orig_epp in list(self.saved_cpu_epp.items()):
+            if os.path.exists(ep):
+                target_epp = orig_epp if orig_epp and orig_epp != "power" else "balance_performance"
+                self._write_sysfs(ep, target_epp)
+        self.saved_cpu_epp.clear()
+
+    def _restore_platform_profile(self):
         # D. Restore ACPI platform profile
         if self.saved_platform_profile and os.path.exists("/sys/firmware/acpi/platform_profile"):
             self._write_sysfs("/sys/firmware/acpi/platform_profile", self.saved_platform_profile)
@@ -2500,14 +2610,8 @@ class Plugin:
         self.saved_power_profile = None
         self.power_profile_set_by_us = False
 
-        # G. Restore CPU EPP
-        for ep, orig_epp in list(self.saved_cpu_epp.items()):
-            if os.path.exists(ep):
-                target_epp = orig_epp if orig_epp and orig_epp != "power" else "balance_performance"
-                self._write_sysfs(ep, target_epp)
-        self.saved_cpu_epp.clear()
-
-        # 3. Restore GPU DPM across all cards
+    def _restore_gpu_settings(self):
+        # Restore GPU DPM across all cards
         for dpm_path, orig_dpm in list(self.saved_gpu_dpm.items()):
             try:
                 if os.path.exists(dpm_path):
@@ -2522,12 +2626,13 @@ class Plugin:
                 logger.error(f"Failed to restore GPU on {dpm_path}: {e}")
         self.saved_gpu_dpm.clear()
 
-        # 4. Unmute Audio (only if this plugin muted it)
+    def _restore_audio(self):
+        # Unmute audio, but only if this plugin muted it
         if self.audio_muted_by_us:
             self._set_audio_mute(False)
             self.audio_muted_by_us = False
 
-        # 5. Restore LEDs
+    def _restore_leds(self):
         for lp, orig_val in list(self.saved_leds.items()):
             try:
                 if os.path.exists(lp):
@@ -2540,10 +2645,79 @@ class Plugin:
                 pass
         self.saved_leds.clear()
 
-        # 6. Hand input back LAST, in the order that discards everything pressed during
-        # the lockout: by now the console is already lit and back at full speed, so the
-        # first button the user presses is answered immediately.
-        self._release_all_gamepad_inputs()
+    def _verify_and_force_restore(self) -> List[str]:
+        """
+        Last line of defence against a console left slow after waking up.
+
+        Only checks things that can be measured on their own, with no saved state needed,
+        and forces them back. The CPU frequency ceiling is deliberately NOT forced here:
+        another tool (HHD's TDP control, PowerTools) may be capping it on purpose, and
+        fighting it every wake would be its own bug. Anything this plugin set is restored
+        from the saved values, or from the on-disk state file after a crash.
+        """
+        forced: List[str] = []
+
+        # 1. The cgroup CPU quota: a leftover here throttles Steam until reboot.
+        if self.last_cpu_quota_path and os.path.exists(self.last_cpu_quota_path):
+            current = ""
+            try:
+                with open(self.last_cpu_quota_path, "r") as f:
+                    current = f.read().strip()
+            except Exception:
+                pass
+            if current and not current.startswith("max"):
+                if self._write_sysfs(self.last_cpu_quota_path, f"max {CPU_QUOTA_PERIOD}"):
+                    forced.append(f"cpu quota cleared on {self.last_cpu_quota_path} (was '{current}')")
+        self.last_cpu_quota_path = ""
+
+        # 2. Any ingress speed cap left on any interface, tracked or not.
+        tc = self._tc_binary()
+        if tc:
+            for iface in self._network_interfaces(default_only=False):
+                try:
+                    if not self._tc_has_ingress(tc, iface):
+                        continue
+                    res = subprocess.run(
+                        [tc, "qdisc", "del", "dev", iface, "ingress"],
+                        capture_output=True, text=True, check=False, timeout=5.0,
+                    )
+                    if res.returncode == 0:
+                        forced.append(f"download cap cleared on {iface}")
+                except Exception:
+                    pass
+
+        # 3. Anything the restore stages should have emptied but did not.
+        leftovers = {
+            "cpu_freqs": len(self.saved_cpu_freqs),
+            "cpu_governors": len(self.saved_cpu_governors),
+            "cpu_epp": len(self.saved_cpu_epp),
+            "gpu_dpm": len(self.saved_gpu_dpm),
+            "asus_ppt": len(self.saved_asus_ppt),
+            "fan_boost": len(self.saved_fan_boost),
+            "brightness": len(self.saved_brightness),
+            "leds": len(self.saved_leds),
+        }
+        pending = {k: v for k, v in leftovers.items() if v}
+        if pending:
+            forced.append(f"stages left values unrestored: {pending}")
+
+        # 4. Record what the machine actually looks like now, so a report of "still slow"
+        # can be diagnosed from the log instead of guessed at.
+        if self.settings.get("debug_logging", True):
+            cpu0 = "/sys/devices/system/cpu/cpu0/cpufreq"
+            logger.info(
+                "[DIB RESTORE CHECK] "
+                f"scaling_max_freq={self._read_attr(cpu0, 'scaling_max_freq') or 'n/a'} "
+                f"cpuinfo_max_freq={self._read_attr(cpu0, 'cpuinfo_max_freq') or 'n/a'} "
+                f"governor={self._read_attr(cpu0, 'scaling_governor') or 'n/a'} "
+                f"epp={self._read_attr(cpu0, 'energy_performance_preference') or 'n/a'} "
+                f"boost={self._read_attr('/sys/devices/system/cpu/cpufreq', 'boost') or 'n/a'} "
+                f"platform_profile={self._read_attr('/sys/firmware/acpi', 'platform_profile') or 'n/a'} "
+                f"ppt={[f'{os.path.basename(p)}={self._read_attr(os.path.dirname(p), os.path.basename(p))}' for p in glob.glob('/sys/devices/platform/asus-nb-wmi/ppt_*')] or 'n/a'} "
+                f"gpu_dpm={[self._read_attr(os.path.dirname(p), 'power_dpm_force_performance_level') for p in glob.glob('/sys/class/drm/card*/device/power_dpm_force_performance_level')] or 'n/a'} "
+                f"forced={forced or 'nothing'}"
+            )
+        return forced
 
     # ==========================================
     # Background Mode Transitions
