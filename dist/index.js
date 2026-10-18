@@ -94,14 +94,15 @@ function FaTimes (props) {
   return GenIcon({"attr":{"viewBox":"0 0 640 512"},"child":[{"tag":"path","attr":{"d":"M544 160v64h32v64h-32v64H64V160h480m16-64H48c-26.51 0-48 21.49-48 48v224c0 26.51 21.49 48 48 48h512c26.51 0 48-21.49 48-48v-16h8c13.255 0 24-10.745 24-24V184c0-13.255-10.745-24-24-24h-8v-16c0-26.51-21.49-48-48-48zm-144 96H96v128h320V192z"},"child":[]}]})(props);
 }
 
-const Overlay = ({ isBackgroundMode, showHud, countdown, downloadInfo, settings, batteryCapacity, isCharging, onWake, onEnterBlackout, }) => {
+const Overlay = ({ isBackgroundMode, showHud, showSplash, countdown, downloadInfo, settings, batteryCapacity, isCharging, onWake, onEnterBlackout, }) => {
     // If neither HUD nor blackout is active, do not render anything
     if (!showHud && !isBackgroundMode) {
         return null;
     }
-    // Pure black screen mode (hardware power button is the sole wake trigger)
+    // Pure black screen mode. With nothing downloading there is no HUD to show, so the
+    // plugin mark appears for a moment to say which standby this is, then fades to black.
     if (isBackgroundMode) {
-        return (SP_JSX.jsx("div", { className: "dib-overlay-container dib-overlay-blackout", tabIndex: -1, "aria-hidden": "true" }));
+        return (SP_JSX.jsx("div", { className: "dib-overlay-container dib-overlay-blackout", tabIndex: -1, "aria-hidden": "true", children: showSplash && (SP_JSX.jsxs("div", { className: "dib-splash", children: [SP_JSX.jsx(FaDownload, { className: "dib-splash-icon" }), SP_JSX.jsx("div", { className: "dib-splash-title", children: "Download in Background" }), SP_JSX.jsx("div", { className: "dib-splash-subtitle", children: "Standby \u00B7 press POWER or use a controller to wake" })] })) }));
     }
     // Download HUD Mode (Countdown before screen off)
     const percent = Math.min(100, Math.max(0, downloadInfo.progress_percent || 0));
@@ -136,7 +137,7 @@ const Overlay = ({ isBackgroundMode, showHud, countdown, downloadInfo, settings,
     return (SP_JSX.jsx("div", { className: "dib-overlay-container dib-overlay-hud", children: SP_JSX.jsxs("div", { className: "dib-hud-card", children: [SP_JSX.jsxs("div", { className: "dib-hud-header", children: [SP_JSX.jsxs("div", { className: "dib-hud-title-box", children: [SP_JSX.jsx(FaDownload, { className: "dib-hud-icon" }), SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { className: "dib-hud-title", children: "Download in Background" }), SP_JSX.jsx("div", { className: "dib-hud-subtitle", children: "System entering low-power mode to continue downloads" })] })] }), SP_JSX.jsxs("div", { className: "dib-countdown-badge", children: [SP_JSX.jsx(FaMoon, {}), "Screen off in ", countdown, "s"] })] }), SP_JSX.jsxs("div", { className: "dib-game-info", children: [SP_JSX.jsx("div", { className: "dib-game-title", children: gameTitle }), SP_JSX.jsx("div", { className: "dib-progress-container", children: SP_JSX.jsx("div", { className: "dib-progress-bar", style: { width: `${percent > 0 ? percent : 2}%` } }) }), SP_JSX.jsxs("div", { className: "dib-metrics-row", children: [SP_JSX.jsxs("div", { className: "dib-metric-item", children: [SP_JSX.jsx("span", { children: "Speed:" }), SP_JSX.jsx("span", { className: "dib-metric-value", children: formatSpeed(downloadInfo.bytes_per_second) })] }), SP_JSX.jsxs("div", { className: "dib-metric-item", children: [SP_JSX.jsx("span", { children: "Progress:" }), SP_JSX.jsxs("span", { className: "dib-metric-value", children: [percent.toFixed(1), "% (", formatSize(downloadInfo.completed_bytes), " / ", formatSize(downloadInfo.total_bytes), ")"] })] }), SP_JSX.jsxs("div", { className: "dib-metric-item", children: [SP_JSX.jsx("span", { children: "Time Left:" }), SP_JSX.jsx("span", { className: "dib-metric-value", children: formatTime(downloadInfo.estimated_seconds_remaining) })] })] })] }), SP_JSX.jsxs("div", { className: "dib-status-badges", children: [SP_JSX.jsxs("div", { className: "dib-badge", children: [SP_JSX.jsx(FaBatteryThreeQuarters, { className: `dib-badge-icon ${batteryCapacity <= 20 ? "warning" : ""}` }), SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { className: "dib-badge-title", children: "Battery Level" }), SP_JSX.jsxs("div", { className: "dib-badge-val", children: [batteryCapacity, "% ", isCharging ? "(Charging)" : ""] })] })] }), SP_JSX.jsxs("div", { className: "dib-badge", children: [SP_JSX.jsx(FaBolt, { className: "dib-badge-icon" }), SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { className: "dib-badge-title", children: "Auto-Suspend Threshold" }), SP_JSX.jsxs("div", { className: "dib-badge-val", children: ["At \u2264 ", settings.min_battery_threshold, "% or on finish"] })] })] })] }), SP_JSX.jsxs("div", { className: "dib-hud-actions", children: [SP_JSX.jsx("button", { className: "dib-btn-primary", onClick: onEnterBlackout, children: "Turn Off Screen Now" }), SP_JSX.jsxs("button", { className: "dib-btn-secondary", onClick: onWake, children: [SP_JSX.jsx(FaTimes, { style: { marginRight: 6 } }), " Cancel & Keep Awake"] })] }), SP_JSX.jsx("div", { className: "dib-hud-footer", children: "Screen turns off automatically. Press the POWER button at any time to wake console back to normal." })] }) }));
 };
 
-const SettingsPanel = ({ settings, setSettings, downloadInfo, isBackgroundMode, batteryCapacity, isCharging, powerPlugged, }) => {
+const SettingsPanel = ({ settings, setSettings, downloadInfo, isBackgroundMode, standbyMode, batteryCapacity, isCharging, powerPlugged, }) => {
     const updateSetting = async (key, val) => {
         const updated = { ...settings, [key]: val };
         setSettings(updated);
@@ -171,9 +172,13 @@ const SettingsPanel = ({ settings, setSettings, downloadInfo, isBackgroundMode, 
                                         marginBottom: "4px",
                                     }, children: [SP_JSX.jsxs("span", { children: ["Progress: ", downloadInfo.progress_percent.toFixed(1), "%"] }), SP_JSX.jsx("span", { children: isDownloading
                                                 ? `Speed: ${formatSpeed(downloadInfo.bytes_per_second)}`
-                                                : "Paused" })] }), SP_JSX.jsx(DFL.ProgressBar, { nProgress: downloadInfo.progress_percent || 0 })] }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "Battery Level", description: `Auto-sleep threshold: ${settings.min_battery_threshold}%`, children: SP_JSX.jsxs("span", { style: { fontWeight: "bold" }, children: [batteryCapacity, "% ", isCharging ? "⚡ (Charging)" : "🔋"] }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "Background Download Mode", description: isBackgroundMode
-                                ? "Active (Screen off & power saving enabled)"
-                                : "Inactive (Normal operation)", children: SP_JSX.jsx("span", { className: `dib-status-tag ${isBackgroundMode ? "active" : "idle"}`, children: isBackgroundMode ? "ACTIVE" : "STANDBY" }) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Behavior Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Enable Plugin", description: "Intercepts suspend when downloading, turns off screen, and saves power.", checked: settings.enabled, onChange: (checked) => updateSetting("enabled", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Auto-Suspend Battery Threshold", description: "Console suspends automatically if battery drops below this limit during download.", value: settings.min_battery_threshold, min: 5, max: 30, step: 1, showValue: true, valueSuffix: "%", onChange: (val) => updateSetting("min_battery_threshold", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "HUD Display Countdown", description: "Seconds the download card shows on screen before turning display off.", value: settings.hud_timeout_seconds, min: 0, max: 15, step: 1, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("hud_timeout_seconds", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Completion Suspend Delay", description: "Seconds to wait after all downloads complete before automatically sleeping.", value: settings.auto_suspend_delay_seconds, min: 30, max: 600, step: 30, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("auto_suspend_delay_seconds", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Block All Input While Screen Is Off", description: "Freezes button mapping and disconnects external controllers so only the power button responds. Turn off if a controller misbehaves after waking.", checked: settings.deep_input_lockout, onChange: (checked) => updateSetting("deep_input_lockout", checked) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Power Saving & Screen Options", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Turn Off Display Backlight", description: "Physically drops LCD/OLED panel backlight brightness to 0.", checked: settings.turn_off_backlight, onChange: (checked) => updateSetting("turn_off_backlight", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pitch Black OLED Mode", description: "Presents a pure black overlay, shutting off individual OLED pixels.", checked: settings.oled_black_screen, onChange: (checked) => updateSetting("oled_black_screen", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle CPU to Powersave", description: "Switches power profile to power-saver and lowers CPU clock frequencies.", checked: settings.throttle_cpu, onChange: (checked) => updateSetting("throttle_cpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle GPU to 200MHz", description: "Sets AMD GPU performance level to low, minimizing GPU power draw.", checked: settings.throttle_gpu, onChange: (checked) => updateSetting("throttle_gpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Mute Audio While Screen Off", description: "Silences audio output during background download to prevent disturbance.", checked: settings.mute_audio, onChange: (checked) => updateSetting("mute_audio", checked) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Download Pace (Fan & Heat)", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Slow Down Download", description: "Caps incoming speed so there is far less to decompress and write. Downloads take longer, the console stays cold and the fans stay off.", checked: settings.limit_download_speed, onChange: (checked) => updateSetting("limit_download_speed", checked) }) }), settings.limit_download_speed && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Download Speed Cap", description: "Lower is quieter and cooler. 6 MB/s still downloads about 21 GB per hour.", value: settings.download_speed_limit_mbps, min: 1, max: 30, step: 1, showValue: true, valueSuffix: " MB/s", onChange: (val) => updateSetting("download_speed_limit_mbps", val) }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Steam CPU Budget", description: "Hard limit on the CPU Steam may use while the screen is off, as a share of one core. This is what keeps the chip cool enough for the fans to idle.", value: settings.download_cpu_percent, min: 0, max: 100, step: 5, showValue: true, valueSuffix: "%", onChange: (val) => updateSetting("download_cpu_percent", val) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Troubleshooting", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Also Disconnect Built-In Controller", description: "EXPERIMENTAL. Only enable if buttons still act while the screen is off. Detaches the built-in pad's raw HID interface, which crashed the session on some consoles.", checked: settings.block_controller_hidraw, onChange: (checked) => updateSetting("block_controller_hidraw", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Write Diagnostic Logs", description: "Records the full input and thermal picture to the plugin log on every screen-off. Leave on while tuning.", checked: settings.debug_logging, onChange: (checked) => updateSetting("debug_logging", checked) }) })] })] }));
+                                                : "Paused" })] }), SP_JSX.jsx(DFL.ProgressBar, { nProgress: downloadInfo.progress_percent || 0 })] }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "Battery Level", description: `Auto-sleep threshold: ${settings.min_battery_threshold}%`, children: SP_JSX.jsxs("span", { style: { fontWeight: "bold" }, children: [batteryCapacity, "% ", isCharging ? "⚡ (Charging)" : "🔋"] }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: standbyMode ? "Standby Mode" : "Background Download Mode", description: standbyMode
+                                ? "Console off, waiting for a controller"
+                                : isBackgroundMode
+                                    ? "Active (Screen off & power saving enabled)"
+                                    : "Inactive (Normal operation)", children: SP_JSX.jsx("span", { className: `dib-status-tag ${isBackgroundMode ? "active" : "idle"}`, children: standbyMode ? "STANDBY" : isBackgroundMode ? "ACTIVE" : "IDLE" }) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Behavior Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Enable Plugin", description: "Intercepts suspend when downloading, turns off screen, and saves power.", checked: settings.enabled, onChange: (checked) => updateSetting("enabled", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Auto-Suspend Battery Threshold", description: "Console suspends automatically if battery drops below this limit during download.", value: settings.min_battery_threshold, min: 5, max: 30, step: 1, showValue: true, valueSuffix: "%", onChange: (val) => updateSetting("min_battery_threshold", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "HUD Display Countdown", description: "Seconds the download card shows on screen before turning display off.", value: settings.hud_timeout_seconds, min: 0, max: 15, step: 1, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("hud_timeout_seconds", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Completion Suspend Delay", description: "Seconds to wait after all downloads complete before automatically sleeping.", value: settings.auto_suspend_delay_seconds, min: 30, max: 600, step: 30, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("auto_suspend_delay_seconds", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Block All Input While Screen Is Off", description: "Freezes button mapping and disconnects external controllers so only the power button responds. Turn off if a controller misbehaves after waking.", checked: settings.deep_input_lockout, onChange: (checked) => updateSetting("deep_input_lockout", checked) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Power Saving & Screen Options", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Turn Off Display Backlight", description: "Physically drops LCD/OLED panel backlight brightness to 0.", checked: settings.turn_off_backlight, onChange: (checked) => updateSetting("turn_off_backlight", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pitch Black OLED Mode", description: "Presents a pure black overlay, shutting off individual OLED pixels.", checked: settings.oled_black_screen, onChange: (checked) => updateSetting("oled_black_screen", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle CPU to Powersave", description: "Switches power profile to power-saver and lowers CPU clock frequencies.", checked: settings.throttle_cpu, onChange: (checked) => updateSetting("throttle_cpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle GPU to 200MHz", description: "Sets AMD GPU performance level to low, minimizing GPU power draw.", checked: settings.throttle_gpu, onChange: (checked) => updateSetting("throttle_gpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Mute Audio While Screen Off", description: "Silences audio output during background download to prevent disturbance.", checked: settings.mute_audio, onChange: (checked) => updateSetting("mute_audio", checked) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Standby & Controller Wake", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Replace Sleep With Standby", description: "The power button AND the Sleep option in the SteamOS power menu both enter the plugin's standby instead of suspending: screen black, downloads carry on, a controller brings it back. Shut Down still powers off for real.", checked: settings.standby_on_power_off, onChange: (checked) => updateSetting("standby_on_power_off", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "What You Will See", description: settings.standby_on_power_off
+                                ? "Downloading: the download card, then black. Nothing downloading: just the plugin logo, then black."
+                                : "Standby off: sleep is intercepted only while a download is active, and the download card is shown." }) }), settings.standby_on_power_off && (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Wake When A Bluetooth Pad Connects", description: "Bluetooth stays on in standby. Turning a paired controller on is enough to wake the console, no button needed.", checked: settings.wake_on_bluetooth_connect, onChange: (checked) => updateSetting("wake_on_bluetooth_connect", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Wake On Controller Button", description: "For USB and dongle controllers, connecting is not enough: press Guide/Home, Select or Start to wake. The console's own buttons stay dead - only power works there.", checked: settings.wake_on_controller_button, onChange: (checked) => updateSetting("wake_on_controller_button", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "Battery In Standby", description: `Standby keeps the console powered, so it does use battery. It drops to a real suspend at ${settings.min_battery_threshold}% to protect it.` }) })] }))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Download Pace (Fan & Heat)", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Slow Down Download", description: "Caps incoming speed so there is far less to decompress and write. Downloads take longer, the console stays cold and the fans stay off.", checked: settings.limit_download_speed, onChange: (checked) => updateSetting("limit_download_speed", checked) }) }), settings.limit_download_speed && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Download Speed Cap", description: "Lower is quieter and cooler. 6 MB/s still downloads about 21 GB per hour.", value: settings.download_speed_limit_mbps, min: 1, max: 30, step: 1, showValue: true, valueSuffix: " MB/s", onChange: (val) => updateSetting("download_speed_limit_mbps", val) }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Steam CPU Budget", description: "Hard limit on the CPU Steam may use while the screen is off, as a share of one core. This is what keeps the chip cool enough for the fans to idle.", value: settings.download_cpu_percent, min: 0, max: 100, step: 5, showValue: true, valueSuffix: "%", onChange: (val) => updateSetting("download_cpu_percent", val) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Troubleshooting", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Also Disconnect Built-In Controller", description: "EXPERIMENTAL. Only enable if buttons still act while the screen is off. Detaches the built-in pad's raw HID interface, which crashed the session on some consoles.", checked: settings.block_controller_hidraw, onChange: (checked) => updateSetting("block_controller_hidraw", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Write Diagnostic Logs", description: "Records the full input and thermal picture to the plugin log on every screen-off. Leave on while tuning.", checked: settings.debug_logging, onChange: (checked) => updateSetting("debug_logging", checked) }) })] })] }));
 };
 
 const PLUGIN_STYLES = `
@@ -201,6 +206,41 @@ const PLUGIN_STYLES = `
   cursor: none;
   pointer-events: all;
   touch-action: none;
+}
+
+/* Standby splash: just the plugin mark, shown over the black screen when the console
+   goes into standby with nothing downloading, then it fades out into pure black. */
+.dib-splash {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  animation: dibSplash 2.5s ease-in-out forwards;
+}
+
+.dib-splash-icon {
+  font-size: 60px;
+  color: #4aa3ff;
+  filter: drop-shadow(0 0 22px rgba(74, 163, 255, 0.45));
+}
+
+.dib-splash-title {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: #e8eefc;
+}
+
+.dib-splash-subtitle {
+  font-size: 13px;
+  color: #93a4c4;
+}
+
+@keyframes dibSplash {
+  0% { opacity: 0; transform: scale(0.96); }
+  12% { opacity: 1; transform: scale(1); }
+  78% { opacity: 1; }
+  100% { opacity: 0; }
 }
 
 /* HUD Mode: Dark glassmorphic overlay */
@@ -480,6 +520,9 @@ const DEFAULT_SETTINGS = {
     download_speed_limit_mbps: 6,
     download_cpu_percent: 30,
     debug_logging: true,
+    standby_on_power_off: false,
+    wake_on_bluetooth_connect: true,
+    wake_on_controller_button: true,
 };
 // Must match WAKE_COOLDOWN_SECONDS in main.py: the window after a wake in which
 // suspend requests are ignored, so the press that woke the console cannot re-sleep it.
@@ -505,8 +548,11 @@ let sharedBatteryCapacity = 100;
 let sharedIsCharging = false;
 let sharedPowerPlugged = false;
 let sharedIsBackgroundMode = false;
+let sharedStandbyMode = false;
 let sharedBackgroundModeEnteredTime = 0;
 let sharedShowHud = false;
+let sharedShowSplash = false;
+let sharedSplashTimer = null;
 let sharedCountdown = 5;
 let sharedWakeCooldownUntil = 0;
 let sharedHudTimer = null;
@@ -535,6 +581,65 @@ const closeSteamSideMenus = () => {
     [150, 400, 800, 1400, 2000, 2800, 3600].forEach((delay) => setTimeout(close, delay));
 };
 /**
+ * Shows the plugin mark over the black screen for a moment.
+ *
+ * Used when standby replaces the system's own sleep and there is no download to put in
+ * the HUD: something has to say which standby this is, since it looks identical to the
+ * console being off.
+ */
+const showStandbySplash = (durationMs = 2500) => {
+    sharedShowSplash = true;
+    if (sharedSplashTimer) {
+        clearTimeout(sharedSplashTimer);
+    }
+    sharedSplashTimer = setTimeout(() => {
+        sharedShowSplash = false;
+        sharedSplashTimer = null;
+        notifyStateListeners();
+    }, durationMs);
+};
+const clearStandbySplash = () => {
+    if (sharedSplashTimer) {
+        clearTimeout(sharedSplashTimer);
+        sharedSplashTimer = null;
+    }
+    sharedShowSplash = false;
+};
+/**
+ * Enters standby straight away, with the logo instead of the download HUD.
+ *
+ * This is the path taken when the user picks Sleep from the SteamOS power menu (or
+ * presses power) with standby enabled and nothing downloading: there is no countdown to
+ * show, the console is simply going off.
+ */
+const triggerEnterStandby = async (reason) => {
+    if (Date.now() < sharedWakeCooldownUntil) {
+        console.log("[DownloadInBackground] Wake cooldown active, not entering standby.");
+        return;
+    }
+    if (sharedHudTimer) {
+        clearInterval(sharedHudTimer);
+        sharedHudTimer = null;
+    }
+    sharedShowHud = false;
+    sharedIsBackgroundMode = true;
+    sharedStandbyMode = true;
+    sharedBackgroundModeEnteredTime = Date.now();
+    showStandbySplash();
+    notifyStateListeners();
+    try {
+        const success = await call("enter_background_mode", reason);
+        if (success === false) {
+            sharedIsBackgroundMode = false;
+            clearStandbySplash();
+            notifyStateListeners();
+        }
+    }
+    catch (e) {
+        console.error("[DownloadInBackground] Error entering standby:", e);
+    }
+};
+/**
  * Triggers a complete system wake:
  * 1. Synchronously drops any black screen or HUD from the DOM
  * 2. Activates the cooldown against re-sleep
@@ -545,7 +650,9 @@ const triggerFullWake = async (reason = "wake") => {
     console.log("[DownloadInBackground] triggerFullWake called! Reason:", reason);
     sharedIsBackgroundMode = false;
     sharedShowHud = false;
+    sharedStandbyMode = false;
     sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
+    clearStandbySplash();
     if (sharedHudTimer) {
         clearInterval(sharedHudTimer);
         sharedHudTimer = null;
@@ -658,16 +765,17 @@ const GlobalOverlayContainer = () => {
     }, [sharedIsBackgroundMode]);
     // CRITICAL: If NOT in background mode and NOT showing HUD: DO NOT RENDER ANYTHING!
     // This guarantees that once awakened, the black div is 100% UNMOUNTED from the DOM.
-    if (!sharedIsBackgroundMode && !sharedShowHud) {
+    if (!sharedIsBackgroundMode && !sharedShowHud && !sharedShowSplash) {
         return null;
     }
-    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("style", { children: PLUGIN_STYLES }), SP_JSX.jsx(Overlay, { isBackgroundMode: sharedIsBackgroundMode, showHud: sharedShowHud, countdown: sharedCountdown, downloadInfo: sharedDownloadInfo, settings: sharedSettings, batteryCapacity: sharedBatteryCapacity, isCharging: sharedIsCharging, onWake: () => triggerFullWake("overlay_wake"), onEnterBlackout: () => triggerEnterBlackout("manual_screen_off") })] }));
+    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("style", { children: PLUGIN_STYLES }), SP_JSX.jsx(Overlay, { isBackgroundMode: sharedIsBackgroundMode, showHud: sharedShowHud, showSplash: sharedShowSplash, countdown: sharedCountdown, downloadInfo: sharedDownloadInfo, settings: sharedSettings, batteryCapacity: sharedBatteryCapacity, isCharging: sharedIsCharging, onWake: () => triggerFullWake("overlay_wake"), onEnterBlackout: () => triggerEnterBlackout("manual_screen_off") })] }));
 };
 // Plugin Quick Access Menu Content
 const PluginContent = () => {
     const [settings, setSettings] = SP_REACT.useState(sharedSettings);
     const [downloadInfo, setDownloadInfo] = SP_REACT.useState(sharedDownloadInfo);
     const [isBackgroundMode, setIsBackgroundMode] = SP_REACT.useState(sharedIsBackgroundMode);
+    const [standbyMode, setStandbyMode] = SP_REACT.useState(sharedStandbyMode);
     const [batteryCapacity, setBatteryCapacity] = SP_REACT.useState(sharedBatteryCapacity);
     const [isCharging, setIsCharging] = SP_REACT.useState(sharedIsCharging);
     const [powerPlugged, setPowerPlugged] = SP_REACT.useState(sharedPowerPlugged);
@@ -676,6 +784,7 @@ const PluginContent = () => {
             setSettings(sharedSettings);
             setDownloadInfo(sharedDownloadInfo);
             setIsBackgroundMode(sharedIsBackgroundMode);
+            setStandbyMode(sharedStandbyMode);
             setBatteryCapacity(sharedBatteryCapacity);
             setIsCharging(sharedIsCharging);
             setPowerPlugged(sharedPowerPlugged);
@@ -690,7 +799,7 @@ const PluginContent = () => {
         setSettings(newSettings);
         notifyStateListeners();
     };
-    return (SP_JSX.jsx(SettingsPanel, { settings: settings, setSettings: handleUpdateSettings, downloadInfo: downloadInfo, isBackgroundMode: isBackgroundMode, batteryCapacity: batteryCapacity, isCharging: isCharging, powerPlugged: powerPlugged }));
+    return (SP_JSX.jsx(SettingsPanel, { settings: settings, setSettings: handleUpdateSettings, downloadInfo: downloadInfo, isBackgroundMode: isBackgroundMode, standbyMode: standbyMode, batteryCapacity: batteryCapacity, isCharging: isCharging, powerPlugged: powerPlugged }));
 };
 var index = definePlugin(() => {
     // Register global overlay in SteamOS DOM
@@ -724,6 +833,14 @@ var index = definePlugin(() => {
                 sharedIsBackgroundMode = true;
                 sharedBackgroundModeEnteredTime = Date.now();
                 sharedShowHud = false;
+                // Entered from the backend (power key, or Sleep caught by logind). With standby
+                // on and nothing downloading there is no HUD to show, so show the logo instead.
+                if (Boolean(data?.standby)) {
+                    sharedStandbyMode = true;
+                    if (!data?.has_download) {
+                        showStandbySplash();
+                    }
+                }
                 notifyStateListeners();
             }
         });
@@ -800,6 +917,7 @@ var index = definePlugin(() => {
                 else {
                     sharedIsBackgroundMode = backendIsBg;
                 }
+                sharedStandbyMode = Boolean(status.standby_mode);
                 sharedBatteryCapacity = Number(status.battery_capacity ?? 100);
                 sharedIsCharging = Boolean(status.is_charging);
                 sharedPowerPlugged = Boolean(status.power_plugged);
@@ -956,19 +1074,26 @@ var index = definePlugin(() => {
                     console.log("[DownloadInBackground] Ignoring suspend request: within wake cooldown period.");
                     return false;
                 }
-                // 3. With the plugin off, or nothing downloading as of the last poll, get out of
-                // the way immediately: no backend round-trip, no HUD, so SteamOS suspends with
-                // its own animation exactly as it does without this plugin installed.
+                // 3. Plugin off: get out of the way immediately, no backend round-trip, so
+                // SteamOS suspends with its own animation exactly as without this plugin.
                 if (!sharedSettings.enabled) {
                     return true;
                 }
-                if (!sharedDownloadInfo.is_downloading || sharedDownloadInfo.is_paused) {
-                    console.log("[DownloadInBackground] No active download -> Allowing stock SteamOS suspend.");
+                // 4. This is also the hook for Sleep chosen from the SteamOS power menu, not
+                // just the physical button. With standby on, that sleep becomes our mode.
+                const looksIdle = !sharedDownloadInfo.is_downloading || sharedDownloadInfo.is_paused;
+                if (looksIdle && !sharedSettings.standby_on_power_off) {
+                    console.log("[DownloadInBackground] No active download and standby off -> Allowing stock SteamOS suspend.");
                     return true;
                 }
-                // 4. Confirm against the Steam client before taking the suspend over
+                // 5. Confirm against the Steam client before taking the suspend over
                 await querySteamDownloads();
                 const isDownloading = Boolean(sharedDownloadInfo.is_downloading && !sharedDownloadInfo.is_paused);
+                if (!isDownloading && sharedSettings.standby_on_power_off) {
+                    console.log("[DownloadInBackground] Sleep requested with standby enabled -> entering standby with logo.");
+                    await triggerEnterStandby("standby_sleep_request");
+                    return false;
+                }
                 if (isDownloading) {
                     console.log("[DownloadInBackground] Active download running -> Intercepting suspend and showing HUD");
                     try {

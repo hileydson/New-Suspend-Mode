@@ -50,6 +50,10 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "download_speed_limit_mbps": 6,
     "download_cpu_percent": 30,
     "debug_logging": True,
+    # Standby: turn the power button into "console off, wakes on a controller"
+    "standby_on_power_off": False,
+    "wake_on_bluetooth_connect": True,
+    "wake_on_controller_button": True,
 }
 
 INPUT_EVENT_FORMAT = "qqHHi"
@@ -94,6 +98,22 @@ TELEMETRY_INTERVAL = 30.0
 
 # cgroup CPU quota period, in microseconds.
 CPU_QUOTA_PERIOD = 100000
+
+# Input bus types as /sys/class/input/inputN/id/bustype reports them.
+BUS_USB = "0003"
+BUS_BLUETOOTH = "0005"
+
+# The buttons that bring the console back from standby: Select/Back, Start/Menu and the
+# big middle one (Guide / Home / PS / Xbox), whichever name the pad uses for it.
+BTN_SELECT = 314
+BTN_START = 315
+BTN_MODE = 316
+KEY_HOMEPAGE = 172
+WAKE_BUTTON_CODES = {BTN_SELECT, BTN_START, BTN_MODE, KEY_HOMEPAGE}
+
+# How long a controller's raw HID reports are watched to learn which bytes move on their
+# own (analog sticks, gyros, sequence counters) before a change counts as a button press.
+HIDRAW_LEARN_SECONDS = 1.5
 
 
 class SteamDownloadDetector:
@@ -379,6 +399,15 @@ class Plugin:
         self.inhibited_inputs: List[str] = []
         self.lockout_event_counts: Dict[str, int] = {}
 
+        # Standby mode: the console is "off" but awake, waiting for a controller.
+        self.standby_mode: bool = False
+        self.wake_event_fds: Dict[str, int] = {}
+        self.wake_hidraw_fds: Dict[str, int] = {}
+        self.wake_source_paths: Set[str] = set()
+        self.hidraw_state: Dict[str, Dict[str, Any]] = {}
+        self.standby_known_gamepads: Set[str] = set()
+        self.wake_watcher_thread: Optional[threading.Thread] = None
+
         # Download pacing state, both reversible and recorded on disk so a crash mid
         # session can still be undone on the next start.
         self.saved_cpu_quota: Optional[Tuple[str, str]] = None
@@ -477,7 +506,15 @@ class Plugin:
         )
         self.logind_watcher_thread.start()
 
-        # 3. Main periodic monitor loop
+        # 3. Standby wake watcher (controllers asking for the console back)
+        self.wake_watcher_thread = threading.Thread(
+            target=self._standby_wake_watcher_worker,
+            daemon=True,
+            name="DownloadInBackground-WakeWatcher"
+        )
+        self.wake_watcher_thread.start()
+
+        # 4. Main periodic monitor loop
         self.monitor_task = self.loop.create_task(self._background_monitor_loop())
 
     async def _unload(self):
@@ -608,6 +645,7 @@ class Plugin:
         bat = self._get_battery_info()
         return {
             "is_background_mode": self.is_background_mode,
+            "standby_mode": self.standby_mode,
             "battery_capacity": bat["capacity"],
             "is_charging": bat["is_charging"],
             "power_plugged": bat["is_plugged"],
@@ -717,9 +755,14 @@ class Plugin:
         With the plugin enabled but nothing downloading, this is False and SteamOS is
         left completely alone: no inhibitor, no grabbed power button, no masked targets,
         so the stock suspend animation and behaviour are exactly as without the plugin.
+
+        Standby mode is the one exception: there the power button has to be ours at all
+        times, because turning it into "console off, wakes on a controller" is the point.
         """
         if self.suspend_in_progress or not self.settings.get("enabled", True):
             return False
+        if self.settings.get("standby_on_power_off", False):
+            return True
         return self.is_background_mode or self._is_active_download()
 
     def _update_inhibitor_state(self):
@@ -761,6 +804,16 @@ class Plugin:
 
         # Double check: Is download REALLY actively downloading (not paused or idle)?
         if not self._is_active_download():
+            if self.settings.get("standby_on_power_off", False):
+                if now - self.last_suspend_intercept_time < 3.0:
+                    return
+                self.last_suspend_intercept_time = now
+                logger.info("Sleep requested with standby enabled -> entering standby instead of suspending.")
+                if self.loop and self.loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self.enter_background_mode("standby_sleep_request"), self.loop
+                    )
+                return
             logger.info("Suspend attempt not intercepted: Download is paused or idle. Allowing normal suspend.")
             self._update_inhibitor_state()
             return
@@ -941,6 +994,10 @@ class Plugin:
         count = 0
         for input_dir, event_path, name, phys in self._iter_input_devices():
             if self._is_power_input(name, phys) or (event_path and event_path in live_power):
+                continue
+            # A controller we hold exclusively as a standby wake source must stay live:
+            # inhibiting it would stop our own reads too, and nothing else can see it.
+            if event_path and event_path in self.wake_source_paths:
                 continue
             inhibit_file = os.path.join(input_dir, "inhibited")
             if not os.path.exists(inhibit_file):
@@ -1132,11 +1189,20 @@ class Plugin:
         is_active_dl = self._is_active_download() or (net_rx > 20000)
         if is_active_dl:
             self._trigger_suspend_intercepted()
-        else:
-            logger.info("Power key pressed with no active downloads (paused/idle) -> Allowing normal suspend.")
-            self._release_sleep_inhibitor()
+            return
+
+        if self.settings.get("standby_on_power_off", False):
+            logger.info("Power key pressed with standby enabled -> entering standby (a controller brings it back).")
             if self.loop and self.loop.is_running():
-                asyncio.run_coroutine_threadsafe(self.trigger_suspend(), self.loop)
+                asyncio.run_coroutine_threadsafe(
+                    self.enter_background_mode("standby_power_off"), self.loop
+                )
+            return
+
+        logger.info("Power key pressed with no active downloads (paused/idle) -> Allowing normal suspend.")
+        self._release_sleep_inhibitor()
+        if self.loop and self.loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.trigger_suspend(), self.loop)
 
     def _get_session_user(self) -> str:
         for uid in [1000, 1001]:
@@ -1332,6 +1398,262 @@ class Plugin:
         logger.info(f"Reset CPU/IO scheduling to normal for {len(victims)} Steam process(es).")
         return len(victims)
 
+    # ==========================================
+    # Standby: console off, wakes on a controller
+    # ==========================================
+    def _find_external_gamepads(self) -> List[Dict[str, str]]:
+        """
+        Every external USB or Bluetooth controller, as candidates for waking the console.
+
+        The built-in pad of a handheld is excluded on purpose: pressing its buttons with
+        the screen off must stay dead, which is the whole point of the input lockout.
+        Only the power button brings the console itself back.
+        """
+        found: List[Dict[str, str]] = []
+        for input_dir, event_path, name, phys in self._iter_input_devices():
+            if not event_path or not glob.glob(os.path.join(input_dir, "js*")):
+                continue  # Not a gamepad/joystick
+            id_dir = os.path.join(input_dir, "id")
+            bustype = self._read_attr(id_dir, "bustype").lower()
+            vendor = self._read_attr(id_dir, "vendor").upper()
+            if bustype not in (BUS_USB, BUS_BLUETOOTH) or vendor in self.INTERNAL_HID_VENDORS:
+                continue
+            found.append({
+                "input_dir": input_dir,
+                "event_path": event_path,
+                "name": name,
+                "bustype": bustype,
+                "vendor": vendor,
+            })
+        return found
+
+    def _hidraw_for_input(self, input_dir: str) -> Optional[str]:
+        """The /dev/hidraw* node behind an input device, if it has one."""
+        try:
+            probe = os.path.realpath(os.path.join(input_dir, "device"))
+            for _ in range(4):
+                nodes = sorted(glob.glob(os.path.join(probe, "hidraw", "hidraw*")))
+                if nodes:
+                    return f"/dev/{os.path.basename(nodes[0])}"
+                parent = os.path.dirname(probe)
+                if parent == probe:
+                    break
+                probe = parent
+        except Exception:
+            pass
+        return None
+
+    def _ensure_bluetooth_powered(self):
+        """
+        Leaves Bluetooth on while the console is in standby, so a controller can connect
+        to it and wake it. Nothing is turned off again on wake: the adapter is left in
+        the state the user normally keeps it in.
+        """
+        if not glob.glob("/sys/class/bluetooth/hci*"):
+            logger.info("Standby: no Bluetooth adapter present; Bluetooth wake unavailable.")
+            return
+        for cmd in (["rfkill", "unblock", "bluetooth"], ["bluetoothctl", "power", "on"]):
+            if not shutil.which(cmd[0]):
+                continue
+            try:
+                subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5.0)
+            except Exception as e:
+                logger.warning(f"Could not run {' '.join(cmd)}: {e}")
+        logger.info("Standby: Bluetooth left powered on for controller wake.")
+
+    def _setup_standby_wake_sources(self):
+        """
+        Opens the controllers that are allowed to wake the console.
+
+        Two ways in, because Steam Input holds controllers exclusively and an EVIOCGRAB
+        can therefore fail:
+          - Grabbed exclusively: we get clean button events and Steam gets nothing. Best
+            case, and the device is left out of the kernel inhibit so we can keep reading.
+          - Raw HID: when the grab fails, the evdev node is inhibited like everything else
+            (so no button can act on the UI unseen) and the controller's hidraw reports
+            are watched instead, which the inhibit does not stop.
+        """
+        self._teardown_standby_wake_sources()
+
+        # The snapshot of what is already connected is taken even when button wake is
+        # off: without it every pad already paired would look newly connected on the
+        # first pass and wake the console immediately.
+        pads = self._find_external_gamepads()
+        self.standby_known_gamepads = {p["input_dir"] for p in pads}
+        logger.info(
+            f"Standby: {len(pads)} external controller(s) present: "
+            f"{[(p['name'], 'bluetooth' if p['bustype'] == BUS_BLUETOOTH else 'usb') for p in pads] or 'none'}"
+        )
+        if not self.settings.get("wake_on_controller_button", True):
+            logger.info("Standby: wake on controller button is off; only the power button will wake.")
+            return
+
+        for pad in pads:
+            event_path, name = pad["event_path"], pad["name"]
+            fd = None
+            try:
+                fd = os.open(event_path, os.O_RDONLY | os.O_NONBLOCK)
+                fcntl.ioctl(fd, EVIOCGRAB, 1)
+            except Exception as e:
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        pass
+                fd = None
+                logger.info(f"Standby: could not take '{name}' exclusively ({e}); falling back to raw HID.")
+
+            if fd is not None:
+                self.wake_event_fds[event_path] = fd
+                self.wake_source_paths.add(event_path)
+                logger.info(f"Standby wake source (exclusive input): '{name}' on {event_path}.")
+                continue
+
+            hidraw = self._hidraw_for_input(pad["input_dir"])
+            if hidraw and os.path.exists(hidraw):
+                try:
+                    hfd = os.open(hidraw, os.O_RDONLY | os.O_NONBLOCK)
+                    self.wake_hidraw_fds[hidraw] = hfd
+                    self.hidraw_state[hidraw] = {
+                        "baseline": None,
+                        "noisy": set(),
+                        "learn_until": time.time() + HIDRAW_LEARN_SECONDS,
+                        "hits": 0,
+                        "name": name,
+                    }
+                    logger.info(f"Standby wake source (raw HID): '{name}' on {hidraw}.")
+                    continue
+                except Exception as e:
+                    logger.warning(f"Standby: could not open {hidraw} for '{name}': {e}")
+
+            logger.warning(
+                f"Standby: '{name}' cannot wake the console (not grabbable, no hidraw node). "
+                "Use the power button, or connect it over Bluetooth."
+            )
+
+    def _teardown_standby_wake_sources(self):
+        for path, fd in list(self.wake_event_fds.items()):
+            try:
+                fcntl.ioctl(fd, EVIOCGRAB, 0)
+            except Exception:
+                pass
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        for path, fd in list(self.wake_hidraw_fds.items()):
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        self.wake_event_fds.clear()
+        self.wake_hidraw_fds.clear()
+        self.wake_source_paths.clear()
+        self.hidraw_state.clear()
+        self.standby_known_gamepads.clear()
+
+    def _hidraw_report_is_button_press(self, path: str, data: bytes) -> bool:
+        """
+        Decides whether a raw HID report means a button was pressed.
+
+        Report layouts are device specific, so rather than decoding them this learns which
+        bytes move on their own - sticks drift, gyros never sit still, some pads put a
+        sequence counter in every report - and only a change in the quiet bytes counts.
+        A pad that reports only on change says nothing during the learning window, so its
+        first report afterwards is itself the press.
+        """
+        state = self.hidraw_state.get(path)
+        if state is None or not data:
+            return False
+
+        now = time.time()
+        learning = now < state["learn_until"]
+        baseline = state["baseline"]
+
+        if baseline is None:
+            state["baseline"] = bytes(data)
+            # Silent until now and past the learning window: this report IS the activity.
+            return not learning
+
+        changed = {i for i in range(min(len(baseline), len(data))) if baseline[i] != data[i]}
+        if learning:
+            state["noisy"] |= changed
+            return False
+
+        if not (changed - state["noisy"]):
+            state["hits"] = 0
+            return False
+
+        state["hits"] += 1
+        return state["hits"] >= 2  # Debounce: two consecutive reports showing the change
+
+    def _standby_wake_watcher_worker(self):
+        """
+        Waits for a controller to ask for the console back while it sits in standby.
+        Idle (and costing nothing) whenever standby is not active.
+        """
+        logger.info("Standby wake watcher started (idle until standby mode).")
+        while not self.stop_threads:
+            if not self.standby_mode or not (self.wake_event_fds or self.wake_hidraw_fds):
+                time.sleep(0.5)
+                continue
+
+            event_by_fd = {fd: path for path, fd in self.wake_event_fds.items()}
+            hidraw_by_fd = {fd: path for path, fd in self.wake_hidraw_fds.items()}
+            try:
+                rlist, _, _ = select.select(list(event_by_fd) + list(hidraw_by_fd), [], [], 0.3)
+            except Exception as e:
+                logger.error(f"Standby wake watcher select failed: {e}")
+                time.sleep(1.0)
+                continue
+
+            in_standby_for = time.time() - self.background_mode_entered_time
+            for fd in rlist:
+                try:
+                    if fd in event_by_fd:
+                        data = os.read(fd, INPUT_EVENT_SIZE * 32)
+                        pressed = None
+                        while len(data) >= INPUT_EVENT_SIZE:
+                            chunk, data = data[:INPUT_EVENT_SIZE], data[INPUT_EVENT_SIZE:]
+                            _, _, ev_type, ev_code, ev_value = struct.unpack(INPUT_EVENT_FORMAT, chunk)
+                            if ev_type == EV_KEY and ev_code in WAKE_BUTTON_CODES and ev_value == 1:
+                                pressed = ev_code
+                        if pressed is None:
+                            continue
+                        source = f"{event_by_fd[fd]} (button {pressed})"
+                    else:
+                        data = os.read(fd, 128)
+                        if not self._hidraw_report_is_button_press(hidraw_by_fd[fd], data):
+                            continue
+                        source = f"{hidraw_by_fd[fd]} (raw HID activity)"
+                except (BlockingIOError, OSError):
+                    continue
+                except Exception as e:
+                    logger.error(f"Standby wake watcher read failed: {e}")
+                    continue
+
+                if in_standby_for < POWER_KEY_GRACE_SECONDS:
+                    continue  # A button still held from before standby started
+                logger.info(f"Controller asked for the console back: {source} -> waking.")
+                self._request_wake("controller_button")
+                break
+
+    def _request_wake(self, reason: str):
+        """Leaves standby from a worker thread."""
+        self.wake_cooldown_until = time.time() + WAKE_COOLDOWN_SECONDS
+        if self.loop and self.loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.exit_background_mode(reason), self.loop)
+
+    def _newly_connected_bluetooth_gamepads(self) -> List[str]:
+        """Bluetooth controllers that appeared since standby began."""
+        names = []
+        for pad in self._find_external_gamepads():
+            if pad["bustype"] != BUS_BLUETOOTH or pad["input_dir"] in self.standby_known_gamepads:
+                continue
+            self.standby_known_gamepads.add(pad["input_dir"])
+            names.append(pad["name"] or pad["input_dir"])
+        return names
+
     def _map_device_readers(self) -> Dict[str, List[str]]:
         """
         Which processes currently hold each /dev/input/event* or /dev/hidraw* open.
@@ -1523,8 +1845,15 @@ class Plugin:
         """
         self.lockout_event_counts.clear()
         deep = bool(self.settings.get("deep_input_lockout", True))
-        if deep:
+        if self.standby_mode:
+            # In standby the external controllers are the way back in, so they are never
+            # detached here, and they are opened as wake sources before the inhibit runs.
+            if self.settings.get("wake_on_bluetooth_connect", True):
+                self._ensure_bluetooth_powered()
+            self._setup_standby_wake_sources()
+        elif deep:
             self._unbind_external_gamepads()
+        if deep:
             self._pause_controller_daemons()
 
         # Refresh which devices are the real power/sleep buttons: those stay untouched so
@@ -1549,6 +1878,7 @@ class Plugin:
                     path in self.grabbed_gamepad_fds
                     or path in self.power_device_paths
                     or path in self.power_grabbed_paths
+                    or path in self.wake_source_paths
                 ):
                     continue
                 try:
@@ -1667,6 +1997,10 @@ class Plugin:
         )
         if had_lockout:
             self._log_input_diagnostics("before release")
+
+        # Standby's wake sources go first: the controller that just woke the console has
+        # to answer to Steam again, not to us.
+        self._teardown_standby_wake_sources()
 
         # 0. Let the kernel deliver events again. Done first so the console answers the
         # user's next press immediately; releases of anything held down come with it.
@@ -2429,6 +2763,7 @@ class Plugin:
         """
         logger.info("Restoring system power and display settings...")
         self.power_saving_applied = False
+        self.standby_mode = False
 
         stages = (
             ("backlight", self._restore_backlight),
@@ -2732,7 +3067,14 @@ class Plugin:
             logger.info(f"Blocked enter_background_mode (reason: {reason}) because system just woke up.")
             return False
 
-        logger.info(f"Entering Background Download Mode (reason: {reason}).")
+        # Standby is decided by the setting, never by how the mode was entered. Deriving
+        # it from the reason string meant an entry through the HUD countdown
+        # ("countdown_completed") silently ran WITHOUT standby: no controller could wake
+        # the console, and the external pads were detached as part of the normal lockout.
+        self.standby_mode = bool(self.settings.get("standby_on_power_off", False))
+        logger.info(
+            f"Entering {'Standby' if self.standby_mode else 'Background Download'} Mode (reason: {reason})."
+        )
         self.is_background_mode = True
         self.background_mode_entered_time = now
         self.last_loop_timestamp = now
@@ -2749,7 +3091,14 @@ class Plugin:
         # Reset loop timestamp immediately after setup to avoid false clock-jump
         self.last_loop_timestamp = time.time()
 
-        await decky.emit("background_mode_changed", {"is_background_mode": True, "reason": reason})
+        await decky.emit("background_mode_changed", {
+            "is_background_mode": True,
+            "reason": reason,
+            "standby": self.standby_mode,
+            # Without a download there is nothing to put in the HUD, so the frontend
+            # shows just the plugin logo before the screen goes black.
+            "has_download": self._is_active_download(),
+        })
         return True
 
     async def exit_background_mode(self, reason: str = "manual") -> bool:
@@ -2941,6 +3290,15 @@ class Plugin:
                     self._grab_new_inputs()
                     self._inhibit_all_inputs()
 
+                    # A Bluetooth controller connecting is itself the wake signal: there is
+                    # no button to press, the pairing is the request for the console back.
+                    if self.standby_mode and self.settings.get("wake_on_bluetooth_connect", True):
+                        connected = self._newly_connected_bluetooth_gamepads()
+                        if connected and time_in_bg > POWER_KEY_GRACE_SECONDS:
+                            logger.info(f"Bluetooth controller connected in standby ({', '.join(connected)}) -> waking.")
+                            await self.exit_background_mode("bluetooth_controller_connected")
+                            continue
+
                     if now - self.last_telemetry_time >= TELEMETRY_INTERVAL:
                         self.last_telemetry_time = now
                         self._log_power_telemetry()
@@ -2962,8 +3320,10 @@ class Plugin:
                         await self.trigger_suspend()
                         continue
 
-                    # Condition B: Downloads finished or paused auto-suspend
-                    if not is_dl:
+                    # Condition B: Downloads finished or paused auto-suspend.
+                    # Never in standby: there the console is meant to sit and wait for a
+                    # controller, so suspending it for lack of a download would defeat it.
+                    if not is_dl and not self.standby_mode:
                         elapsed_since_dl = now - self.last_download_active_time
                         auto_sleep_delay = max(30.0, float(self.settings.get("auto_suspend_delay_seconds", 120)))
 

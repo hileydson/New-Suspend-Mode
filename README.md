@@ -23,10 +23,46 @@ Quando você está baixando jogos no Steam Deck e aciona a ação de suspender (
    - Aplica perfil de economia de energia na CPU (`power-saver` / governor `powersave`).
    - Trava a GPU na frequência mínima (200 MHz).
    - Muta o áudio para evitar sons de notificações ou do sistema.
-4. **Regras Inteligentes de Auto-Suspensão:**
+4. **Bloqueio Total de Botões:** Enquanto a tela está apagada, **nenhum** botão do console é registrado. Isso é feito com o `inhibited` do input core do kernel (`/sys/class/input/inputN/inhibited`), que descarta o evento antes de qualquer programa recebê-lo — inclusive programas que já capturaram o dispositivo com exclusividade, como o Steam Input. Apenas o botão **Power** continua vivo.
+5. **Download em Ritmo Calmo (ventoinhas paradas):** O limite de clock sozinho não esfria nada, porque o Steam usa todo ciclo que recebe. Então o plugin limita os **bytes por segundo** (policer de ingress via `tc`) e o **orçamento de CPU** do Steam (cota `cpu.max` no cgroup dele). Menos dados por segundo = menos descompressão, menos escrita no SSD, menos calor. O download demora mais e o console fica frio, no estilo de um console portátil.
+6. **Regras Inteligentes de Auto-Suspensão:**
    - 🔋 **Bateria Baixa (&le; 15%):** Se a bateria cair para 15% (ou limite configurado) enquanto estiver na bateria, o console restaura o estado e entra em suspensão real para evitar esgotamento total da bateria.
-   - 🏁 **Downloads Concluídos:** Quando todos os downloads terminarem (fila vazia por alguns segundos), o console entra automaticamente em suspensão real.
-5. **Retomada Instantânea:** Ao apertar o botão Power, tocar na tela ou apertar qualquer botão do controle, a tela acende imediatamente e os perfis de desempenho e áudio normais são restaurados.
+   - 🏁 **Downloads Concluídos:** Quando todos os downloads terminarem (fila vazia por alguns segundos), o console entra automaticamente em suspensão real. *(Não acontece no Modo Standby — veja abaixo.)*
+7. **Retomada Instantânea:** Ao apertar o botão **Power**, a tela acende imediatamente e todos os perfis de energia, áudio e input voltam ao normal. Qualquer menu que um botão perdido tenha aberto é fechado automaticamente.
+8. **Nunca Deixa o Sistema Lento:** Tudo que o plugin altera é restaurado em etapas isoladas — uma falha em qualquer etapa não pula as outras — com verificação forçada no final e um arquivo de estado em disco. Se o plugin morrer com a tela apagada, o próximo carregamento desfaz a sessão inteira, **sem precisar reiniciar o console**.
+
+---
+
+### 🎮 Modo Standby (desligar e acordar com o controle)
+
+Opção nova e opcional (desligada por padrão). Com ela ativada, **o sleep do SteamOS é substituído** pelo **Modo Standby**: a tela apaga, o consumo cai ao mínimo, o download (se houver) continua, e o console fica esperando um controle pedir ele de volta — igual a um console de mesa.
+
+Isso vale tanto para o **botão Power físico** quanto para a opção **Sleep** escolhida à mão no menu de energia do SteamOS — são o mesmo evento e os dois são interceptados.
+
+**O que aparece na tela depende de qual recurso está em jogo:**
+
+| Situação | O que o plugin faz |
+| --- | --- |
+| Download ativo (com ou sem o standby ligado) | Mostra o **card do download** (nome, velocidade, progresso, contagem regressiva) e depois apaga |
+| Standby ligado, **sem** download ativo | Mostra **só o logo do plugin** por alguns segundos e depois apaga |
+| Standby desligado, sem download | Não interfere: o SteamOS suspende normalmente, com a animação dele |
+
+Ou seja: basta **um dos dois** recursos estar em jogo para o nosso modo substituir o sleep original. Com os dois ligados, o nosso modo é sempre usado.
+
+**Como o console volta:**
+
+| Tipo de controle | O que acorda o console |
+| --- | --- |
+| 🔵 **Bluetooth** | **Só conectar.** O Bluetooth fica ligado no standby, então basta ligar um controle já pareado. Não precisa apertar nada. |
+| 🔌 **USB / dongle** | **Apertar um botão:** Guide/Home (o botão do meio), **Select** ou **Start**. Só conectar não acorda. |
+| 🎮 **Controle embutido** (Steam Deck / ROG Ally) | **Não acorda.** Os botões do próprio console continuam bloqueados de propósito. Só o botão **Power**. |
+
+**Detalhes importantes:**
+
+- **"Shut Down" do menu da Steam continua desligando de verdade.** O plugin intercepta o botão Power e o "Sleep", não o desligamento real — então você nunca fica sem como desligar o console.
+- **O standby consome bateria**, porque o console continua ligado (é o que permite acordar com o controle). A regra de bateria baixa protege: ao atingir o limite configurado, ele cai para uma suspensão real.
+- **Como o controle é lido:** o plugin tenta pegar o controle com exclusividade (`EVIOCGRAB`), o que é o caso ideal — nós vemos os botões e o Steam não vê nada. Se o Steam já tiver capturado o controle, o plugin inibe o evdev dele (para nenhum botão agir na interface sem você ver) e passa a ler os relatórios `hidraw` do controle, que o inhibit não bloqueia. Se o controle não permitir nenhum dos dois, isso é registrado no log e aquele controle não acorda o console.
+- O painel do plugin mostra `STANDBY` quando está nesse modo.
 
 ---
 
@@ -86,15 +122,32 @@ O script copia os arquivos diretamente para `~/homebrew/plugins/DownloadInBackgr
 
 ### ⚙️ Opções Configuráveis no Menu do Decky
 
-- **Ativar/Desativar Plugin:** Liga ou desliga a interceptação de suspensão.
+**Comportamento**
+- **Ativar/Desativar Plugin:** Liga ou desliga a interceptação de suspensão. Desligado, o SteamOS se comporta exatamente como sem o plugin.
 - **Limite de Bateria para Auto-Suspensão:** Ajustável de 5% a 30% (padrão: 15%).
-- **Tempo de Exibição do HUD:** Ajustável de 0s a 15s (padrão: 5s). Se colocado em 0s, a tela apaga imediatamente ao suspender.
-- **Atraso para Suspensão ao Concluir:** Ajustável de 5s a 60s (padrão: 15s).
-- **Desligar Luz de Fundo (Backlight):** Desliga os LEDs da tela física.
-- **Modo Preto Puro OLED:** Desliga os pixels pretos da tela OLED.
-- **Reduzir CPU para Powersave:** Diminui consumo do processador durante o download.
-- **Reduzir GPU para 200MHz:** Economiza energia limitando a GPU integrada.
-- **Mutar Áudio com Tela Apagada:** Evita sons indesejados no quarto/ambiente.
+- **Tempo de Exibição do HUD:** Ajustável de 0s a 15s (padrão: 5s). Em 0s, a tela apaga imediatamente.
+- **Atraso para Suspensão ao Concluir:** Ajustável de 30s a 600s (padrão: 120s).
+- **Bloquear Todos os Inputs com a Tela Apagada** (padrão: ligado): congela o mapeamento de botões e desconecta controles externos, deixando só o Power responder.
+
+**Modo Standby e Despertar por Controle**
+- **Substituir o Sleep pelo Standby** (padrão: desligado): ativa o modo descrito acima, tanto no botão Power quanto na opção Sleep do menu do SteamOS.
+- **Acordar ao Conectar Controle Bluetooth** (padrão: ligado).
+- **Acordar com Botão do Controle** (padrão: ligado): Guide/Home, Select ou Start em controles USB/dongle.
+
+**Tela e Energia**
+- **Desligar Luz de Fundo (Backlight):** Zera o brilho do painel físico.
+- **Modo Preto Puro OLED:** Camada `#000000`, apagando os pixels em telas OLED.
+- **Reduzir CPU para Powersave:** Governor `powersave`, clock mínimo, turbo desligado e limites de PPT/APU reduzidos.
+- **Reduzir GPU:** Trava o nível de performance da GPU em `low`.
+- **Mutar Áudio com Tela Apagada:** Evita sons indesejados.
+
+**Ritmo do Download (ventoinha e calor)**
+- **Diminuir Velocidade do Download** (padrão: ligado) e **Teto de Velocidade** de 1 a 30 MB/s (padrão: 6 MB/s ≈ 21 GB/hora).
+- **Orçamento de CPU do Steam:** 0 a 100% de um núcleo (padrão: 30%). É o que mantém o chip frio o suficiente para a ventoinha não ligar.
+
+**Diagnóstico**
+- **Desconectar Também o Controle Embutido** (padrão: desligado, **experimental**): só use se algum botão ainda agir com a tela apagada. Desconecta a interface HID bruta do controle interno, o que travou a sessão em alguns consoles.
+- **Gravar Logs de Diagnóstico** (padrão: ligado): registra o panorama completo de input e temperatura em cada ciclo, em `~/homebrew/logs/`. Procure por `DIB INPUT DIAGNOSTICS`, `DIB TELEMETRY` e `DIB RESTORE CHECK`.
 
 ---
 
@@ -108,13 +161,21 @@ O script copia os arquivos diretamente para `~/homebrew/plugins/DownloadInBackgr
   - Sets LCD display backlight brightness to 0.
   - Draws a 100% black `#000000` overlay, powering down OLED pixels.
 - **Maximum Power Savings:**
-  - CPU governor switched to `powersave` / power-saver profile.
-  - GPU engine clock clamped to minimum 200 MHz.
+  - CPU governor switched to `powersave` / power-saver profile, turbo off, PPT limits lowered.
+  - GPU performance level clamped to `low`.
   - Audio sinks muted.
+- **Total Button Lockout:** With the screen off, no console button registers anything. Done with the kernel input core's `inhibited` attribute, which drops events before any client receives them — including clients that already hold the device exclusively, such as Steam Input. Only the power button stays live.
+- **Calm Download Pace (fans stay off):** Clock limits alone do not keep a console cool, because Steam uses every cycle it is given. So the plugin caps the **bytes per second** (`tc` ingress policer) and Steam's **CPU budget** (a `cpu.max` quota on its own cgroup). Fewer bytes per second means less decompression, less SSD writing and far less heat: the download takes longer and the console stays cold.
+- **Standby Instead Of Sleep** (optional, off by default): replaces the system's own sleep — both the physical power button and the Sleep option in the SteamOS power menu — with a standby that turns the console "off" like a desk console: screen black, downloads continuing, waiting for a controller. With a download running you get the download card; with nothing downloading you get just the plugin logo, then black.
+  - **Bluetooth pad:** just connecting it wakes the console. Bluetooth stays powered in standby.
+  - **USB / dongle pad:** press Guide/Home, Select or Start. Connecting alone does not wake it.
+  - **Built-in pad:** stays dead on purpose. Only the power button.
+  - **Shut Down** from the Steam menu still really powers off; only the power button and Sleep are intercepted.
 - **Safety Auto-Suspend:**
-  - Suspends automatically when battery drops below 15% (configurable).
-  - Suspends automatically once all downloads are completed.
-- **Instant Wake:** Pressing the power button, touching the screen, or pressing any gamepad button immediately restores normal brightness and performance profiles.
+  - Suspends automatically when battery drops below 15% (configurable), in standby too.
+  - Suspends automatically once all downloads are completed (not in standby).
+- **Instant Wake:** Pressing the power button restores brightness, power profiles, audio and input at once, and dismisses any menu a stray button press may have opened.
+- **Never Leaves The System Slow:** Every change is undone in isolated stages, so one failing stage cannot skip the others, with a forced verification pass at the end and an on-disk state file. If the plugin dies with the screen off, the next load undoes the whole session — no reboot needed.
 
 ### 🔨 Building from Source
 

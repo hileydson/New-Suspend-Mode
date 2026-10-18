@@ -5,6 +5,7 @@ import { DownloadInfo, PluginSettings } from "../types";
 export interface OverlayProps {
   isBackgroundMode: boolean;
   showHud: boolean;
+  showSplash?: boolean;
   countdown: number;
   downloadInfo: DownloadInfo;
   settings: PluginSettings;
@@ -17,6 +18,7 @@ export interface OverlayProps {
 export const Overlay: FC<OverlayProps> = ({
   isBackgroundMode,
   showHud,
+  showSplash,
   countdown,
   downloadInfo,
   settings,
@@ -30,14 +32,25 @@ export const Overlay: FC<OverlayProps> = ({
     return null;
   }
 
-  // Pure black screen mode (hardware power button is the sole wake trigger)
+  // Pure black screen mode. With nothing downloading there is no HUD to show, so the
+  // plugin mark appears for a moment to say which standby this is, then fades to black.
   if (isBackgroundMode) {
     return (
       <div
         className="dib-overlay-container dib-overlay-blackout"
         tabIndex={-1}
         aria-hidden="true"
-      />
+      >
+        {showSplash && (
+          <div className="dib-splash">
+            <FaDownload className="dib-splash-icon" />
+            <div className="dib-splash-title">Download in Background</div>
+            <div className="dib-splash-subtitle">
+              Standby &middot; press POWER or use a controller to wake
+            </div>
+          </div>
+        )}
+      </div>
     );
   }
 

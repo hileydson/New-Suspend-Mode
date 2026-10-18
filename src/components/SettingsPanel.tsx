@@ -15,6 +15,7 @@ interface SettingsPanelProps {
   setSettings: (newSettings: PluginSettings) => void;
   downloadInfo: DownloadInfo;
   isBackgroundMode: boolean;
+  standbyMode?: boolean;
   batteryCapacity: number;
   isCharging: boolean;
   powerPlugged: boolean;
@@ -25,6 +26,7 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
   setSettings,
   downloadInfo,
   isBackgroundMode,
+  standbyMode,
   batteryCapacity,
   isCharging,
   powerPlugged,
@@ -123,9 +125,11 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
 
         <PanelSectionRow>
           <Field
-            label="Background Download Mode"
+            label={standbyMode ? "Standby Mode" : "Background Download Mode"}
             description={
-              isBackgroundMode
+              standbyMode
+                ? "Console off, waiting for a controller"
+                : isBackgroundMode
                 ? "Active (Screen off & power saving enabled)"
                 : "Inactive (Normal operation)"
             }
@@ -135,7 +139,7 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
                 isBackgroundMode ? "active" : "idle"
               }`}
             >
-              {isBackgroundMode ? "ACTIVE" : "STANDBY"}
+              {standbyMode ? "STANDBY" : isBackgroundMode ? "ACTIVE" : "IDLE"}
             </span>
           </Field>
         </PanelSectionRow>
@@ -250,6 +254,58 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
             onChange={(checked) => updateSetting("mute_audio", checked)}
           />
         </PanelSectionRow>
+      </PanelSection>
+
+      {/* Standby replacing the system's own sleep */}
+      <PanelSection title="Standby & Controller Wake">
+        <PanelSectionRow>
+          <ToggleField
+            label="Replace Sleep With Standby"
+            description="The power button AND the Sleep option in the SteamOS power menu both enter the plugin's standby instead of suspending: screen black, downloads carry on, a controller brings it back. Shut Down still powers off for real."
+            checked={settings.standby_on_power_off}
+            onChange={(checked) => updateSetting("standby_on_power_off", checked)}
+          />
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <Field
+            label="What You Will See"
+            description={
+              settings.standby_on_power_off
+                ? "Downloading: the download card, then black. Nothing downloading: just the plugin logo, then black."
+                : "Standby off: sleep is intercepted only while a download is active, and the download card is shown."
+            }
+          />
+        </PanelSectionRow>
+
+        {settings.standby_on_power_off && (
+          <>
+            <PanelSectionRow>
+              <ToggleField
+                label="Wake When A Bluetooth Pad Connects"
+                description="Bluetooth stays on in standby. Turning a paired controller on is enough to wake the console, no button needed."
+                checked={settings.wake_on_bluetooth_connect}
+                onChange={(checked) => updateSetting("wake_on_bluetooth_connect", checked)}
+              />
+            </PanelSectionRow>
+
+            <PanelSectionRow>
+              <ToggleField
+                label="Wake On Controller Button"
+                description="For USB and dongle controllers, connecting is not enough: press Guide/Home, Select or Start to wake. The console's own buttons stay dead - only power works there."
+                checked={settings.wake_on_controller_button}
+                onChange={(checked) => updateSetting("wake_on_controller_button", checked)}
+              />
+            </PanelSectionRow>
+
+            <PanelSectionRow>
+              <Field
+                label="Battery In Standby"
+                description={`Standby keeps the console powered, so it does use battery. It drops to a real suspend at ${settings.min_battery_threshold}% to protect it.`}
+              />
+            </PanelSectionRow>
+          </>
+        )}
       </PanelSection>
 
       {/* Quiet, cool downloading */}

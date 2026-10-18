@@ -25,6 +25,41 @@ export const PLUGIN_STYLES = `
   touch-action: none;
 }
 
+/* Standby splash: just the plugin mark, shown over the black screen when the console
+   goes into standby with nothing downloading, then it fades out into pure black. */
+.dib-splash {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  animation: dibSplash 2.5s ease-in-out forwards;
+}
+
+.dib-splash-icon {
+  font-size: 60px;
+  color: #4aa3ff;
+  filter: drop-shadow(0 0 22px rgba(74, 163, 255, 0.45));
+}
+
+.dib-splash-title {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: #e8eefc;
+}
+
+.dib-splash-subtitle {
+  font-size: 13px;
+  color: #93a4c4;
+}
+
+@keyframes dibSplash {
+  0% { opacity: 0; transform: scale(0.96); }
+  12% { opacity: 1; transform: scale(1); }
+  78% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
 /* HUD Mode: Dark glassmorphic overlay */
 .dib-overlay-hud {
   background: radial-gradient(circle at center, rgba(16, 24, 40, 0.94) 0%, rgba(10, 14, 23, 0.98) 100%);

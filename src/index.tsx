@@ -43,6 +43,9 @@ const DEFAULT_SETTINGS: PluginSettings = {
   download_speed_limit_mbps: 6,
   download_cpu_percent: 30,
   debug_logging: true,
+  standby_on_power_off: false,
+  wake_on_bluetooth_connect: true,
+  wake_on_controller_button: true,
 };
 
 // Must match WAKE_COOLDOWN_SECONDS in main.py: the window after a wake in which
@@ -72,8 +75,11 @@ let sharedBatteryCapacity: number = 100;
 let sharedIsCharging: boolean = false;
 let sharedPowerPlugged: boolean = false;
 let sharedIsBackgroundMode: boolean = false;
+let sharedStandbyMode: boolean = false;
 let sharedBackgroundModeEnteredTime: number = 0;
 let sharedShowHud: boolean = false;
+let sharedShowSplash: boolean = false;
+let sharedSplashTimer: NodeJS.Timeout | null = null;
 let sharedCountdown: number = 5;
 let sharedWakeCooldownUntil: number = 0;
 let sharedHudTimer: NodeJS.Timeout | null = null;
@@ -104,6 +110,68 @@ const closeSteamSideMenus = () => {
 };
 
 /**
+ * Shows the plugin mark over the black screen for a moment.
+ *
+ * Used when standby replaces the system's own sleep and there is no download to put in
+ * the HUD: something has to say which standby this is, since it looks identical to the
+ * console being off.
+ */
+const showStandbySplash = (durationMs: number = 2500) => {
+  sharedShowSplash = true;
+  if (sharedSplashTimer) {
+    clearTimeout(sharedSplashTimer);
+  }
+  sharedSplashTimer = setTimeout(() => {
+    sharedShowSplash = false;
+    sharedSplashTimer = null;
+    notifyStateListeners();
+  }, durationMs);
+};
+
+const clearStandbySplash = () => {
+  if (sharedSplashTimer) {
+    clearTimeout(sharedSplashTimer);
+    sharedSplashTimer = null;
+  }
+  sharedShowSplash = false;
+};
+
+/**
+ * Enters standby straight away, with the logo instead of the download HUD.
+ *
+ * This is the path taken when the user picks Sleep from the SteamOS power menu (or
+ * presses power) with standby enabled and nothing downloading: there is no countdown to
+ * show, the console is simply going off.
+ */
+const triggerEnterStandby = async (reason: string) => {
+  if (Date.now() < sharedWakeCooldownUntil) {
+    console.log("[DownloadInBackground] Wake cooldown active, not entering standby.");
+    return;
+  }
+  if (sharedHudTimer) {
+    clearInterval(sharedHudTimer);
+    sharedHudTimer = null;
+  }
+  sharedShowHud = false;
+  sharedIsBackgroundMode = true;
+  sharedStandbyMode = true;
+  sharedBackgroundModeEnteredTime = Date.now();
+  showStandbySplash();
+  notifyStateListeners();
+
+  try {
+    const success: any = await call("enter_background_mode", reason);
+    if (success === false) {
+      sharedIsBackgroundMode = false;
+      clearStandbySplash();
+      notifyStateListeners();
+    }
+  } catch (e) {
+    console.error("[DownloadInBackground] Error entering standby:", e);
+  }
+};
+
+/**
  * Triggers a complete system wake:
  * 1. Synchronously drops any black screen or HUD from the DOM
  * 2. Activates the cooldown against re-sleep
@@ -114,7 +182,9 @@ const triggerFullWake = async (reason: string = "wake") => {
   console.log("[DownloadInBackground] triggerFullWake called! Reason:", reason);
   sharedIsBackgroundMode = false;
   sharedShowHud = false;
+  sharedStandbyMode = false;
   sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
+  clearStandbySplash();
 
   if (sharedHudTimer) {
     clearInterval(sharedHudTimer);
@@ -246,7 +316,7 @@ const GlobalOverlayContainer: FC = () => {
 
   // CRITICAL: If NOT in background mode and NOT showing HUD: DO NOT RENDER ANYTHING!
   // This guarantees that once awakened, the black div is 100% UNMOUNTED from the DOM.
-  if (!sharedIsBackgroundMode && !sharedShowHud) {
+  if (!sharedIsBackgroundMode && !sharedShowHud && !sharedShowSplash) {
     return null;
   }
 
@@ -256,6 +326,7 @@ const GlobalOverlayContainer: FC = () => {
       <Overlay
         isBackgroundMode={sharedIsBackgroundMode}
         showHud={sharedShowHud}
+        showSplash={sharedShowSplash}
         countdown={sharedCountdown}
         downloadInfo={sharedDownloadInfo}
         settings={sharedSettings}
@@ -273,6 +344,7 @@ const PluginContent: FC = () => {
   const [settings, setSettings] = useState<PluginSettings>(sharedSettings);
   const [downloadInfo, setDownloadInfo] = useState<DownloadInfo>(sharedDownloadInfo);
   const [isBackgroundMode, setIsBackgroundMode] = useState<boolean>(sharedIsBackgroundMode);
+  const [standbyMode, setStandbyMode] = useState<boolean>(sharedStandbyMode);
   const [batteryCapacity, setBatteryCapacity] = useState<number>(sharedBatteryCapacity);
   const [isCharging, setIsCharging] = useState<boolean>(sharedIsCharging);
   const [powerPlugged, setPowerPlugged] = useState<boolean>(sharedPowerPlugged);
@@ -282,6 +354,7 @@ const PluginContent: FC = () => {
       setSettings(sharedSettings);
       setDownloadInfo(sharedDownloadInfo);
       setIsBackgroundMode(sharedIsBackgroundMode);
+      setStandbyMode(sharedStandbyMode);
       setBatteryCapacity(sharedBatteryCapacity);
       setIsCharging(sharedIsCharging);
       setPowerPlugged(sharedPowerPlugged);
@@ -305,6 +378,7 @@ const PluginContent: FC = () => {
       setSettings={handleUpdateSettings}
       downloadInfo={downloadInfo}
       isBackgroundMode={isBackgroundMode}
+      standbyMode={standbyMode}
       batteryCapacity={batteryCapacity}
       isCharging={isCharging}
       powerPlugged={powerPlugged}
@@ -345,6 +419,14 @@ export default definePlugin(() => {
         sharedIsBackgroundMode = true;
         sharedBackgroundModeEnteredTime = Date.now();
         sharedShowHud = false;
+        // Entered from the backend (power key, or Sleep caught by logind). With standby
+        // on and nothing downloading there is no HUD to show, so show the logo instead.
+        if (Boolean(data?.standby)) {
+          sharedStandbyMode = true;
+          if (!data?.has_download) {
+            showStandbySplash();
+          }
+        }
         notifyStateListeners();
       }
     });
@@ -422,6 +504,7 @@ export default definePlugin(() => {
           sharedIsBackgroundMode = backendIsBg;
         }
 
+        sharedStandbyMode = Boolean(status.standby_mode);
         sharedBatteryCapacity = Number(status.battery_capacity ?? 100);
         sharedIsCharging = Boolean(status.is_charging);
         sharedPowerPlugged = Boolean(status.power_plugged);
@@ -595,23 +678,32 @@ export default definePlugin(() => {
           return false;
         }
 
-        // 3. With the plugin off, or nothing downloading as of the last poll, get out of
-        // the way immediately: no backend round-trip, no HUD, so SteamOS suspends with
-        // its own animation exactly as it does without this plugin installed.
+        // 3. Plugin off: get out of the way immediately, no backend round-trip, so
+        // SteamOS suspends with its own animation exactly as without this plugin.
         if (!sharedSettings.enabled) {
           return true;
         }
-        if (!sharedDownloadInfo.is_downloading || sharedDownloadInfo.is_paused) {
-          console.log("[DownloadInBackground] No active download -> Allowing stock SteamOS suspend.");
+
+        // 4. This is also the hook for Sleep chosen from the SteamOS power menu, not
+        // just the physical button. With standby on, that sleep becomes our mode.
+        const looksIdle = !sharedDownloadInfo.is_downloading || sharedDownloadInfo.is_paused;
+        if (looksIdle && !sharedSettings.standby_on_power_off) {
+          console.log("[DownloadInBackground] No active download and standby off -> Allowing stock SteamOS suspend.");
           return true;
         }
 
-        // 4. Confirm against the Steam client before taking the suspend over
+        // 5. Confirm against the Steam client before taking the suspend over
         await querySteamDownloads();
 
         const isDownloading = Boolean(
           sharedDownloadInfo.is_downloading && !sharedDownloadInfo.is_paused
         );
+
+        if (!isDownloading && sharedSettings.standby_on_power_off) {
+          console.log("[DownloadInBackground] Sleep requested with standby enabled -> entering standby with logo.");
+          await triggerEnterStandby("standby_sleep_request");
+          return false;
+        }
 
         if (isDownloading) {
           console.log("[DownloadInBackground] Active download running -> Intercepting suspend and showing HUD");
