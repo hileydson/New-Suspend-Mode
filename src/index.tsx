@@ -38,6 +38,11 @@ const DEFAULT_SETTINGS: PluginSettings = {
   turn_off_backlight: true,
   oled_black_screen: true,
   deep_input_lockout: true,
+  block_controller_hidraw: false,
+  limit_download_speed: true,
+  download_speed_limit_mbps: 6,
+  download_cpu_percent: 30,
+  debug_logging: true,
 };
 
 // Must match WAKE_COOLDOWN_SECONDS in main.py: the window after a wake in which
@@ -658,6 +663,55 @@ export default definePlugin(() => {
   // Initial fetch, then keep polling
   runPoll();
 
+  /**
+   * Writes the Steam client's own API surface into the plugin log, once.
+   *
+   * Blocking input and pacing a download would both be far cleaner done through Steam
+   * itself than through the kernel, but which methods exist varies by Steam build, and
+   * there is no documentation for them. This records what this console actually offers
+   * (look for anything about controllers/input, or a download rate limit) so the next
+   * version can call it directly instead of working around it.
+   */
+  const dumpSteamApiSurface = () => {
+    const sc: any = (window as any).SteamClient;
+    const keysOf = (obj: any): string[] | null => {
+      if (!obj) return null;
+      try {
+        const proto = Object.getPrototypeOf(obj);
+        const names = new Set<string>([
+          ...Object.keys(obj),
+          ...(proto ? Object.getOwnPropertyNames(proto) : []),
+        ]);
+        return Array.from(names).sort().slice(0, 400);
+      } catch (e) {
+        return ["<unreadable>"];
+      }
+    };
+    const safeCall = (fn?: () => any) => {
+      try {
+        return fn ? fn() : null;
+      } catch (e) {
+        return null;
+      }
+    };
+
+    call("log_debug", {
+      kind: "steamclient_api_surface",
+      top_level: keysOf(sc),
+      Downloads: keysOf(sc?.Downloads),
+      Settings: keysOf(sc?.Settings),
+      Input: keysOf(sc?.Input),
+      System: keysOf(sc?.System),
+      download_overview: safeCall(sc?.Downloads?.GetDownloadOverview?.bind(sc?.Downloads)),
+    }).catch(() => {});
+  };
+
+  const apiDumpTimer = setTimeout(() => {
+    if (sharedSettings.debug_logging !== false) {
+      dumpSteamApiSurface();
+    }
+  }, 8000);
+
   // Kernel sleep resume detection via clock-jump heartbeat
   let lastHeartbeat = Date.now();
   const heartbeatInterval = setInterval(() => {
@@ -697,6 +751,7 @@ export default definePlugin(() => {
         clearTimeout(pollTimer);
         pollTimer = null;
       }
+      clearTimeout(apiDumpTimer);
       if (heartbeatInterval) {
         clearInterval(heartbeatInterval);
       }

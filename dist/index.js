@@ -173,7 +173,7 @@ const SettingsPanel = ({ settings, setSettings, downloadInfo, isBackgroundMode, 
                                                 ? `Speed: ${formatSpeed(downloadInfo.bytes_per_second)}`
                                                 : "Paused" })] }), SP_JSX.jsx(DFL.ProgressBar, { nProgress: downloadInfo.progress_percent || 0 })] }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "Battery Level", description: `Auto-sleep threshold: ${settings.min_battery_threshold}%`, children: SP_JSX.jsxs("span", { style: { fontWeight: "bold" }, children: [batteryCapacity, "% ", isCharging ? "⚡ (Charging)" : "🔋"] }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "Background Download Mode", description: isBackgroundMode
                                 ? "Active (Screen off & power saving enabled)"
-                                : "Inactive (Normal operation)", children: SP_JSX.jsx("span", { className: `dib-status-tag ${isBackgroundMode ? "active" : "idle"}`, children: isBackgroundMode ? "ACTIVE" : "STANDBY" }) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Behavior Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Enable Plugin", description: "Intercepts suspend when downloading, turns off screen, and saves power.", checked: settings.enabled, onChange: (checked) => updateSetting("enabled", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Auto-Suspend Battery Threshold", description: "Console suspends automatically if battery drops below this limit during download.", value: settings.min_battery_threshold, min: 5, max: 30, step: 1, showValue: true, valueSuffix: "%", onChange: (val) => updateSetting("min_battery_threshold", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "HUD Display Countdown", description: "Seconds the download card shows on screen before turning display off.", value: settings.hud_timeout_seconds, min: 0, max: 15, step: 1, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("hud_timeout_seconds", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Completion Suspend Delay", description: "Seconds to wait after all downloads complete before automatically sleeping.", value: settings.auto_suspend_delay_seconds, min: 30, max: 600, step: 30, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("auto_suspend_delay_seconds", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Block All Input While Screen Is Off", description: "Freezes button mapping and disconnects external controllers so only the power button responds. Turn off if a controller misbehaves after waking.", checked: settings.deep_input_lockout, onChange: (checked) => updateSetting("deep_input_lockout", checked) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Power Saving & Screen Options", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Turn Off Display Backlight", description: "Physically drops LCD/OLED panel backlight brightness to 0.", checked: settings.turn_off_backlight, onChange: (checked) => updateSetting("turn_off_backlight", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pitch Black OLED Mode", description: "Presents a pure black overlay, shutting off individual OLED pixels.", checked: settings.oled_black_screen, onChange: (checked) => updateSetting("oled_black_screen", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle CPU to Powersave", description: "Switches power profile to power-saver and lowers CPU clock frequencies.", checked: settings.throttle_cpu, onChange: (checked) => updateSetting("throttle_cpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle GPU to 200MHz", description: "Sets AMD GPU performance level to low, minimizing GPU power draw.", checked: settings.throttle_gpu, onChange: (checked) => updateSetting("throttle_gpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Mute Audio While Screen Off", description: "Silences audio output during background download to prevent disturbance.", checked: settings.mute_audio, onChange: (checked) => updateSetting("mute_audio", checked) }) })] })] }));
+                                : "Inactive (Normal operation)", children: SP_JSX.jsx("span", { className: `dib-status-tag ${isBackgroundMode ? "active" : "idle"}`, children: isBackgroundMode ? "ACTIVE" : "STANDBY" }) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Behavior Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Enable Plugin", description: "Intercepts suspend when downloading, turns off screen, and saves power.", checked: settings.enabled, onChange: (checked) => updateSetting("enabled", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Auto-Suspend Battery Threshold", description: "Console suspends automatically if battery drops below this limit during download.", value: settings.min_battery_threshold, min: 5, max: 30, step: 1, showValue: true, valueSuffix: "%", onChange: (val) => updateSetting("min_battery_threshold", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "HUD Display Countdown", description: "Seconds the download card shows on screen before turning display off.", value: settings.hud_timeout_seconds, min: 0, max: 15, step: 1, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("hud_timeout_seconds", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Completion Suspend Delay", description: "Seconds to wait after all downloads complete before automatically sleeping.", value: settings.auto_suspend_delay_seconds, min: 30, max: 600, step: 30, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("auto_suspend_delay_seconds", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Block All Input While Screen Is Off", description: "Freezes button mapping and disconnects external controllers so only the power button responds. Turn off if a controller misbehaves after waking.", checked: settings.deep_input_lockout, onChange: (checked) => updateSetting("deep_input_lockout", checked) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Power Saving & Screen Options", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Turn Off Display Backlight", description: "Physically drops LCD/OLED panel backlight brightness to 0.", checked: settings.turn_off_backlight, onChange: (checked) => updateSetting("turn_off_backlight", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pitch Black OLED Mode", description: "Presents a pure black overlay, shutting off individual OLED pixels.", checked: settings.oled_black_screen, onChange: (checked) => updateSetting("oled_black_screen", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle CPU to Powersave", description: "Switches power profile to power-saver and lowers CPU clock frequencies.", checked: settings.throttle_cpu, onChange: (checked) => updateSetting("throttle_cpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle GPU to 200MHz", description: "Sets AMD GPU performance level to low, minimizing GPU power draw.", checked: settings.throttle_gpu, onChange: (checked) => updateSetting("throttle_gpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Mute Audio While Screen Off", description: "Silences audio output during background download to prevent disturbance.", checked: settings.mute_audio, onChange: (checked) => updateSetting("mute_audio", checked) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Download Pace (Fan & Heat)", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Slow Down Download", description: "Caps incoming speed so there is far less to decompress and write. Downloads take longer, the console stays cold and the fans stay off.", checked: settings.limit_download_speed, onChange: (checked) => updateSetting("limit_download_speed", checked) }) }), settings.limit_download_speed && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Download Speed Cap", description: "Lower is quieter and cooler. 6 MB/s still downloads about 21 GB per hour.", value: settings.download_speed_limit_mbps, min: 1, max: 30, step: 1, showValue: true, valueSuffix: " MB/s", onChange: (val) => updateSetting("download_speed_limit_mbps", val) }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Steam CPU Budget", description: "Hard limit on the CPU Steam may use while the screen is off, as a share of one core. This is what keeps the chip cool enough for the fans to idle.", value: settings.download_cpu_percent, min: 0, max: 100, step: 5, showValue: true, valueSuffix: "%", onChange: (val) => updateSetting("download_cpu_percent", val) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Troubleshooting", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Also Disconnect Built-In Controller", description: "EXPERIMENTAL. Only enable if buttons still act while the screen is off. Detaches the built-in pad's raw HID interface, which crashed the session on some consoles.", checked: settings.block_controller_hidraw, onChange: (checked) => updateSetting("block_controller_hidraw", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Write Diagnostic Logs", description: "Records the full input and thermal picture to the plugin log on every screen-off. Leave on while tuning.", checked: settings.debug_logging, onChange: (checked) => updateSetting("debug_logging", checked) }) })] })] }));
 };
 
 const PLUGIN_STYLES = `
@@ -475,6 +475,11 @@ const DEFAULT_SETTINGS = {
     turn_off_backlight: true,
     oled_black_screen: true,
     deep_input_lockout: true,
+    block_controller_hidraw: false,
+    limit_download_speed: true,
+    download_speed_limit_mbps: 6,
+    download_cpu_percent: 30,
+    debug_logging: true,
 };
 // Must match WAKE_COOLDOWN_SECONDS in main.py: the window after a wake in which
 // suspend requests are ignored, so the press that woke the console cannot re-sleep it.
@@ -1011,6 +1016,55 @@ var index = definePlugin(() => {
     };
     // Initial fetch, then keep polling
     runPoll();
+    /**
+     * Writes the Steam client's own API surface into the plugin log, once.
+     *
+     * Blocking input and pacing a download would both be far cleaner done through Steam
+     * itself than through the kernel, but which methods exist varies by Steam build, and
+     * there is no documentation for them. This records what this console actually offers
+     * (look for anything about controllers/input, or a download rate limit) so the next
+     * version can call it directly instead of working around it.
+     */
+    const dumpSteamApiSurface = () => {
+        const sc = window.SteamClient;
+        const keysOf = (obj) => {
+            if (!obj)
+                return null;
+            try {
+                const proto = Object.getPrototypeOf(obj);
+                const names = new Set([
+                    ...Object.keys(obj),
+                    ...(proto ? Object.getOwnPropertyNames(proto) : []),
+                ]);
+                return Array.from(names).sort().slice(0, 400);
+            }
+            catch (e) {
+                return ["<unreadable>"];
+            }
+        };
+        const safeCall = (fn) => {
+            try {
+                return fn ? fn() : null;
+            }
+            catch (e) {
+                return null;
+            }
+        };
+        call("log_debug", {
+            kind: "steamclient_api_surface",
+            top_level: keysOf(sc),
+            Downloads: keysOf(sc?.Downloads),
+            Settings: keysOf(sc?.Settings),
+            Input: keysOf(sc?.Input),
+            System: keysOf(sc?.System),
+            download_overview: safeCall(sc?.Downloads?.GetDownloadOverview?.bind(sc?.Downloads)),
+        }).catch(() => { });
+    };
+    const apiDumpTimer = setTimeout(() => {
+        if (sharedSettings.debug_logging !== false) {
+            dumpSteamApiSurface();
+        }
+    }, 8000);
     // Kernel sleep resume detection via clock-jump heartbeat
     let lastHeartbeat = Date.now();
     const heartbeatInterval = setInterval(() => {
@@ -1047,6 +1101,7 @@ var index = definePlugin(() => {
                 clearTimeout(pollTimer);
                 pollTimer = null;
             }
+            clearTimeout(apiDumpTimer);
             if (heartbeatInterval) {
                 clearInterval(heartbeatInterval);
             }

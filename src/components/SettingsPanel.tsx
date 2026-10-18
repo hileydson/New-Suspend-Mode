@@ -251,6 +251,69 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
           />
         </PanelSectionRow>
       </PanelSection>
+
+      {/* Quiet, cool downloading */}
+      <PanelSection title="Download Pace (Fan & Heat)">
+        <PanelSectionRow>
+          <ToggleField
+            label="Slow Down Download"
+            description="Caps incoming speed so there is far less to decompress and write. Downloads take longer, the console stays cold and the fans stay off."
+            checked={settings.limit_download_speed}
+            onChange={(checked) => updateSetting("limit_download_speed", checked)}
+          />
+        </PanelSectionRow>
+
+        {settings.limit_download_speed && (
+          <PanelSectionRow>
+            <SliderField
+              label="Download Speed Cap"
+              description="Lower is quieter and cooler. 6 MB/s still downloads about 21 GB per hour."
+              value={settings.download_speed_limit_mbps}
+              min={1}
+              max={30}
+              step={1}
+              showValue
+              valueSuffix=" MB/s"
+              onChange={(val) => updateSetting("download_speed_limit_mbps", val)}
+            />
+          </PanelSectionRow>
+        )}
+
+        <PanelSectionRow>
+          <SliderField
+            label="Steam CPU Budget"
+            description="Hard limit on the CPU Steam may use while the screen is off, as a share of one core. This is what keeps the chip cool enough for the fans to idle."
+            value={settings.download_cpu_percent}
+            min={0}
+            max={100}
+            step={5}
+            showValue
+            valueSuffix="%"
+            onChange={(val) => updateSetting("download_cpu_percent", val)}
+          />
+        </PanelSectionRow>
+      </PanelSection>
+
+      {/* Troubleshooting */}
+      <PanelSection title="Troubleshooting">
+        <PanelSectionRow>
+          <ToggleField
+            label="Also Disconnect Built-In Controller"
+            description="EXPERIMENTAL. Only enable if buttons still act while the screen is off. Detaches the built-in pad's raw HID interface, which crashed the session on some consoles."
+            checked={settings.block_controller_hidraw}
+            onChange={(checked) => updateSetting("block_controller_hidraw", checked)}
+          />
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <ToggleField
+            label="Write Diagnostic Logs"
+            description="Records the full input and thermal picture to the plugin log on every screen-off. Leave on while tuning."
+            checked={settings.debug_logging}
+            onChange={(checked) => updateSetting("debug_logging", checked)}
+          />
+        </PanelSectionRow>
+      </PanelSection>
     </div>
   );
 };

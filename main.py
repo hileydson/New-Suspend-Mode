@@ -45,6 +45,11 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "turn_off_backlight": True,
     "oled_black_screen": True,
     "deep_input_lockout": True,
+    "block_controller_hidraw": False,
+    "limit_download_speed": True,
+    "download_speed_limit_mbps": 6,
+    "download_cpu_percent": 30,
+    "debug_logging": True,
 }
 
 INPUT_EVENT_FORMAT = "qqHHi"
@@ -82,6 +87,13 @@ STEAM_UI_COMMS = {
     "reaper",
     "steam_monitor",
 }
+
+# How often the telemetry line (temperature, fan, power, speed) is written while the
+# screen is off, so a session can be reviewed afterwards from the plugin log.
+TELEMETRY_INTERVAL = 30.0
+
+# cgroup CPU quota period, in microseconds.
+CPU_QUOTA_PERIOD = 100000
 
 
 class SteamDownloadDetector:
@@ -364,6 +376,15 @@ class Plugin:
         self.power_grabbed_paths: Set[str] = set()
         self.unbound_hid_devices: List[Tuple[str, str]] = []
         self.frozen_daemons: List[str] = []
+        self.inhibited_inputs: List[str] = []
+        self.lockout_event_counts: Dict[str, int] = {}
+
+        # Download pacing state, both reversible and recorded on disk so a crash mid
+        # session can still be undone on the next start.
+        self.saved_cpu_quota: Optional[Tuple[str, str]] = None
+        self.throttled_interfaces: List[str] = []
+        self.runtime_state_file: str = ""
+        self.last_telemetry_time: float = 0.0
 
         # Only undo what we actually changed, so toggling a setting mid-session can
         # never leave the console muted, dimmed or stuck on a power profile.
@@ -427,13 +448,17 @@ class Plugin:
         # 0. Undo anything a previous run (or a crash) may have left behind: masked
         # sleep targets, frozen controller daemons and Steam processes stuck at idle
         # scheduling priority all survive a plugin reload and make SteamOS feel broken.
+        self.runtime_state_file = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "runtime_state.json")
         self._clear_stale_sleep_masks()
+        self._heal_stray_input_inhibits()
+        self._heal_runtime_state()
         if self._controller_daemons_look_frozen():
             logger.info("Startup repair: controller daemons were left frozen; resuming them.")
             self._resume_controller_daemons()
         healed = self._heal_steam_scheduling()
         if healed:
             logger.info(f"Startup repair: restored normal scheduling for {healed} Steam process(es).")
+        self._log_input_diagnostics("plugin startup")
 
         # 1. Hardware Power Button Listener Thread
         self.power_button_thread = threading.Thread(
@@ -514,6 +539,17 @@ class Plugin:
 
         self._update_inhibitor_state()
         return self.settings
+
+    async def log_debug(self, payload: Dict[str, Any]) -> bool:
+        """
+        Writes a diagnostic payload from the frontend into the plugin log, so what the
+        Steam client exposes on this console ends up in the same file as everything else.
+        """
+        try:
+            logger.info(f"[DIB FRONTEND] {json.dumps(payload, default=str)[:12000]}")
+        except Exception as e:
+            logger.error(f"Could not log frontend diagnostics: {e}")
+        return True
 
     # ==========================================
     # Battery & Hardware Status Queries
@@ -835,26 +871,120 @@ class Plugin:
     # ==========================================
     # Hardware Power / Sleep Key Monitoring
     # ==========================================
-    def _is_real_power_button(self, path: str, name: str) -> bool:
+    # ACPI buttons report a phys of 'PNP0C0C/button/input0' (power), 'PNP0C0E/...'
+    # (sleep), or the LNXPWRBN/LNXSLPBN fixed-feature equivalents.
+    POWER_PHYS_TAGS = ("PNP0C0C", "PNP0C0E", "LNXPWRBN", "LNXSLPBN")
+
+    def _is_power_input(self, name: str, phys: str) -> bool:
         """
         True only for the physical power/sleep button of the machine.
 
         These are the devices that must keep working while every other input is locked
         out, and the only ones worth grabbing to intercept a suspend. Controllers and
-        keyboards also advertise KEY_POWER, so matching on the key alone would grab (and
-        silence) the whole keyboard.
+        keyboards also advertise KEY_POWER, so matching on the key alone would silence
+        the whole keyboard.
         """
-        name_lower = name.lower()
+        name_lower = (name or "").lower()
         if "power button" in name_lower or "sleep button" in name_lower:
             return True
+        phys_upper = (phys or "").upper()
+        return any(tag in phys_upper for tag in self.POWER_PHYS_TAGS)
+
+    def _read_attr(self, directory: str, attr: str) -> str:
         try:
-            # ACPI buttons report a phys of 'PNP0C0C/button/input0' (power),
-            # 'PNP0C0E/...' (sleep) or the LNXPWRBN/LNXSLPBN fixed-feature equivalents.
-            with open(f"/sys/class/input/{os.path.basename(path)}/device/phys", "r") as f:
-                phys = f.read().strip().upper()
-            return any(tag in phys for tag in ("PNP0C0C", "PNP0C0E", "LNXPWRBN", "LNXSLPBN"))
+            with open(os.path.join(directory, attr), "r") as f:
+                return f.read().strip()
         except Exception:
-            return False
+            return ""
+
+    def _is_real_power_button(self, path: str, name: str) -> bool:
+        phys = self._read_attr(f"/sys/class/input/{os.path.basename(path)}/device", "phys")
+        return self._is_power_input(name, phys)
+
+    def _iter_input_devices(self) -> List[Tuple[str, str, str, str]]:
+        """(sysfs input dir, /dev/input/eventN, name, phys) for every input device."""
+        devices = []
+        for input_dir in sorted(glob.glob("/sys/class/input/input*")):
+            event_nodes = sorted(glob.glob(os.path.join(input_dir, "event*")))
+            event_path = f"/dev/input/{os.path.basename(event_nodes[0])}" if event_nodes else ""
+            devices.append((
+                input_dir,
+                event_path,
+                self._read_attr(input_dir, "name"),
+                self._read_attr(input_dir, "phys"),
+            ))
+        return devices
+
+    def _inhibit_all_inputs(self, verbose: bool = False) -> int:
+        """
+        Stops every input device except the power/sleep button at the kernel input core.
+
+        This is the only layer that works against a client which already holds the device
+        exclusively. Steam Input grabs the controller's evdev node for itself, so the
+        plugin's own EVIOCGRAB returns EBUSY and every button kept working no matter how
+        many devices were grabbed. Writing 1 to /sys/class/input/inputN/inhibited makes
+        the kernel drop that device's events before any client sees them, grab or no grab,
+        and it also closes the driver so the hardware can idle. Writing 0 undoes it, and
+        the kernel emits the release events for anything held down, so no button sticks.
+        """
+        # Never inhibit everything without a live way back in.
+        live_power = {p for p in (self.power_device_paths | self.power_grabbed_paths) if p}
+        if not live_power:
+            if verbose:
+                logger.error(
+                    "Input inhibit skipped: no power/sleep button device was identified, and "
+                    "inhibiting every device without one would leave no way to wake the console."
+                )
+            return 0
+
+        count = 0
+        for input_dir, event_path, name, phys in self._iter_input_devices():
+            if self._is_power_input(name, phys) or (event_path and event_path in live_power):
+                continue
+            inhibit_file = os.path.join(input_dir, "inhibited")
+            if not os.path.exists(inhibit_file):
+                continue
+            if self._read_attr(input_dir, "inhibited") == "1":
+                continue  # Already inhibited by something else: leave it as we found it
+            if self._write_sysfs(inhibit_file, "1"):
+                self.inhibited_inputs.append(inhibit_file)
+                count += 1
+            elif verbose:
+                logger.warning(f"Could not inhibit {event_path or input_dir} ('{name}').")
+
+        # Quiet on the periodic re-sweep: only a change is worth a line.
+        if count > 0:
+            logger.info(
+                f"Input lockout: inhibited {count} input device(s) at kernel level; "
+                f"power devices left live: {sorted(live_power)}."
+            )
+        return count
+
+    def _uninhibit_all_inputs(self, extra: Optional[List[str]] = None):
+        for inhibit_file in list(self.inhibited_inputs) + list(extra or []):
+            if os.path.exists(inhibit_file):
+                self._write_sysfs(inhibit_file, "0")
+        if self.inhibited_inputs:
+            logger.info(f"Released kernel input inhibit on {len(self.inhibited_inputs)} device(s).")
+        self.inhibited_inputs.clear()
+
+    def _heal_stray_input_inhibits(self) -> int:
+        """
+        Clears any input device left inhibited by a previous run.
+
+        An inhibited device with no plugin running means a console that answers no
+        button at all, so this always runs at startup: nothing else on SteamOS inhibits
+        input devices, and leaving one stuck is far worse than clearing someone else's.
+        """
+        healed = []
+        for input_dir, event_path, name, _ in self._iter_input_devices():
+            if self._read_attr(input_dir, "inhibited") != "1":
+                continue
+            if self._write_sysfs(os.path.join(input_dir, "inhibited"), "0"):
+                healed.append(f"{os.path.basename(event_path) or input_dir} ('{name}')")
+        if healed:
+            logger.info(f"Startup repair: re-enabled {len(healed)} input device(s) left inhibited: {', '.join(healed)}.")
+        return len(healed)
 
     def _find_power_sleep_devices(self) -> List[Tuple[str, str, bool]]:
         """
@@ -1201,33 +1331,196 @@ class Plugin:
         logger.info(f"Reset CPU/IO scheduling to normal for {len(victims)} Steam process(es).")
         return len(victims)
 
-    def _flush_grabbed_inputs(self):
-        """Drains any buffered events from all grabbed controllers to prevent input accumulation."""
-        with self.input_lock:
-            for fd in list(self.grabbed_gamepad_fds.values()):
+    def _map_device_readers(self) -> Dict[str, List[str]]:
+        """
+        Which processes currently hold each /dev/input/event* or /dev/hidraw* open.
+
+        This is the answer to 'how is Steam still seeing my buttons': a reader on an
+        event node means the evdev path, a reader on a hidraw node means Steam is talking
+        to the controller over raw HID, where no amount of evdev work can stop it.
+        """
+        readers: Dict[str, List[str]] = {}
+        for proc_dir in glob.glob("/proc/[0-9]*"):
+            pid = os.path.basename(proc_dir)
+            try:
+                with open(os.path.join(proc_dir, "comm"), "r") as f:
+                    comm = f.read().strip()
+            except Exception:
+                continue
+            for fd_link in glob.glob(os.path.join(proc_dir, "fd", "*")):
                 try:
-                    while os.read(fd, 1024):
-                        pass
+                    target = os.readlink(fd_link)
+                except Exception:
+                    continue
+                if target.startswith("/dev/input/event") or target.startswith("/dev/hidraw"):
+                    entry = f"{comm}({pid})"
+                    if entry not in readers.setdefault(target, []):
+                        readers[target].append(entry)
+        return readers
+
+    def _log_input_diagnostics(self, phase: str):
+        """Dumps the full input picture to the plugin log. Enabled by the debug setting."""
+        if not self.settings.get("debug_logging", True):
+            return
+        try:
+            readers = self._map_device_readers()
+            lines = [f"===== DIB INPUT DIAGNOSTICS [{phase}] ====="]
+
+            by_comm: Dict[str, List[int]] = {}
+            states: Dict[int, str] = {}
+            for pid, comm, _, _ in self._iter_process_scheduling():
+                by_comm.setdefault(comm.lower(), []).append(pid)
+            for name in ("steam", "steamwebhelper", "gamescope", "hhd", "inputplumber"):
+                pids = by_comm.get(name, [])
+                shown = []
+                for pid in pids[:6]:
+                    try:
+                        with open(f"/proc/{pid}/stat", "r") as f:
+                            stat = f.read()
+                        states[pid] = stat[stat.rfind(")") + 2:].split()[0]
+                    except Exception:
+                        states[pid] = "?"
+                    shown.append(f"{pid}:{states[pid]}")
+                lines.append(f"  proc {name:16} {', '.join(shown) if shown else '(not running)'}")
+            lines.append("  (process state: R/S running, T stopped by us, D uninterruptible)")
+
+            lines.append("  --- input devices (evdev) ---")
+            for input_dir, event_path, name, phys in self._iter_input_devices():
+                flags = []
+                if self._is_power_input(name, phys):
+                    flags.append("POWER-KEPT-LIVE")
+                if event_path and event_path in self.power_grabbed_paths:
+                    flags.append("power-grab")
+                if event_path and event_path in self.grabbed_gamepad_fds:
+                    flags.append("grabbed-by-us")
+                seen = self.lockout_event_counts.get(event_path, 0)
+                if seen:
+                    flags.append(f"events-seen={seen}")
+                lines.append(
+                    f"  {os.path.basename(event_path) or '(no node)':11} "
+                    f"inhibited={self._read_attr(input_dir, 'inhibited') or '-'} "
+                    f"{' '.join(flags):34} name='{name}' phys='{phys}' "
+                    f"readers={readers.get(event_path, [])}"
+                )
+
+            lines.append("  --- raw HID devices (hidraw) ---")
+            for hidraw_dir in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+                node = f"/dev/{os.path.basename(hidraw_dir)}"
+                hid_name = hid_id = driver = ""
+                try:
+                    hid_dev = os.path.realpath(os.path.join(hidraw_dir, "device"))
+                    hid_id = os.path.basename(hid_dev)
+                    driver_link = os.path.join(hid_dev, "driver")
+                    if os.path.exists(driver_link):
+                        driver = os.path.basename(os.path.realpath(driver_link))
+                    with open(os.path.join(hid_dev, "uevent"), "r") as f:
+                        for line in f:
+                            if line.startswith("HID_NAME="):
+                                hid_name = line.split("=", 1)[1].strip()
+                except Exception:
+                    pass
+                lines.append(
+                    f"  {os.path.basename(node):9} hid={hid_id:28} driver={driver:14} "
+                    f"name='{hid_name}' readers={readers.get(node, [])}"
+                )
+
+            lines.append("  --- unbound by us ---")
+            lines.append(f"  {self.unbound_hid_devices or '(none)'}")
+            lines.append("===== END DIB INPUT DIAGNOSTICS =====")
+            logger.info("\n".join(lines))
+        except Exception as e:
+            logger.error(f"Failed to write input diagnostics: {e}")
+
+    def _log_power_telemetry(self):
+        """One line with temperature, fan speed, APU power, CPU clock and download rate."""
+        if not self.settings.get("debug_logging", True):
+            return
+        try:
+            temps, fans, pwms = [], [], []
+            for hwmon in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+                chip = self._read_attr(hwmon, "name") or os.path.basename(hwmon)
+                for temp_file in sorted(glob.glob(os.path.join(hwmon, "temp*_input")))[:4]:
+                    raw = self._read_attr(os.path.dirname(temp_file), os.path.basename(temp_file))
+                    if raw.isdigit():
+                        label = self._read_attr(hwmon, os.path.basename(temp_file).replace("_input", "_label"))
+                        temps.append(f"{chip}/{label or os.path.basename(temp_file)}={int(raw) / 1000:.1f}C")
+                for fan_file in sorted(glob.glob(os.path.join(hwmon, "fan*_input"))):
+                    raw = self._read_attr(os.path.dirname(fan_file), os.path.basename(fan_file))
+                    if raw.isdigit():
+                        fans.append(f"{chip}/{os.path.basename(fan_file)}={raw}rpm")
+                for pwm_file in sorted(glob.glob(os.path.join(hwmon, "pwm[0-9]"))):
+                    raw = self._read_attr(os.path.dirname(pwm_file), os.path.basename(pwm_file))
+                    if raw.isdigit():
+                        pwms.append(f"{chip}/{os.path.basename(pwm_file)}={raw}")
+
+            power_w = ""
+            for power_file in glob.glob("/sys/class/drm/card*/device/hwmon/hwmon*/power1_average"):
+                raw = self._read_attr(os.path.dirname(power_file), "power1_average")
+                if raw.isdigit():
+                    power_w = f"{int(raw) / 1_000_000:.2f}W"
+                    break
+
+            freqs = []
+            for cpu in ("cpu0", "cpu1"):
+                raw = self._read_attr(f"/sys/devices/system/cpu/{cpu}/cpufreq", "scaling_cur_freq")
+                if raw.isdigit():
+                    freqs.append(f"{cpu}={int(raw) / 1000:.0f}MHz")
+
+            net_mb = self.detector.get_network_rx_rate() / (1024 * 1024)
+            logger.info(
+                f"[DIB TELEMETRY] net={net_mb:.2f}MB/s apu={power_w or 'n/a'} "
+                f"cpu=[{' '.join(freqs) or 'n/a'}] fans=[{' '.join(fans) or 'none reported'}] "
+                f"pwm=[{' '.join(pwms) or 'n/a'}] temps=[{' '.join(temps[:8]) or 'n/a'}] "
+                f"quota={'on' if self.saved_cpu_quota else 'off'} "
+                f"netcap={self.throttled_interfaces or 'off'}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to write telemetry: {e}")
+
+    def _flush_grabbed_inputs(self):
+        """
+        Drains buffered events from the devices we hold, counting them.
+
+        The count is what tells us afterwards whether a device was still producing input
+        during the lockout, which is the difference between 'blocked' and 'we just never
+        saw it'. It shows up in the diagnostics dump.
+        """
+        with self.input_lock:
+            for path, fd in list(self.grabbed_gamepad_fds.items()):
+                count = 0
+                try:
+                    while True:
+                        data = os.read(fd, INPUT_EVENT_SIZE * 64)
+                        if not data:
+                            break
+                        count += len(data) // INPUT_EVENT_SIZE
                 except (BlockingIOError, OSError):
                     pass
+                if count:
+                    self.lockout_event_counts[path] = self.lockout_event_counts.get(path, 0) + count
 
     def _grab_all_gamepad_inputs(self):
         """
         Locks out every input except the physical power button.
 
-        Two layers, in this order on purpose:
+        Four layers, in this order on purpose:
           1. External USB/Bluetooth pads are detached from their HID driver, which removes
              their hidraw node too (Steam reads pads through hidraw, where EVIOCGRAB has
              no effect). This happens BEFORE anything is frozen, because unbinding a
              device whose owning daemon is stopped can block in the kernel.
-          2. The controller mapping daemons are frozen, so they stop translating presses,
-             and every remaining evdev node is grabbed exclusively.
+          2. The controller mapping daemons are frozen, so they stop translating presses.
+          3. Every remaining evdev node is grabbed exclusively. This often fails with
+             EBUSY, because Steam Input holds the controller itself, hence layer 4.
+          4. The kernel is told to inhibit every input device but the power button, which
+             drops events before any client gets them - including a client that already
+             holds an exclusive grab. This is the layer that actually blocks the buttons.
 
         The built-in controller of a handheld and the virtual devices HHD/InputPlumber
         create over uhid are deliberately NOT unbound: tearing those down and rebuilding
-        them crashes the session on some consoles. Freezing their daemon already stops
-        them from reporting anything while the screen is off.
+        them crashes the session on some consoles. Inhibiting the physical device they
+        read from stops them at the source instead.
         """
+        self.lockout_event_counts.clear()
         deep = bool(self.settings.get("deep_input_lockout", True))
         if deep:
             self._unbind_external_gamepads()
@@ -1239,6 +1532,8 @@ class Plugin:
         logger.info(f"Input lockout: power devices kept free: {sorted(self.power_device_paths)}")
 
         self._grab_new_inputs(verbose=True)
+        self._inhibit_all_inputs(verbose=True)
+        self._log_input_diagnostics("after lockout")
 
     def _grab_new_inputs(self, verbose: bool = False):
         """
@@ -1310,6 +1605,11 @@ class Plugin:
         evdev AND hidraw nodes, so neither Steam nor a game can read them while the screen
         is off. EVIOCGRAB alone cannot do this, because Steam talks to pads over hidraw.
         """
+        # Opt-in escalation for consoles where Steam reads the built-in pad over hidraw.
+        # uhid devices stay excluded either way: unbinding one while the daemon that owns
+        # it is frozen is what used to take the whole session down.
+        include_internal = bool(self.settings.get("block_controller_hidraw", False))
+
         for dev in sorted(glob.glob("/sys/bus/hid/devices/*")):
             try:
                 dev_id = os.path.basename(dev)
@@ -1317,8 +1617,10 @@ class Plugin:
                 if len(parts) < 3:
                     continue
                 bus, vendor = parts[0].upper(), parts[1].upper()
-                if bus not in ("0003", "0005") or vendor in self.INTERNAL_HID_VENDORS:
-                    continue  # Not an external USB/Bluetooth pad
+                if bus not in ("0003", "0005"):
+                    continue  # Not a USB/Bluetooth device
+                if vendor in self.INTERNAL_HID_VENDORS and not include_internal:
+                    continue  # Built-in controller of a handheld
                 if "uhid" in os.path.realpath(dev):
                     continue  # Virtual device from a controller daemon
                 if not glob.glob(os.path.join(dev, "input", "input*", "js*")):
@@ -1359,7 +1661,15 @@ class Plugin:
         arrives.
         """
         was_frozen = bool(self.frozen_daemons)
-        had_lockout = bool(self.grabbed_gamepad_fds or self.unbound_hid_devices or was_frozen)
+        had_lockout = bool(
+            self.grabbed_gamepad_fds or self.unbound_hid_devices or was_frozen or self.inhibited_inputs
+        )
+        if had_lockout:
+            self._log_input_diagnostics("before release")
+
+        # 0. Let the kernel deliver events again. Done first so the console answers the
+        # user's next press immediately; releases of anything held down come with it.
+        self._uninhibit_all_inputs()
 
         # 1. Let the daemons drain their queued presses into the still-unbound virtual device.
         if was_frozen or self._controller_daemons_look_frozen():
@@ -1459,6 +1769,262 @@ class Plugin:
                     )
                 except Exception:
                     pass
+
+    # ==========================================
+    # Download Pacing (the "handheld console" profile)
+    # ==========================================
+    def _steam_cgroup_dir(self) -> Optional[str]:
+        """
+        The cgroup v2 directory that already holds the main Steam process.
+
+        Its cpu.max is written in place rather than moving processes into a cgroup of our
+        own: moving them out of their systemd unit confuses systemd's tracking, while a
+        cpu.max write is local, reversible, and the worst case if it is ever left behind
+        is that systemd resets it on the next reload.
+        """
+        for pid, comm, _, _ in self._iter_process_scheduling():
+            if comm.lower() != "steam":
+                continue
+            try:
+                with open(f"/proc/{pid}/cgroup", "r") as f:
+                    lines = f.readlines()
+            except Exception:
+                continue
+
+            for line in lines:
+                if not line.startswith("0::"):
+                    continue  # Only the unified (v2) hierarchy carries cpu.max
+                rel = line.strip().split("::", 1)[1]
+                path = os.path.join("/sys/fs/cgroup", rel.lstrip("/"))
+                if os.path.exists(os.path.join(path, "cpu.max")):
+                    return path
+
+                # cpu.max only exists where the parent enabled the cpu controller.
+                # Enabling it is what systemd itself does for a unit with a CPU quota.
+                parent = os.path.dirname(path)
+                if os.path.exists(os.path.join(parent, "cgroup.subtree_control")):
+                    self._write_sysfs(os.path.join(parent, "cgroup.subtree_control"), "+cpu")
+                    if os.path.exists(os.path.join(path, "cpu.max")):
+                        logger.info(f"Enabled the cpu controller on {parent} so Steam can be paced.")
+                        return path
+
+                # Last resort: the nearest ancestor that does have it. Safe because the
+                # caller refuses any cgroup the compositor also lives in.
+                probe = parent
+                while probe.startswith("/sys/fs/cgroup") and probe != "/sys/fs/cgroup":
+                    if os.path.exists(os.path.join(probe, "cpu.max")):
+                        return probe
+                    probe = os.path.dirname(probe)
+        return None
+
+    def _cgroup_subtree_comms(self, cgroup_dir: str) -> Set[str]:
+        comms: Set[str] = set()
+        procs_files = [os.path.join(cgroup_dir, "cgroup.procs")]
+        procs_files += glob.glob(os.path.join(cgroup_dir, "**", "cgroup.procs"), recursive=True)
+        for procs_file in procs_files:
+            try:
+                with open(procs_file, "r") as f:
+                    for line in f:
+                        pid = line.strip()
+                        if not pid:
+                            continue
+                        with open(f"/proc/{pid}/comm", "r") as cf:
+                            comms.add(cf.read().strip().lower())
+            except Exception:
+                continue
+        return comms
+
+    def _apply_cpu_quota(self):
+        """
+        Caps how much CPU Steam may use while the screen is off.
+
+        This is the lever that keeps the console cool, and it is what the old SCHED_IDLE
+        throttling failed to do: with nothing else running, an idle-priority process
+        still gets 100% of the CPU, so Steam decompressed at full speed and the fans
+        spun up. A hard quota bounds the work per second, so the download settles at a
+        calm pace and the SoC stays near idle - a download that takes longer but never
+        heats the console up, the way a handheld console does it.
+        """
+        percent = int(self.settings.get("download_cpu_percent", 30))
+        if percent <= 0 or percent >= 100:
+            logger.info(f"CPU pacing disabled (download_cpu_percent={percent}).")
+            return
+
+        cgroup_dir = self._steam_cgroup_dir()
+        if not cgroup_dir:
+            logger.info("CPU pacing skipped: could not locate Steam's cgroup (cpu controller may be off).")
+            return
+
+        # Never throttle a cgroup the compositor shares: starving gamescope can take the
+        # whole session down with it.
+        comms = self._cgroup_subtree_comms(cgroup_dir)
+        blockers = {c for c in comms if "gamescope" in c or "xwayland" in c}
+        if blockers:
+            logger.warning(f"CPU pacing skipped: Steam shares its cgroup with {sorted(blockers)}.")
+            return
+
+        cpu_max = os.path.join(cgroup_dir, "cpu.max")
+        original = self._read_attr(cgroup_dir, "cpu.max") or "max 100000"
+        quota = int(CPU_QUOTA_PERIOD * percent / 100)
+        if self._write_sysfs(cpu_max, f"{quota} {CPU_QUOTA_PERIOD}"):
+            self.saved_cpu_quota = (cpu_max, original)
+            logger.info(f"Paced Steam to {percent}% of one CPU core via {cpu_max} (was '{original}').")
+        else:
+            logger.warning(f"Could not write CPU quota to {cpu_max}.")
+
+    def _restore_cpu_quota(self, saved: Optional[Tuple[str, str]] = None):
+        entry = saved or self.saved_cpu_quota
+        if not entry:
+            return
+        cpu_max, original = entry
+        if os.path.exists(cpu_max):
+            self._write_sysfs(cpu_max, original)
+            logger.info(f"Restored CPU quota on {cpu_max} to '{original}'.")
+        self.saved_cpu_quota = None
+
+    def _network_interfaces(self, default_only: bool = True) -> List[str]:
+        """Interfaces carrying the default route, or every live non-loopback interface."""
+        ifaces: List[str] = []
+        if default_only:
+            try:
+                with open("/proc/net/route", "r") as f:
+                    for line in f.readlines()[1:]:
+                        parts = line.split()
+                        # Destination 00000000 == default route
+                        if len(parts) > 2 and parts[1] == "00000000":
+                            ifaces.append(parts[0])
+            except Exception:
+                pass
+        if not ifaces:
+            for path in sorted(glob.glob("/sys/class/net/*")):
+                name = os.path.basename(path)
+                if name == "lo":
+                    continue
+                if self._read_attr(path, "operstate") in ("up", "unknown"):
+                    ifaces.append(name)
+        return list(dict.fromkeys(ifaces))
+
+    def _tc_binary(self) -> Optional[str]:
+        return shutil.which("tc") or next((p for p in ("/usr/sbin/tc", "/sbin/tc") if os.path.exists(p)), None)
+
+    def _tc_has_ingress(self, tc: str, iface: str) -> bool:
+        try:
+            res = subprocess.run(
+                [tc, "qdisc", "show", "dev", iface, "ingress"],
+                capture_output=True, text=True, check=False, timeout=5.0,
+            )
+            return "ingress" in (res.stdout or "")
+        except Exception:
+            return False
+
+    def _limit_download_bandwidth(self):
+        """
+        Caps incoming bandwidth with an ingress policer, so Steam simply receives less
+        data per second and therefore has far less to decompress and write. Pacing the
+        bytes is the most direct way to keep the whole chain - radio, CPU, SSD - quiet.
+        """
+        if not self.settings.get("limit_download_speed", True):
+            return
+        tc = self._tc_binary()
+        if not tc:
+            logger.info("Download speed cap skipped: tc (iproute2) is not installed.")
+            return
+
+        megabytes = max(1, int(self.settings.get("download_speed_limit_mbps", 6)))
+        rate = f"{megabytes * 8}mbit"
+        for iface in self._network_interfaces():
+            try:
+                # Start from a clean slate in case a previous run left a qdisc behind
+                subprocess.run([tc, "qdisc", "del", "dev", iface, "ingress"],
+                               check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5.0)
+                add = subprocess.run([tc, "qdisc", "add", "dev", iface, "handle", "ffff:", "ingress"],
+                                     capture_output=True, text=True, check=False, timeout=5.0)
+                if add.returncode != 0:
+                    logger.warning(f"Could not add ingress qdisc on {iface}: {(add.stderr or '').strip()}")
+                    continue
+
+                applied = False
+                for proto, prio, match in (
+                    ("ip", "50", ["match", "ip", "src", "0.0.0.0/0"]),
+                    ("ipv6", "51", ["match", "ip6", "src", "::/0"]),
+                ):
+                    res = subprocess.run(
+                        [tc, "filter", "add", "dev", iface, "parent", "ffff:", "protocol", proto,
+                         "prio", prio, "u32"] + match +
+                        ["police", "rate", rate, "burst", "512k", "mtu", "65535", "drop", "flowid", ":1"],
+                        capture_output=True, text=True, check=False, timeout=5.0,
+                    )
+                    if res.returncode == 0:
+                        applied = True
+                    else:
+                        logger.info(f"Ingress filter for {proto} on {iface} not applied: {(res.stderr or '').strip()}")
+
+                if applied:
+                    self.throttled_interfaces.append(iface)
+                    logger.info(f"Download paced to ~{megabytes} MB/s on {iface} ({rate} ingress policing).")
+                else:
+                    subprocess.run([tc, "qdisc", "del", "dev", iface, "ingress"],
+                                   check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5.0)
+            except Exception as e:
+                logger.error(f"Failed to pace download on {iface}: {e}")
+
+    def _clear_download_bandwidth_limit(self, interfaces: Optional[List[str]] = None):
+        tc = self._tc_binary()
+        if not tc:
+            self.throttled_interfaces.clear()
+            return
+        for iface in (interfaces if interfaces is not None else list(self.throttled_interfaces)):
+            try:
+                if self._tc_has_ingress(tc, iface):
+                    subprocess.run([tc, "qdisc", "del", "dev", iface, "ingress"],
+                                   check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5.0)
+                    logger.info(f"Removed download speed cap on {iface}.")
+            except Exception as e:
+                logger.error(f"Failed to clear download cap on {iface}: {e}")
+        self.throttled_interfaces.clear()
+
+    # ==========================================
+    # Crash-safe record of the reversible changes
+    # ==========================================
+    def _save_runtime_state(self):
+        """
+        Records the changes that outlive a plugin crash, so the next start can undo them.
+        A CPU quota or a network cap left behind would look like a permanently slow
+        console, which is exactly the class of bug this plugin has to stop causing.
+        """
+        if not self.runtime_state_file:
+            return
+        state = {
+            "cpu_quota": list(self.saved_cpu_quota) if self.saved_cpu_quota else None,
+            "throttled_interfaces": list(self.throttled_interfaces),
+        }
+        try:
+            with open(self.runtime_state_file, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+        except Exception as e:
+            logger.error(f"Could not write runtime state: {e}")
+
+    def _clear_runtime_state(self):
+        try:
+            if self.runtime_state_file and os.path.exists(self.runtime_state_file):
+                os.remove(self.runtime_state_file)
+        except Exception as e:
+            logger.error(f"Could not clear runtime state: {e}")
+
+    def _heal_runtime_state(self):
+        if not self.runtime_state_file or not os.path.exists(self.runtime_state_file):
+            return
+        try:
+            with open(self.runtime_state_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except Exception:
+            state = {}
+        logger.info(f"Startup repair: undoing leftover download pacing {state}.")
+        quota = state.get("cpu_quota")
+        if isinstance(quota, list) and len(quota) == 2:
+            self._restore_cpu_quota((quota[0], quota[1]))
+        self._clear_download_bandwidth_limit(self._network_interfaces(default_only=False))
+        self._clear_runtime_state()
 
     # ryzenadj option name -> multiplier to turn the reported value back into the unit
     # ryzenadj expects on the command line (watts are reported, milliwatts are written).
@@ -1751,6 +2317,13 @@ class Plugin:
                 except Exception as e:
                     logger.error(f"Failed to throttle GPU on {dpm_path}: {e}")
 
+        # 3.5 Pace the download itself. Capping the clocks alone does not stop the fans,
+        # because Steam will happily use every cycle it is given; limiting the bytes per
+        # second and the CPU it may spend on them is what keeps the console cold.
+        self._limit_download_bandwidth()
+        self._apply_cpu_quota()
+        self._save_runtime_state()
+
         # 4. Mute Audio (Hardware ALSA Master & PipeWire)
         if self.settings.get("mute_audio", True):
             self._set_audio_mute(True)
@@ -1835,6 +2408,12 @@ class Plugin:
         if self.display_slept_by_us:
             self._set_gamescope_display(sleep=False)
             self.display_slept_by_us = False
+
+        # Let the download run at full speed again, and drop the CPU quota, before
+        # anything slower happens: these two are what the user feels as "still slow".
+        self._restore_cpu_quota()
+        self._clear_download_bandwidth_limit()
+        self._clear_runtime_state()
 
         # Put Steam's processes back on normal scheduling. Nothing throttles them any
         # more, but this also repairs consoles left starved by an earlier version.
@@ -2153,6 +2732,16 @@ class Plugin:
                 # Sync inhibitor state
                 self._update_inhibitor_state()
 
+                # Safety net: input must never stay blocked outside background mode.
+                # A dead console is the worst failure this plugin could cause, so it is
+                # checked every pass rather than trusted to the exit path alone.
+                if not self.is_background_mode and not self.transition_in_progress and (
+                    self.inhibited_inputs or self.grabbed_gamepad_fds
+                ):
+                    logger.warning("Input was still blocked outside background mode; releasing it now.")
+                    self._uninhibit_all_inputs()
+                    self._release_all_gamepad_inputs()
+
                 # 2. In Background Mode Checks
                 if self.is_background_mode and not self.transition_in_progress:
                     # Keep the panels we dimmed dark (Steam re-lights them on its own)
@@ -2171,11 +2760,16 @@ class Plugin:
                         except Exception:
                             pass
 
-                    # Keep the lockout airtight: drop anything buffered, and grab devices
-                    # that showed up after entering (a pad waking up, a recreated virtual
-                    # controller) so they cannot reach Steam either.
+                    # Keep the lockout airtight: drop anything buffered, and grab plus
+                    # inhibit devices that showed up after entering (a pad waking up, a
+                    # recreated virtual controller) so they cannot reach Steam either.
                     self._flush_grabbed_inputs()
                     self._grab_new_inputs()
+                    self._inhibit_all_inputs()
+
+                    if now - self.last_telemetry_time >= TELEMETRY_INTERVAL:
+                        self.last_telemetry_time = now
+                        self._log_power_telemetry()
 
                     bat = self._get_battery_info()
 

@@ -9,6 +9,11 @@ export interface PluginSettings {
   turn_off_backlight: boolean; // default true
   oled_black_screen: boolean; // default true
   deep_input_lockout: boolean; // default true
+  block_controller_hidraw: boolean; // default false (experimental escalation)
+  limit_download_speed: boolean; // default true
+  download_speed_limit_mbps: number; // MB/s, default 6
+  download_cpu_percent: number; // % of one CPU core, default 30
+  debug_logging: boolean; // default true
 }
 
 export interface DownloadInfo {
