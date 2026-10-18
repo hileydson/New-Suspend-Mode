@@ -6,6 +6,7 @@ import {
   SliderField,
   Field,
   ProgressBar,
+  ButtonItem,
 } from "@decky/ui";
 import { call, toaster } from "@decky/api";
 import { PluginSettings, DownloadInfo } from "../types";
@@ -363,10 +364,50 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
 
         <PanelSectionRow>
           <ToggleField
+            label="Recover The Interface On Wake"
+            description="If the screen is still blank after waking from a sleep started in the SteamOS power menu, navigates home and, as a last resort, reloads the Steam interface."
+            checked={settings.ui_recovery_on_wake !== false}
+            onChange={(checked) => updateSetting("ui_recovery_on_wake", checked)}
+          />
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <ToggleField
             label="Write Diagnostic Logs"
             description="Records the full input and thermal picture to the plugin log on every screen-off. Leave on while tuning."
             checked={settings.debug_logging}
             onChange={(checked) => updateSetting("debug_logging", checked)}
+          />
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={async () => {
+              try {
+                await call("force_restore");
+                toaster.toast({
+                  title: "Download in Background",
+                  body: "Hardware restored: clocks, power limits and speed caps are back to normal.",
+                  duration: 4000,
+                });
+              } catch (e) {
+                toaster.toast({
+                  title: "Download in Background",
+                  body: "Could not restore the hardware; see the plugin log.",
+                  duration: 4000,
+                });
+              }
+            }}
+          >
+            Restore Hardware Now
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <Field
+            label="When to use it"
+            description="Puts every clock, power limit and speed cap back without rebooting, even ones left behind by a crash. Safe to press at any time."
+            bottomSeparator="none"
           />
         </PanelSectionRow>
       </PanelSection>

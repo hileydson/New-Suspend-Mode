@@ -43,6 +43,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
   download_speed_limit_mbps: 6,
   download_cpu_percent: 30,
   debug_logging: true,
+  ui_recovery_on_wake: true,
   standby_on_power_off: false,
   wake_on_bluetooth_connect: true,
   wake_on_controller_button: true,
@@ -118,6 +119,109 @@ const closeSteamSideMenus = () => {
  * if it did not, nothing happens, because the route will not have changed.
  */
 let sharedRouteBeforeTakeover: string | null = null;
+
+/**
+ * True when the sleep came from the Steam interface (the power menu) rather than from
+ * the physical power button. The button path is invisible to Steam and comes back clean;
+ * the menu path is the one where Steam's own click handler has already touched the
+ * interface before the plugin is consulted, so only it needs recovering afterwards.
+ */
+let sharedUiInitiatedSleep = false;
+let sharedRecoveryTimers: NodeJS.Timeout[] = [];
+
+const clearRecoveryTimers = () => {
+  sharedRecoveryTimers.forEach((t) => clearTimeout(t));
+  sharedRecoveryTimers = [];
+};
+
+/**
+ * Whether the middle of the screen is covered by an empty, opaque black box that is not
+ * the plugin's own overlay.
+ *
+ * Deliberately strict: it must fill the viewport, have no children and no text. A real
+ * view - the library, a game, a menu - fails at least one of those, so a false positive
+ * cannot trigger the recovery below. Something that simply stopped repainting fails it
+ * too, which is why the probe is logged alongside.
+ */
+const screenLooksBlank = (): boolean => {
+  try {
+    const el = document.elementFromPoint(
+      Math.round(window.innerWidth / 2),
+      Math.round(window.innerHeight / 2)
+    ) as HTMLElement | null;
+    if (!el) return true;
+    if (typeof el.closest === "function" && el.closest(".dib-overlay-container")) return false;
+    if ((el.textContent ?? "").trim().length > 0) return false;
+    if (el.children && el.children.length > 0) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < window.innerWidth * 0.9 || rect.height < window.innerHeight * 0.9) return false;
+    const bg = window.getComputedStyle(el).backgroundColor.replace(/\s+/g, "");
+    return bg === "rgb(0,0,0)" || bg === "rgba(0,0,0,1)";
+  } catch (e) {
+    return false;
+  }
+};
+
+/**
+ * Gets the Steam interface back after a sleep it started itself.
+ *
+ * Three steps, each only taken if the one before it did not help, because the screen
+ * being black is the only evidence available and every step costs the user something:
+ *   1. nothing (the ordinary wake already closed the menus and put the route back)
+ *   2. navigate home, which remounts the main view
+ *   3. reload the Steam interface, the last resort, and still far better than the reboot
+ *      that is otherwise the only way out.
+ */
+const recoverSteamUi = () => {
+  clearRecoveryTimers();
+  if (!sharedUiInitiatedSleep || sharedSettings.ui_recovery_on_wake === false) {
+    sharedUiInitiatedSleep = false;
+    return;
+  }
+
+  sharedRecoveryTimers.push(
+    setTimeout(() => {
+      if (sharedIsBackgroundMode || !screenLooksBlank()) {
+        sharedUiInitiatedSleep = false;
+        return;
+      }
+      console.warn("[DownloadInBackground] Screen still blank after waking -> navigating home.");
+      call("log_debug", { kind: "ui_recovery", step: "navigate_home" }).catch(() => {});
+      try {
+        const nav: any = Navigation as any;
+        if (typeof nav.NavigateToLibraryTab === "function") nav.NavigateToLibraryTab();
+        else nav.Navigate?.("/library/home");
+      } catch (e) {
+        console.warn("[DownloadInBackground] Could not navigate home:", e);
+      }
+
+      sharedRecoveryTimers.push(
+        setTimeout(() => {
+          sharedUiInitiatedSleep = false;
+          if (sharedIsBackgroundMode || !screenLooksBlank()) return;
+          const restart = (window as any).SteamClient?.Browser?.RestartJSContext;
+          console.warn("[DownloadInBackground] Screen STILL blank -> reloading the Steam UI.");
+          call("log_debug", {
+            kind: "ui_recovery",
+            step: "restart_js_context",
+            available: typeof restart === "function",
+          }).catch(() => {});
+          if (typeof restart !== "function") return;
+          toaster.toast({
+            title: "Download in Background",
+            body: "Reloading the Steam interface to finish waking up",
+            duration: 3000,
+          });
+          try {
+            restart();
+          } catch (e) {
+            console.error("[DownloadInBackground] Could not reload the Steam UI:", e);
+          }
+        }, 2500)
+      );
+    }, 1500)
+  );
+};
 
 const currentUiRoute = (): string | null => {
   try {
@@ -240,6 +344,9 @@ const finishWakeUi = (reason: string) => {
   try {
     window.dispatchEvent(new Event("resize"));
   } catch (e) {}
+
+  // Only for a sleep the Steam interface started itself, and only if it is still blank.
+  recoverSteamUi();
 };
 
 /**
@@ -473,6 +580,7 @@ const handleMenuSuspend = (hook: SuspendHook, args: any[]): any => {
   // Steam's own suspend flow would have taken it down; the power-button path, which
   // comes back clean, never has a menu open in the first place.
   sharedRouteBeforeTakeover = currentUiRoute();
+  sharedUiInitiatedSleep = true;
   closeSteamSideMenus();
 
   // The backend decides, on state it re-reads right now rather than on the last poll,
@@ -996,6 +1104,9 @@ export default definePlugin(() => {
             standby: true,
             download_info: sharedDownloadInfo,
           }).catch(() => {});
+          // Steam asked, so Steam may already have touched its own interface.
+          sharedRouteBeforeTakeover = currentUiRoute();
+          sharedUiInitiatedSleep = true;
           startStandbySplash(sharedSettings.hud_timeout_seconds ?? 5, "standby_sleep_request");
           return false;
         }
@@ -1012,6 +1123,8 @@ export default definePlugin(() => {
           } catch (e) {
             console.error("[DownloadInBackground] Error calling trigger_suspend_intercept:", e);
           }
+          sharedRouteBeforeTakeover = currentUiRoute();
+          sharedUiInitiatedSleep = true;
           startHudCountdown(sharedSettings.hud_timeout_seconds ?? 5);
           return false; // Prevent suspend in SteamClient
         }

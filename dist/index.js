@@ -182,7 +182,23 @@ const SettingsPanel = ({ settings, setSettings, downloadInfo, isBackgroundMode, 
                                     ? "Active (Screen off & power saving enabled)"
                                     : "Inactive (Normal operation)", children: SP_JSX.jsx("span", { className: `dib-status-tag ${isBackgroundMode ? "active" : "idle"}`, children: standbyMode ? "STANDBY" : isBackgroundMode ? "ACTIVE" : "IDLE" }) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Behavior Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Enable Plugin", description: "Intercepts suspend when downloading, turns off screen, and saves power.", checked: settings.enabled, onChange: (checked) => updateSetting("enabled", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Auto-Suspend Battery Threshold", description: "Console suspends automatically if battery drops below this limit during download.", value: settings.min_battery_threshold, min: 5, max: 30, step: 1, showValue: true, valueSuffix: "%", onChange: (val) => updateSetting("min_battery_threshold", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "HUD Display Countdown", description: "Seconds the download card shows on screen before turning display off.", value: settings.hud_timeout_seconds, min: 0, max: 15, step: 1, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("hud_timeout_seconds", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Completion Suspend Delay", description: "Seconds to wait after all downloads complete before automatically sleeping.", value: settings.auto_suspend_delay_seconds, min: 30, max: 600, step: 30, showValue: true, valueSuffix: "s", onChange: (val) => updateSetting("auto_suspend_delay_seconds", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Block All Input While Screen Is Off", description: "Freezes button mapping and disconnects external controllers so only the power button responds. Turn off if a controller misbehaves after waking.", checked: settings.deep_input_lockout, onChange: (checked) => updateSetting("deep_input_lockout", checked) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Power Saving & Screen Options", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Turn Off Display Backlight", description: "Physically drops LCD/OLED panel backlight brightness to 0.", checked: settings.turn_off_backlight, onChange: (checked) => updateSetting("turn_off_backlight", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pitch Black OLED Mode", description: "Presents a pure black overlay, shutting off individual OLED pixels.", checked: settings.oled_black_screen, onChange: (checked) => updateSetting("oled_black_screen", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle CPU to Powersave", description: "Switches power profile to power-saver and lowers CPU clock frequencies.", checked: settings.throttle_cpu, onChange: (checked) => updateSetting("throttle_cpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Throttle GPU to 200MHz", description: "Sets AMD GPU performance level to low, minimizing GPU power draw.", checked: settings.throttle_gpu, onChange: (checked) => updateSetting("throttle_gpu", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Mute Audio While Screen Off", description: "Silences audio output during background download to prevent disturbance.", checked: settings.mute_audio, onChange: (checked) => updateSetting("mute_audio", checked) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Standby & Controller Wake", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Replace Sleep With Standby", description: "The power button AND the Sleep option in the SteamOS power menu both enter the plugin's standby instead of suspending: screen black, downloads carry on, a controller brings it back. Shut Down still powers off for real.", checked: settings.standby_on_power_off, onChange: (checked) => updateSetting("standby_on_power_off", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "What You Will See", description: settings.standby_on_power_off
                                 ? "Downloading: the download card, then black. Nothing downloading: just the plugin logo, then black."
-                                : "Standby off: sleep is intercepted only while a download is active, and the download card is shown." }) }), settings.standby_on_power_off && (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Wake When A Bluetooth Pad Connects", description: "Bluetooth stays on in standby. Turning a paired controller on is enough to wake the console, no button needed.", checked: settings.wake_on_bluetooth_connect, onChange: (checked) => updateSetting("wake_on_bluetooth_connect", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Wake On Controller Button", description: "For USB and dongle controllers, connecting is not enough: press Guide/Home, Select or Start to wake. The console's own buttons stay dead - only power works there.", checked: settings.wake_on_controller_button, onChange: (checked) => updateSetting("wake_on_controller_button", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "Battery In Standby", description: `Standby keeps the console powered, so it does use battery. It drops to a real suspend at ${settings.min_battery_threshold}% to protect it.` }) })] }))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Download Pace (Fan & Heat)", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Slow Down Download", description: "Caps incoming speed so there is far less to decompress and write. Downloads take longer, the console stays cold and the fans stay off.", checked: settings.limit_download_speed, onChange: (checked) => updateSetting("limit_download_speed", checked) }) }), settings.limit_download_speed && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Download Speed Cap", description: "Lower is quieter and cooler. 6 MB/s still downloads about 21 GB per hour.", value: settings.download_speed_limit_mbps, min: 1, max: 30, step: 1, showValue: true, valueSuffix: " MB/s", onChange: (val) => updateSetting("download_speed_limit_mbps", val) }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Steam CPU Budget", description: "Hard limit on the CPU Steam may use while the screen is off, as a share of one core. This is what keeps the chip cool enough for the fans to idle.", value: settings.download_cpu_percent, min: 0, max: 100, step: 5, showValue: true, valueSuffix: "%", onChange: (val) => updateSetting("download_cpu_percent", val) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Troubleshooting", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Also Disconnect Built-In Controller", description: "EXPERIMENTAL. Only enable if buttons still act while the screen is off. Detaches the built-in pad's raw HID interface, which crashed the session on some consoles.", checked: settings.block_controller_hidraw, onChange: (checked) => updateSetting("block_controller_hidraw", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Write Diagnostic Logs", description: "Records the full input and thermal picture to the plugin log on every screen-off. Leave on while tuning.", checked: settings.debug_logging, onChange: (checked) => updateSetting("debug_logging", checked) }) })] })] }));
+                                : "Standby off: sleep is intercepted only while a download is active, and the download card is shown." }) }), settings.standby_on_power_off && (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Wake When A Bluetooth Pad Connects", description: "Bluetooth stays on in standby. Turning a paired controller on is enough to wake the console, no button needed.", checked: settings.wake_on_bluetooth_connect, onChange: (checked) => updateSetting("wake_on_bluetooth_connect", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Wake On Controller Button", description: "For USB and dongle controllers, connecting is not enough: press Guide/Home, Select or Start to wake. The console's own buttons stay dead - only power works there.", checked: settings.wake_on_controller_button, onChange: (checked) => updateSetting("wake_on_controller_button", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "Battery In Standby", description: `Standby keeps the console powered, so it does use battery. It drops to a real suspend at ${settings.min_battery_threshold}% to protect it.` }) })] }))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Download Pace (Fan & Heat)", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Slow Down Download", description: "Caps incoming speed so there is far less to decompress and write. Downloads take longer, the console stays cold and the fans stay off.", checked: settings.limit_download_speed, onChange: (checked) => updateSetting("limit_download_speed", checked) }) }), settings.limit_download_speed && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Download Speed Cap", description: "Lower is quieter and cooler. 6 MB/s still downloads about 21 GB per hour.", value: settings.download_speed_limit_mbps, min: 1, max: 30, step: 1, showValue: true, valueSuffix: " MB/s", onChange: (val) => updateSetting("download_speed_limit_mbps", val) }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Steam CPU Budget", description: "Hard limit on the CPU Steam may use while the screen is off, as a share of one core. This is what keeps the chip cool enough for the fans to idle.", value: settings.download_cpu_percent, min: 0, max: 100, step: 5, showValue: true, valueSuffix: "%", onChange: (val) => updateSetting("download_cpu_percent", val) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Troubleshooting", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Also Disconnect Built-In Controller", description: "EXPERIMENTAL. Only enable if buttons still act while the screen is off. Detaches the built-in pad's raw HID interface, which crashed the session on some consoles.", checked: settings.block_controller_hidraw, onChange: (checked) => updateSetting("block_controller_hidraw", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Recover The Interface On Wake", description: "If the screen is still blank after waking from a sleep started in the SteamOS power menu, navigates home and, as a last resort, reloads the Steam interface.", checked: settings.ui_recovery_on_wake !== false, onChange: (checked) => updateSetting("ui_recovery_on_wake", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Write Diagnostic Logs", description: "Records the full input and thermal picture to the plugin log on every screen-off. Leave on while tuning.", checked: settings.debug_logging, onChange: (checked) => updateSetting("debug_logging", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: async () => {
+                                try {
+                                    await call("force_restore");
+                                    toaster.toast({
+                                        title: "Download in Background",
+                                        body: "Hardware restored: clocks, power limits and speed caps are back to normal.",
+                                        duration: 4000,
+                                    });
+                                }
+                                catch (e) {
+                                    toaster.toast({
+                                        title: "Download in Background",
+                                        body: "Could not restore the hardware; see the plugin log.",
+                                        duration: 4000,
+                                    });
+                                }
+                            }, children: "Restore Hardware Now" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "When to use it", description: "Puts every clock, power limit and speed cap back without rebooting, even ones left behind by a crash. Safe to press at any time.", bottomSeparator: "none" }) })] })] }));
 };
 
 const PLUGIN_STYLES = `
@@ -527,6 +543,7 @@ const DEFAULT_SETTINGS = {
     download_speed_limit_mbps: 6,
     download_cpu_percent: 30,
     debug_logging: true,
+    ui_recovery_on_wake: true,
     standby_on_power_off: false,
     wake_on_bluetooth_connect: true,
     wake_on_controller_button: true,
@@ -596,6 +613,108 @@ const closeSteamSideMenus = () => {
  * if it did not, nothing happens, because the route will not have changed.
  */
 let sharedRouteBeforeTakeover = null;
+/**
+ * True when the sleep came from the Steam interface (the power menu) rather than from
+ * the physical power button. The button path is invisible to Steam and comes back clean;
+ * the menu path is the one where Steam's own click handler has already touched the
+ * interface before the plugin is consulted, so only it needs recovering afterwards.
+ */
+let sharedUiInitiatedSleep = false;
+let sharedRecoveryTimers = [];
+const clearRecoveryTimers = () => {
+    sharedRecoveryTimers.forEach((t) => clearTimeout(t));
+    sharedRecoveryTimers = [];
+};
+/**
+ * Whether the middle of the screen is covered by an empty, opaque black box that is not
+ * the plugin's own overlay.
+ *
+ * Deliberately strict: it must fill the viewport, have no children and no text. A real
+ * view - the library, a game, a menu - fails at least one of those, so a false positive
+ * cannot trigger the recovery below. Something that simply stopped repainting fails it
+ * too, which is why the probe is logged alongside.
+ */
+const screenLooksBlank = () => {
+    try {
+        const el = document.elementFromPoint(Math.round(window.innerWidth / 2), Math.round(window.innerHeight / 2));
+        if (!el)
+            return true;
+        if (typeof el.closest === "function" && el.closest(".dib-overlay-container"))
+            return false;
+        if ((el.textContent ?? "").trim().length > 0)
+            return false;
+        if (el.children && el.children.length > 0)
+            return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < window.innerWidth * 0.9 || rect.height < window.innerHeight * 0.9)
+            return false;
+        const bg = window.getComputedStyle(el).backgroundColor.replace(/\s+/g, "");
+        return bg === "rgb(0,0,0)" || bg === "rgba(0,0,0,1)";
+    }
+    catch (e) {
+        return false;
+    }
+};
+/**
+ * Gets the Steam interface back after a sleep it started itself.
+ *
+ * Three steps, each only taken if the one before it did not help, because the screen
+ * being black is the only evidence available and every step costs the user something:
+ *   1. nothing (the ordinary wake already closed the menus and put the route back)
+ *   2. navigate home, which remounts the main view
+ *   3. reload the Steam interface, the last resort, and still far better than the reboot
+ *      that is otherwise the only way out.
+ */
+const recoverSteamUi = () => {
+    clearRecoveryTimers();
+    if (!sharedUiInitiatedSleep || sharedSettings.ui_recovery_on_wake === false) {
+        sharedUiInitiatedSleep = false;
+        return;
+    }
+    sharedRecoveryTimers.push(setTimeout(() => {
+        if (sharedIsBackgroundMode || !screenLooksBlank()) {
+            sharedUiInitiatedSleep = false;
+            return;
+        }
+        console.warn("[DownloadInBackground] Screen still blank after waking -> navigating home.");
+        call("log_debug", { kind: "ui_recovery", step: "navigate_home" }).catch(() => { });
+        try {
+            const nav = DFL.Navigation;
+            if (typeof nav.NavigateToLibraryTab === "function")
+                nav.NavigateToLibraryTab();
+            else
+                nav.Navigate?.("/library/home");
+        }
+        catch (e) {
+            console.warn("[DownloadInBackground] Could not navigate home:", e);
+        }
+        sharedRecoveryTimers.push(setTimeout(() => {
+            sharedUiInitiatedSleep = false;
+            if (sharedIsBackgroundMode || !screenLooksBlank())
+                return;
+            const restart = window.SteamClient?.Browser?.RestartJSContext;
+            console.warn("[DownloadInBackground] Screen STILL blank -> reloading the Steam UI.");
+            call("log_debug", {
+                kind: "ui_recovery",
+                step: "restart_js_context",
+                available: typeof restart === "function",
+            }).catch(() => { });
+            if (typeof restart !== "function")
+                return;
+            toaster.toast({
+                title: "Download in Background",
+                body: "Reloading the Steam interface to finish waking up",
+                duration: 3000,
+            });
+            try {
+                restart();
+            }
+            catch (e) {
+                console.error("[DownloadInBackground] Could not reload the Steam UI:", e);
+            }
+        }, 2500));
+    }, 1500));
+};
 const currentUiRoute = () => {
     try {
         return window.location.pathname || null;
@@ -715,6 +834,8 @@ const finishWakeUi = (reason) => {
         window.dispatchEvent(new Event("resize"));
     }
     catch (e) { }
+    // Only for a sleep the Steam interface started itself, and only if it is still blank.
+    recoverSteamUi();
 };
 /**
  * Enters standby, replacing the HUD with nothing: the splash has already been shown.
@@ -921,6 +1042,7 @@ const handleMenuSuspend = (hook, args) => {
     // Steam's own suspend flow would have taken it down; the power-button path, which
     // comes back clean, never has a menu open in the first place.
     sharedRouteBeforeTakeover = currentUiRoute();
+    sharedUiInitiatedSleep = true;
     closeSteamSideMenus();
     // The backend decides, on state it re-reads right now rather than on the last poll,
     // and starts the standby splash itself when standby is what takes over.
@@ -1377,6 +1499,9 @@ var index = definePlugin(() => {
                         standby: true,
                         download_info: sharedDownloadInfo,
                     }).catch(() => { });
+                    // Steam asked, so Steam may already have touched its own interface.
+                    sharedRouteBeforeTakeover = currentUiRoute();
+                    sharedUiInitiatedSleep = true;
                     startStandbySplash(sharedSettings.hud_timeout_seconds ?? 5, "standby_sleep_request");
                     return false;
                 }
@@ -1393,6 +1518,8 @@ var index = definePlugin(() => {
                     catch (e) {
                         console.error("[DownloadInBackground] Error calling trigger_suspend_intercept:", e);
                     }
+                    sharedRouteBeforeTakeover = currentUiRoute();
+                    sharedUiInitiatedSleep = true;
                     startHudCountdown(sharedSettings.hud_timeout_seconds ?? 5);
                     return false; // Prevent suspend in SteamClient
                 }

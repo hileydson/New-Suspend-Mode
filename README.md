@@ -158,7 +158,17 @@ O script copia os arquivos diretamente para `~/homebrew/plugins/DownloadInBackgr
 
 **Diagnóstico**
 - **Desconectar Também o Controle Embutido** (padrão: desligado, **experimental**): só use se algum botão ainda agir com a tela apagada. Desconecta a interface HID bruta do controle interno, o que travou a sessão em alguns consoles.
-- **Gravar Logs de Diagnóstico** (padrão: ligado): registra o panorama completo de input e temperatura em cada ciclo, em `~/homebrew/logs/`. Procure por `DIB INPUT DIAGNOSTICS`, `DIB TELEMETRY` e `DIB RESTORE CHECK`.
+- **Recuperar a Interface na Volta** (padrão: ligado): se a tela continuar preta depois de acordar de um sleep iniciado pelo **menu do SteamOS**, navega para a home e, em último caso, recarrega a interface da Steam. Só age se a tela estiver de fato preta, e nunca no caminho do botão Power (que volta limpo).
+- **Gravar Logs de Diagnóstico** (padrão: ligado): registra o panorama completo de input e temperatura em cada ciclo, em `~/homebrew/logs/`. Procure por `DIB APPLY CHECK`, `DIB RESTORE CHECK`, `DIB INPUT DIAGNOSTICS` e `DIB TELEMETRY`.
+- **Restaurar Hardware Agora** (botão): devolve clocks, limites de energia e tetos de velocidade ao normal na hora, inclusive o que tiver sobrado de uma queda do plugin, sem reiniciar. Pode ser apertado a qualquer momento.
+
+### 🧯 Por que o console não volta lento
+
+Três camadas, porque uma só não resolveu:
+
+1. **O valor original nunca é sobrescrito.** Entrar no modo duas vezes sem restaurar no meio salvava como "original" o valor que o próprio plugin tinha acabado de escrever — restaurar passava a significar "escrever 800 MHz e 6 W de volta". Agora o primeiro save vence, e um valor que já está no alvo não é salvo (senão a restauração viraria um no-op).
+2. **O restore converge.** Uma passada não basta: trocar o perfil ACPI ou a política térmica da ASUS faz o firmware re-aplicar os limites dele, sobrescrevendo clocks restaurados um instante antes. Por isso o perfil e os limites de energia voltam **antes** dos clocks, e depois o plugin **relê tudo e reescreve o que não pegou**, até 3 passadas, registrando no log o que nunca pegou.
+3. **Rede de segurança.** O que ainda estiver exatamente no valor que o plugin escreveu, e sem original para voltar (queda, recarregamento do plugin), é forçado para um padrão seguro: `scaling_max_freq` → `cpuinfo_max_freq`, GPU → `auto`, turbo → ligado, EPP → `balance_performance`. O **governor fica de fora de propósito**: `powersave` é o padrão normal do amd-pstate, forçá-lo seria brigar com o sistema. E o que o usuário mudou no meio do caminho não é tocado.
 
 ---
 
@@ -186,7 +196,8 @@ O script copia os arquivos diretamente para `~/homebrew/plugins/DownloadInBackgr
   - Suspends automatically when battery drops below 15% (configurable), in standby too.
   - Suspends automatically once all downloads are completed (not in standby).
 - **Instant Wake:** Pressing the power button restores brightness, power profiles, audio and input at once, and dismisses any menu a stray button press may have opened.
-- **Never Leaves The System Slow:** Every change is undone in isolated stages, so one failing stage cannot skip the others, with a forced verification pass at the end and an on-disk state file. If the plugin dies with the screen off, the next load undoes the whole session — no reboot needed.
+- **Never Leaves The System Slow:** Four layers, because fewer were not enough. (1) The saved original is never overwritten by a second pass, so "restore" can never mean writing the throttled value back in. (2) Changes are undone in isolated stages, with the platform profile and power limits going back *before* the clocks, since firmware re-applies its own limits when the profile changes. (3) Everything restored is then re-read and re-written until the machine stops disagreeing, up to three extra passes, and whatever never sticks is named in the log. (4) Anything still holding exactly the value this plugin wrote, with no original left to put back, is forced to a safe default (`cpuinfo_max_freq`, GPU `auto`, turbo on, EPP `balance_performance`); the scaling governor is deliberately left alone, since `powersave` is the normal amd-pstate default. Plus an on-disk state file, so a plugin crash with the screen off is undone on the next load, and a **Restore Hardware Now** button for everything else — no reboot needed.
+- **Recovers The Interface:** A sleep started from the SteamOS power menu is a UI action, and Steam's own click handler may blank its interface before the plugin is ever consulted. On wake the plugin closes the menus, puts the route back, and — only if the middle of the screen really is an empty opaque black box — navigates home and, as a last resort, reloads the Steam interface. The physical-button path is never touched, because it comes back clean.
 
 ### 🔨 Building from Source
 

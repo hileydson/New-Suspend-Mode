@@ -50,6 +50,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "download_speed_limit_mbps": 6,
     "download_cpu_percent": 30,
     "debug_logging": True,
+    "ui_recovery_on_wake": True,
     # Standby: turn the power button into "console off, wakes on a controller"
     "standby_on_power_off": False,
     "wake_on_bluetooth_connect": True,
@@ -459,6 +460,9 @@ class Plugin:
         self.last_battery_time: float = 0.0
         self.saved_cpu_boost: Optional[str] = None
         self.saved_policy_boost: Dict[str, str] = {}
+        # path -> the value this plugin wrote there. What makes it possible to tell
+        # "the machine is still throttled by me" from "the user set it that way".
+        self.applied_marks: Dict[str, str] = {}
         self.last_loop_timestamp: float = time.time()
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.monitor_task: Optional[asyncio.Task] = None
@@ -959,6 +963,36 @@ class Plugin:
             "download_info": self.download_info,
         }
 
+    async def force_restore(self) -> Dict[str, Any]:
+        """
+        Puts the hardware back right now, whether or not the plugin thinks it is in the
+        mode, and replays anything a previous session left on disk.
+
+        The escape hatch for a console that came back slow: without it the only way out
+        is a reboot, and a reboot also destroys the evidence.
+        """
+        logger.warning("Force restore requested from the plugin menu.")
+        was_bg = self.is_background_mode
+        self.is_background_mode = False
+        self.standby_mode = False
+        self.wake_cooldown_until = time.time() + WAKE_COOLDOWN_SECONDS
+        self.transition_in_progress = True
+        try:
+            await self.loop.run_in_executor(None, self._run_transition_locked, self._heal_runtime_state)
+            await self.loop.run_in_executor(
+                None, self._run_transition_locked, self._restore_system_power_and_display
+            )
+        finally:
+            self.transition_in_progress = False
+        self._clear_stale_sleep_masks()
+        self._update_inhibitor_state()
+        if was_bg:
+            await decky.emit("background_mode_changed", {
+                "is_background_mode": False,
+                "reason": "force_restore",
+            })
+        return {"ok": True, "was_background_mode": was_bg}
+
     def _logind_watcher_worker(self):
         """Watches systemd-logind journal logs to intercept UI suspend clicks."""
         logger.info("Starting logind journal watcher worker...")
@@ -1337,6 +1371,33 @@ class Plugin:
             except Exception:
                 pass
         return "deck"
+
+    def _save_original(self, store: Dict[str, str], key: str, current: str, target: str) -> bool:
+        """
+        Records what to put back later, and never lets a second pass overwrite it.
+
+        Applying the low-power settings twice without a restore in between used to
+        overwrite the saved originals with the throttled values this plugin had just
+        written. 'Restore' then meant writing 800 MHz and 6 W back in: a console left
+        slow until the next reboot, with nothing in the log looking wrong. First save
+        wins, and a value that already matches the target is not saved at all, so the
+        restore cannot be turned into a no-op either.
+        """
+        if current == target:
+            return False
+        if key not in store:
+            store[key] = current
+        self.applied_marks[key] = target
+        return True
+
+    def _save_original_scalar(self, attr: str, current: str, target: str, path: str) -> bool:
+        """_save_original for the settings there is only one of on a machine."""
+        if current == target:
+            return False
+        if getattr(self, attr, None) is None:
+            setattr(self, attr, current)
+        self.applied_marks[path] = target
+        return True
 
     def _write_sysfs(self, path: str, value: str) -> bool:
         """Writes a string value to sysfs/proc, with automatic passwordless sudo tee fallback."""
@@ -2655,6 +2716,7 @@ class Plugin:
             "audio_muted": self.audio_muted_by_us,
             "display_slept": self.display_slept_by_us,
             "ryzenadj": dict(self.saved_ryzenadj) if self.saved_ryzenadj else None,
+            "applied_marks": dict(self.applied_marks),
         }
 
     def _load_runtime_state(self, state: Dict[str, Any]):
@@ -2682,6 +2744,8 @@ class Plugin:
         self.display_slept_by_us = bool(state.get("display_slept"))
         ryzenadj = state.get("ryzenadj")
         self.saved_ryzenadj = {k: int(v) for k, v in ryzenadj.items()} if isinstance(ryzenadj, dict) else None
+        # Carried across a reload so the forced pass can still recognise its own work.
+        self.applied_marks = {str(k): str(v) for k, v in (state.get("applied_marks") or {}).items()}
 
     def _save_runtime_state(self):
         """
@@ -2836,14 +2900,15 @@ class Plugin:
             if os.path.exists(profile_file):
                 try:
                     with open(profile_file, "r") as f:
-                        self.saved_platform_profile = f.read().strip()
+                        curr_profile = f.read().strip()
                     choices = ""
                     if os.path.exists(choices_file):
                         with open(choices_file, "r") as cf:
                             choices = cf.read().strip()
                     target_choice = "quiet" if "quiet" in choices else ("low-power" if "low-power" in choices else "balanced")
+                    self._save_original_scalar("saved_platform_profile", curr_profile, target_choice, profile_file)
                     self._write_sysfs(profile_file, target_choice)
-                    logger.info(f"Set ACPI platform_profile to {target_choice} (was {self.saved_platform_profile}).")
+                    logger.info(f"Set ACPI platform_profile to {target_choice} (was {curr_profile}).")
                 except Exception as e:
                     logger.debug(f"Direct ACPI platform_profile write failed: {e}")
 
@@ -2855,25 +2920,25 @@ class Plugin:
                 if os.path.exists(asus_thermal_file):
                     try:
                         with open(asus_thermal_file, "r") as f:
-                            self.saved_asus_thermal = f.read().strip()
+                            curr_thermal = f.read().strip()
+                        self._save_original_scalar("saved_asus_thermal", curr_thermal, "2", asus_thermal_file)
                         self._write_sysfs(asus_thermal_file, "2")
-                        logger.info(f"Set ASUS thermal policy on {asus_thermal_file} to Silent (2).")
+                        logger.info(f"Set ASUS thermal policy on {asus_thermal_file} to Silent (2) (was {curr_thermal}).")
                     except Exception:
                         pass
 
             # Fan boost mode (Silent = 2). Saved, because leaving the fans in silent mode
             # after waking makes the console throttle and feel permanently slow.
-            self.saved_fan_boost.clear()
             for fan_boost in glob.glob("/sys/devices/platform/asus*/fan_boost_mode"):
                 try:
                     with open(fan_boost, "r") as f:
-                        self.saved_fan_boost[fan_boost] = f.read().strip()
+                        curr_fan = f.read().strip()
                 except Exception:
                     continue
+                self._save_original(self.saved_fan_boost, fan_boost, curr_fan, "2")
                 self._write_sysfs(fan_boost, "2")
 
             # C. ASUS Hardware PPT / SPL Power Limits (Hard limit to 6 Watts!)
-            self.saved_asus_ppt.clear()
             ppt_files = [
                 "/sys/devices/platform/asus-nb-wmi/ppt_pl1_spl",
                 "/sys/devices/platform/asus-nb-wmi/ppt_pl2_sppt",
@@ -2887,7 +2952,7 @@ class Plugin:
                     try:
                         with open(pf, "r") as f:
                             curr_ppt = f.read().strip()
-                        self.saved_asus_ppt[pf] = curr_ppt
+                        self._save_original(self.saved_asus_ppt, pf, curr_ppt, "6")
                         self._write_sysfs(pf, "6")
                         logger.info(f"Capped ASUS PPT limit on {pf} to 6W (was {curr_ppt}).")
                     except Exception:
@@ -2934,18 +2999,18 @@ class Plugin:
             if os.path.exists(boost_file):
                 try:
                     with open(boost_file, "r") as f:
-                        self.saved_cpu_boost = f.read().strip()
+                        curr_boost = f.read().strip()
+                    self._save_original_scalar("saved_cpu_boost", curr_boost, "0", boost_file)
                     self._write_sysfs(boost_file, "0")
-                    logger.info("Disabled global CPU turbo boost (boost -> 0).")
+                    logger.info(f"Disabled global CPU turbo boost (boost {curr_boost} -> 0).")
                 except Exception:
                     pass
 
-            self.saved_policy_boost.clear()
             for pboost in glob.glob("/sys/devices/system/cpu/cpufreq/policy*/boost"):
                 try:
                     with open(pboost, "r") as f:
                         curr_b = f.read().strip()
-                    self.saved_policy_boost[pboost] = curr_b
+                    self._save_original(self.saved_policy_boost, pboost, curr_b, "0")
                     self._write_sysfs(pboost, "0")
                 except Exception:
                     pass
@@ -2963,13 +3028,12 @@ class Plugin:
                     except Exception:
                         pass
 
-            self.saved_cpu_freqs.clear()
             freq_files = glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq") + glob.glob("/sys/devices/system/cpu/cpufreq/policy*/scaling_max_freq")
             for freq_file in set(freq_files):
                 try:
                     with open(freq_file, "r") as f:
                         curr_freq = f.read().strip()
-                    self.saved_cpu_freqs[freq_file] = curr_freq
+                    self._save_original(self.saved_cpu_freqs, freq_file, curr_freq, min_freq)
                     self._write_sysfs(freq_file, min_freq)
                 except Exception:
                     pass
@@ -2977,25 +3041,23 @@ class Plugin:
                 logger.info(f"Capped CPU max frequency to {min_freq} kHz across {len(self.saved_cpu_freqs)} nodes for calm, silent cooling.")
 
             # H. Set CPU scaling governor to powersave across all cores
-            self.saved_cpu_governors.clear()
             gov_files = glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor") + glob.glob("/sys/devices/system/cpu/cpufreq/policy*/scaling_governor")
             for gov_file in set(gov_files):
                 try:
                     with open(gov_file, "r") as f:
                         curr_gov = f.read().strip()
-                    self.saved_cpu_governors[gov_file] = curr_gov
+                    self._save_original(self.saved_cpu_governors, gov_file, curr_gov, "powersave")
                     self._write_sysfs(gov_file, "powersave")
                 except Exception:
                     pass
 
             # I. Set AMD Energy Performance Preference (EPP) to power
-            self.saved_cpu_epp.clear()
             epp_files = glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference") + glob.glob("/sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference")
             for ep in set(epp_files):
                 try:
                     with open(ep, "r") as f:
                         curr_epp = f.read().strip()
-                    self.saved_cpu_epp[ep] = curr_epp
+                    self._save_original(self.saved_cpu_epp, ep, curr_epp, "power")
                     self._write_sysfs(ep, "power")
                 except Exception:
                     pass
@@ -3011,7 +3073,7 @@ class Plugin:
                 try:
                     with open(dpm_path, "r") as f:
                         curr_dpm = f.read().strip()
-                    self.saved_gpu_dpm[dpm_path] = curr_dpm
+                    self._save_original(self.saved_gpu_dpm, dpm_path, curr_dpm, "low")
                     try:
                         with open(dpm_path, "w") as f:
                             f.write("low")
@@ -3054,6 +3116,19 @@ class Plugin:
         # 6. Write down everything that now needs undoing, before touching input. If the
         # plugin dies from here on, the next start replays this exact restore.
         self._save_runtime_state()
+        if self.settings.get("debug_logging", True):
+            # The counterpart of [DIB RESTORE CHECK]: what was taken away, and what has
+            # to come back. A report of "still slow" is then a diff of two log lines.
+            logger.info(
+                "[DIB APPLY CHECK] "
+                f"will_restore_cpu_freqs={len(self.saved_cpu_freqs)} "
+                f"governors={len(self.saved_cpu_governors)} epp={len(self.saved_cpu_epp)} "
+                f"policy_boost={len(self.saved_policy_boost)} gpu_dpm={self.saved_gpu_dpm or 'none'} "
+                f"ppt={self.saved_asus_ppt or 'none'} fan_boost={self.saved_fan_boost or 'none'} "
+                f"boost={self.saved_cpu_boost} platform_profile={self.saved_platform_profile} "
+                f"asus_thermal={self.saved_asus_thermal} ryzenadj={self.saved_ryzenadj or 'none'} "
+                f"quota={self.saved_cpu_quota or 'none'} marks={len(self.applied_marks)}"
+            )
 
         # 7. Exclusive Gamepad & Button Lockout (EVIOCGRAB on all controllers)
         # Prevents any button, trigger, joystick, or touch from waking the display or triggering menus!
@@ -3073,13 +3148,21 @@ class Plugin:
         self.power_saving_applied = False
         self.standby_mode = False
 
+        # What every path must read back as, captured before the stages start emptying
+        # the saved values, so the result can be checked instead of assumed.
+        targets = self._restore_targets_snapshot()
+
+        # The platform profile and the power limits go back BEFORE the clocks. Changing
+        # the ACPI profile or the ASUS thermal policy makes the firmware re-apply its own
+        # clock and power ceilings, which silently overwrote the frequencies restored a
+        # moment earlier - the console then sat at its low-power clocks until a reboot.
         stages = (
             ("backlight", self._restore_backlight),
             ("download pacing", self._restore_download_pacing),
             ("steam scheduling", self._heal_steam_scheduling),
+            ("platform profile", self._restore_platform_profile),
             ("apu power limits", self._restore_apu_power_limits),
             ("cpu", self._restore_cpu_settings),
-            ("platform profile", self._restore_platform_profile),
             ("gpu", self._restore_gpu_settings),
             ("audio", self._restore_audio),
             ("leds", self._restore_leds),
@@ -3094,13 +3177,80 @@ class Plugin:
                 failed.append(label)
                 logger.error(f"Restore stage '{label}' FAILED: {e}")
 
+        stubborn = self._converge_restore(targets)
         forced = self._verify_and_force_restore()
-        if failed or forced:
+        if failed or forced or stubborn:
             logger.warning(
-                f"Restore finished with problems. failed_stages={failed or 'none'} forced_fixes={forced or 'none'}"
+                f"Restore finished with problems. failed_stages={failed or 'none'} "
+                f"did_not_stick={stubborn or 'none'} forced_fixes={forced or 'none'}"
             )
         else:
-            logger.info("Restore complete; everything verified back to normal.")
+            logger.info(f"Restore complete; {len(targets)} values verified back to normal.")
+
+    def _restore_targets_snapshot(self) -> Dict[str, str]:
+        """Every path the restore is about to write, with the value it must end up at."""
+        targets: Dict[str, str] = {}
+        for store in (
+            self.saved_cpu_freqs, self.saved_cpu_governors, self.saved_cpu_epp,
+            self.saved_policy_boost, self.saved_gpu_dpm, self.saved_asus_ppt,
+            self.saved_fan_boost,
+        ):
+            targets.update(store)
+        if self.saved_cpu_boost is not None:
+            targets["/sys/devices/system/cpu/cpufreq/boost"] = self.saved_cpu_boost
+        if self.saved_platform_profile:
+            targets["/sys/firmware/acpi/platform_profile"] = self.saved_platform_profile
+        if self.saved_asus_thermal:
+            for path in (
+                "/sys/devices/platform/asus-nb-wmi/throttle_thermal_policy",
+                "/sys/devices/platform/asus_wmi/throttle_thermal_policy",
+            ):
+                if os.path.exists(path):
+                    targets[path] = self.saved_asus_thermal
+        return targets
+
+    def _converge_restore(self, targets: Dict[str, str]) -> List[str]:
+        """
+        Writes again whatever did not stick, until it does, and reports what never did.
+
+        One pass is not enough on these platforms. A value can be refused, clamped, or
+        overwritten moments later by firmware reacting to another write (an ACPI profile
+        change re-applying its own limits is the usual one). Rather than hard-code the
+        right order for every device, the restore is re-read and re-applied until the
+        machine stops disagreeing - which also catches whatever device comes next.
+        """
+        if not targets:
+            return []
+
+        def mismatches() -> List[Tuple[str, str, str]]:
+            out: List[Tuple[str, str, str]] = []
+            for path, want in targets.items():
+                if not os.path.exists(path):
+                    continue
+                try:
+                    with open(path, "r") as f:
+                        have = f.read().strip()
+                except Exception:
+                    continue
+                if have != want:
+                    out.append((path, have, want))
+            return out
+
+        for attempt in range(3):
+            pending = mismatches()
+            if not pending:
+                return []
+            logger.info(
+                f"Restore pass {attempt + 2}: {len(pending)} value(s) did not stick, writing again."
+            )
+            for path, _have, want in pending:
+                self._write_sysfs(path, want)
+            time.sleep(0.2)
+
+        remaining = [f"{path} is '{have}', wanted '{want}'" for path, have, want in mismatches()]
+        if remaining:
+            logger.error(f"Restore could not put these back after 3 extra passes: {remaining}")
+        return remaining
 
     def _restore_backlight(self):
         # Restore the backlight FIRST, so pressing power lights the screen up at once
@@ -3299,6 +3449,38 @@ class Plugin:
         from the saved values, or from the on-disk state file after a crash.
         """
         forced: List[str] = []
+
+        # 0. Anything still holding exactly the value this plugin wrote, with no original
+        # left to put it back from: the saved values were lost (a crash, a plugin reload
+        # mid-session) or something overwrote them. Only paths with a safe, known-good
+        # fallback are forced. The scaling governor is not one of them: 'powersave' is
+        # the normal amd-pstate default, so forcing it would fight the system.
+        fallbacks = {
+            "power_dpm_force_performance_level": "auto",
+            "boost": "1",
+            "energy_performance_preference": "balance_performance",
+            "platform_profile": "balanced",
+        }
+        for path, mark in list(self.applied_marks.items()):
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r") as f:
+                    have = f.read().strip()
+            except Exception:
+                continue
+            if have != mark:
+                continue  # Already back to something else, so not ours any more
+            base = os.path.basename(path)
+            if base == "scaling_max_freq":
+                ceiling = self._read_attr(os.path.dirname(path), "cpuinfo_max_freq")
+                if ceiling and ceiling != mark and self._write_sysfs(path, ceiling):
+                    forced.append(f"{path} was still capped at {mark}, raised to {ceiling}")
+                continue
+            fallback = fallbacks.get(base)
+            if fallback and fallback != mark and self._write_sysfs(path, fallback):
+                forced.append(f"{path} was still at {mark}, set to {fallback}")
+        self.applied_marks.clear()
 
         # 1. The cgroup CPU quota: a leftover here throttles Steam until reboot.
         if self.last_cpu_quota_path and os.path.exists(self.last_cpu_quota_path):
