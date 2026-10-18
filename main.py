@@ -847,7 +847,7 @@ class Plugin:
     # ==========================================
     # Suspend Interception & Logind Watcher
     # ==========================================
-    def _trigger_suspend_intercepted(self) -> str:
+    def _trigger_suspend_intercepted(self, source: str = "unknown") -> str:
         """
         Called whenever a suspend attempt is detected while downloads are active.
 
@@ -884,10 +884,13 @@ class Plugin:
                 if now - self.last_suspend_intercept_time < 3.0:
                     return "ignored"
                 self.last_suspend_intercept_time = now
-                logger.info("Sleep requested with standby enabled -> standby splash, then entering.")
+                logger.info(
+                    f"[DIB SLEEP SOURCE] Sleep requested from '{source}' with standby enabled "
+                    "-> standby splash, then entering."
+                )
                 if self.loop and self.loop.is_running():
                     asyncio.run_coroutine_threadsafe(
-                        self.request_standby("standby_sleep_request"), self.loop
+                        self.request_standby(f"standby_{source}"), self.loop
                     )
                 return "standby"
             logger.info("Suspend attempt not intercepted: Download is paused or idle. Allowing normal suspend.")
@@ -900,7 +903,7 @@ class Plugin:
             return "ignored"
         self.last_suspend_intercept_time = now
 
-        logger.info("Suspend attempt intercepted while downloading -> Showing HUD!")
+        logger.info(f"[DIB SLEEP SOURCE] Suspend attempt from '{source}' intercepted while downloading -> Showing HUD!")
         self._acquire_sleep_inhibitor()
 
         if self.loop and self.loop.is_running():
@@ -956,7 +959,7 @@ class Plugin:
         suspend over to SteamOS after the fact: when this says 'allow', the Steam power
         menu's Sleep has to go through as usual.
         """
-        verdict = self._trigger_suspend_intercepted()
+        verdict = self._trigger_suspend_intercepted("frontend_hook")
         return {
             "verdict": verdict,
             "intercepted": verdict in ("hud", "standby", "wake"),
@@ -1060,7 +1063,7 @@ class Plugin:
                             continue
 
                         if self._is_active_download():
-                            self._trigger_suspend_intercepted()
+                            self._trigger_suspend_intercepted("logind_journal")
                         else:
                             # Nothing to protect: let SteamOS suspend exactly as it normally would.
                             self._update_inhibitor_state()
@@ -1347,7 +1350,7 @@ class Plugin:
             is_active_dl = self.detector.get_network_rx_rate() > 300000
 
         if is_active_dl:
-            self._trigger_suspend_intercepted()
+            self._trigger_suspend_intercepted("power_button")
             return
 
         if self.settings.get("standby_on_power_off", False):

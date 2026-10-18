@@ -626,34 +626,355 @@ const clearRecoveryTimers = () => {
     sharedRecoveryTimers = [];
 };
 /**
- * Whether the middle of the screen is covered by an empty, opaque black box that is not
- * the plugin's own overlay.
+ * The window the interface is actually drawn in.
  *
- * Deliberately strict: it must fill the viewport, have no children and no text. A real
- * view - the library, a game, a menu - fails at least one of those, so a false positive
- * cannot trigger the recovery below. Something that simply stopped repainting fails it
- * too, which is why the probe is logged alongside.
+ * A plugin's own module scope lives in Steam's SharedJSContext, which is a hidden 1x1
+ * window - measuring `window` from here reports a viewport of 1x1 and a 2x2 document,
+ * which is what the console's log finally showed. The global component Decky mounts is
+ * rendered into the real interface window, so that is where a DOM reference to it points,
+ * and that is the only window worth looking at.
  */
-const screenLooksBlank = () => {
+let sharedUiWindow = null;
+const uiWindow = () => sharedUiWindow ?? window;
+const uiDocument = () => (sharedUiWindow ? sharedUiWindow.document : document);
+/**
+ * What is in the middle of the screen, as a comparable string.
+ *
+ * Recorded before the sleep and again after the wake. Comparing the two is a far better
+ * signal than trying to decide whether a colour counts as "black": if the middle of the
+ * screen is the same thing it was before, the interface is where it was and nothing
+ * needs recovering, whatever it looks like.
+ */
+const centerSignature = () => {
     try {
-        const el = document.elementFromPoint(Math.round(window.innerWidth / 2), Math.round(window.innerHeight / 2));
+        const win = uiWindow();
+        const el = uiDocument().elementFromPoint(Math.round(win.innerWidth / 2), Math.round(win.innerHeight / 2));
         if (!el)
-            return true;
+            return "none";
         if (typeof el.closest === "function" && el.closest(".dib-overlay-container"))
-            return false;
-        if ((el.textContent ?? "").trim().length > 0)
-            return false;
-        if (el.children && el.children.length > 0)
-            return false;
-        const rect = el.getBoundingClientRect();
-        if (rect.width < window.innerWidth * 0.9 || rect.height < window.innerHeight * 0.9)
-            return false;
-        const bg = window.getComputedStyle(el).backgroundColor.replace(/\s+/g, "");
-        return bg === "rgb(0,0,0)" || bg === "rgba(0,0,0,1)";
+            return "ours";
+        const parent = el.parentElement;
+        return [
+            el.tagName,
+            String(el.className ?? "").slice(0, 80),
+            parent ? String(parent.className ?? "").slice(0, 80) : "",
+        ].join("|");
     }
     catch (e) {
+        return "error";
+    }
+};
+/** Whether anything at all is readable in the middle of the screen. */
+const centerHasContent = () => {
+    try {
+        const win = uiWindow();
+        const el = uiDocument().elementFromPoint(Math.round(win.innerWidth / 2), Math.round(win.innerHeight / 2));
+        let node = el;
+        for (let depth = 0; node && depth < 4; depth++) {
+            if ((node.textContent ?? "").trim().length > 0)
+                return true;
+            node = node.parentElement;
+        }
         return false;
     }
+    catch (e) {
+        return true; // Unreadable means "do not touch anything"
+    }
+};
+/**
+ * The last signature taken while the interface was known to be healthy.
+ *
+ * Sampled by the status poll rather than at the moment the sleep is taken over: by then
+ * Steam's own click handler may already have blanked its interface, and comparing the
+ * broken state against itself would find nothing wrong.
+ */
+let sharedCenterBeforeSleep = null;
+/**
+ * Takes the plugin's own black overlay off the screen, without going through React.
+ *
+ * This is what the console's log finally caught: after waking, the element covering the
+ * middle of the screen was `dib-overlay-container dib-overlay-blackout` - the plugin's
+ * own blackout, still in the document, at z-index 9999999, while the plugin's state said
+ * it had woken up. The state is what React renders from, so if that component does not
+ * re-render, the black stays on screen for good. The side menus still worked because
+ * Steam drives them with its own input handling, not with DOM events, so they drew on
+ * top of a screen the plugin was blacking out.
+ *
+ * Waking up is not something to leave to a re-render that may never come, so the node is
+ * hidden directly as well. Hidden rather than removed: removing a node React still owns
+ * makes React throw the next time it touches it.
+ */
+const forceHideOverlayDom = () => {
+    let hidden = 0;
+    const docs = [];
+    try {
+        docs.push(uiDocument());
+    }
+    catch (e) { }
+    try {
+        if (!docs.includes(document))
+            docs.push(document);
+    }
+    catch (e) { }
+    for (const doc of docs) {
+        try {
+            const nodes = doc?.querySelectorAll?.(".dib-overlay-container");
+            if (!nodes)
+                continue;
+            Array.prototype.forEach.call(nodes, (node) => {
+                node.style.display = "none";
+                node.style.pointerEvents = "none";
+                hidden += 1;
+            });
+        }
+        catch (e) { }
+    }
+    if (hidden) {
+        console.warn(`[DownloadInBackground] Overlay was still in the DOM on wake; hid ${hidden} node(s).`);
+    }
+    return hidden;
+};
+/** Undoes the above, so the overlay can be shown again next time. */
+const clearOverlayDomOverrides = () => {
+    const docs = [];
+    try {
+        docs.push(uiDocument());
+    }
+    catch (e) { }
+    try {
+        if (!docs.includes(document))
+            docs.push(document);
+    }
+    catch (e) { }
+    for (const doc of docs) {
+        try {
+            const nodes = doc?.querySelectorAll?.(".dib-overlay-container");
+            if (!nodes)
+                continue;
+            Array.prototype.forEach.call(nodes, (node) => {
+                node.style.display = "";
+                node.style.pointerEvents = "";
+            });
+        }
+        catch (e) { }
+    }
+};
+/**
+ * Catches "Sleep" in the SteamOS power menu before Steam's own handler runs.
+ *
+ * This is the whole point: the power button works because Steam never finds out about
+ * it, so there is nothing for Steam to do to its interface and nothing to put back.
+ * Catching the methods Steam calls at the END of its sleep handler is too late - by then
+ * it has already done whatever leaves the screen black. Catching the activation of the
+ * menu item itself, in the capture phase, means Steam's handler never runs at all and
+ * the two paths become the same path.
+ *
+ * Identified by the item's own text, so it works whatever Steam calls its internals this
+ * week. Only ever armed when the plugin would take the sleep over anyway, so when it is
+ * off or idle the menu behaves exactly as it always has.
+ */
+const SLEEP_LABELS = new Set([
+    "sleep", "suspend", "suspender", "suspensao", "modo de suspensao", "dormir",
+    "reposo", "suspender equipo", "ruhezustand", "energie sparen", "standby",
+    "veille", "mettre en veille", "mise en veille", "sospendi", "sospensione",
+    "slaapstand", "vilolage", "vilolage", "hvile", "dvale", "lepotila", "viloläge",
+    "uyku", "uspij", "uspienie", "spiaci rezim", "rezim spanku",
+    "спящий режим", "сон", "スリープ", "睡眠", "절전", "휴면",
+]);
+const normalizeLabel = (text) => text
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+let menuGuardWindow = null;
+let menuGuardHandler = null;
+let lastMenuInterception = 0;
+let activationsLogged = 0;
+/** The menu row under this event, if its text says it is the sleep entry. */
+const sleepItemFromEvent = (target) => {
+    let node = target;
+    for (let depth = 0; node && depth < 5; depth++) {
+        try {
+            const label = normalizeLabel(String(node.textContent ?? ""));
+            if (label && label.length <= 40 && SLEEP_LABELS.has(label)) {
+                const rect = node.getBoundingClientRect?.();
+                const win = uiWindow();
+                // A menu row, not a whole page that happens to contain the word.
+                if (!rect || (rect.height <= 200 && rect.width <= win.innerWidth * 0.7)) {
+                    return { el: node, label };
+                }
+            }
+        }
+        catch (e) { }
+        node = node.parentElement;
+    }
+    return null;
+};
+/** Does exactly what the physical power button does, through the same backend call. */
+const takeOverSleepFromMenu = (label) => {
+    lastMenuInterception = Date.now();
+    // Steam's handler never ran, so its interface was never touched and there is nothing
+    // to recover afterwards - the same situation as a press of the power button.
+    sharedUiInitiatedSleep = false;
+    sharedRouteBeforeTakeover = null;
+    clearTakeover();
+    closeSteamSideMenus();
+    call("log_debug", { kind: "menu_sleep_intercepted", label }).catch(() => { });
+    call("request_standby", "standby_power_menu").catch((e) => console.error("[DownloadInBackground] request_standby failed:", e));
+};
+const installMenuItemGuard = (win) => {
+    if (!win || win === menuGuardWindow)
+        return;
+    removeMenuItemGuard();
+    menuGuardHandler = (e) => {
+        try {
+            if (e.type === "keydown" && e.key !== "Enter" && e.key !== " ")
+                return;
+            if (!sharedSettings.enabled)
+                return;
+            if (sharedIsBackgroundMode || sharedShowSplash || sharedShowHud)
+                return;
+            if (Date.now() < sharedWakeCooldownUntil)
+                return;
+            if (Date.now() - lastMenuInterception < 2000)
+                return;
+            if (Date.now() < sharedRealSuspendUntil)
+                return;
+            // Only when the plugin would take this sleep over anyway.
+            const downloading = sharedDownloadInfo.is_downloading && !sharedDownloadInfo.is_paused;
+            if (!downloading && !sharedSettings.standby_on_power_off)
+                return;
+            const hit = sleepItemFromEvent(e.target);
+            if (!hit) {
+                if (activationsLogged < 25 && sharedSettings.debug_logging !== false) {
+                    activationsLogged += 1;
+                    const t = String(e.target?.textContent ?? "").slice(0, 60);
+                    call("log_debug", {
+                        kind: "activation_seen",
+                        event: e.type,
+                        text: t,
+                        cls: String(e.target?.className ?? "").slice(0, 80),
+                    }).catch(() => { });
+                }
+                return;
+            }
+            console.log(`[DownloadInBackground] Power menu "${hit.label}" caught before Steam saw it.`);
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            takeOverSleepFromMenu(hit.label);
+        }
+        catch (err) {
+            console.error("[DownloadInBackground] Menu guard failed:", err);
+        }
+    };
+    ["pointerdown", "click", "keydown"].forEach((type) => {
+        try {
+            win.addEventListener(type, menuGuardHandler, true);
+        }
+        catch (e) { }
+    });
+    menuGuardWindow = win;
+    console.log("[DownloadInBackground] Power menu guard installed on the interface window.");
+};
+const removeMenuItemGuard = () => {
+    if (!menuGuardWindow || !menuGuardHandler)
+        return;
+    ["pointerdown", "click", "keydown"].forEach((type) => {
+        try {
+            menuGuardWindow.removeEventListener(type, menuGuardHandler, true);
+        }
+        catch (e) { }
+    });
+    menuGuardWindow = null;
+    menuGuardHandler = null;
+};
+/** How many of the plugin's overlay nodes are in the document right now. */
+const overlayNodesInDom = () => {
+    try {
+        return uiDocument()?.querySelectorAll?.(".dib-overlay-container")?.length ?? 0;
+    }
+    catch (e) {
+        return 0;
+    }
+};
+const sampleHealthyCenter = () => {
+    if (sharedIsBackgroundMode || sharedShowSplash || sharedShowHud)
+        return;
+    const sig = centerSignature();
+    if (sig === "ours" || sig === "none" || sig === "error")
+        return;
+    sharedCenterBeforeSleep = sig;
+};
+/**
+ * Tells the Steam client its suspend was called off, if it has a way to be told.
+ *
+ * Returning false from the suspend-request callback stops the suspend, but it does not
+ * appear to walk Steam's own interface back out of the state it entered when it decided
+ * to sleep - which is why a sleep started from the power menu comes back to a blank
+ * screen while the power button, which Steam never hears about, comes back clean.
+ *
+ * Which method does that is not documented and differs between Steam builds, so this
+ * looks for one whose name can only mean that, calls it, and records what it found. A
+ * name has to mention cancelling or aborting AND suspending or sleeping to be called.
+ */
+const cancelSteamSuspendFlow = (request) => {
+    const called = [];
+    const tried = [];
+    const wanted = /^(?=.*(cancel|abort))(?=.*(suspend|sleep)).*$/i;
+    const methodNames = (obj) => {
+        if (!obj)
+            return [];
+        try {
+            const proto = Object.getPrototypeOf(obj);
+            return Array.from(new Set([...Object.keys(obj), ...(proto ? Object.getOwnPropertyNames(proto) : [])]));
+        }
+        catch (e) {
+            return [];
+        }
+    };
+    // 1. The request object the callback is handed, if this build hands one over. A
+    // cancel on the request itself is the most likely intended way to refuse.
+    if (request && typeof request === "object") {
+        for (const name of methodNames(request)) {
+            if (typeof request[name] !== "function")
+                continue;
+            tried.push(`request.${name}`);
+            if (!/^(cancel|abort|block|deny|reject|veto)/i.test(name))
+                continue;
+            try {
+                request[name]();
+                called.push(`request.${name}`);
+            }
+            catch (e) { }
+        }
+    }
+    // 2. A client-level "the suspend was cancelled" call.
+    const sc = window.SteamClient;
+    for (const group of ["System", "User", "UI"]) {
+        for (const name of methodNames(sc?.[group])) {
+            if (!wanted.test(name) || typeof sc[group][name] !== "function")
+                continue;
+            try {
+                sc[group][name]();
+                called.push(`${group}.${name}`);
+            }
+            catch (e) { }
+        }
+    }
+    call("log_debug", {
+        kind: "suspend_cancel_attempt",
+        called,
+        request_type: typeof request,
+        request_members: request && typeof request === "object" ? tried : null,
+        system: methodNames(sc?.System).filter((n) => /susp|sleep|resume|power/i.test(n)),
+        user: methodNames(sc?.User).filter((n) => /susp|sleep|resume|power/i.test(n)),
+        ui: methodNames(sc?.UI).filter((n) => /susp|sleep|resume|power|mode/i.test(n)),
+    }).catch(() => { });
+    if (called.length) {
+        console.log(`[DownloadInBackground] Told Steam its suspend was cancelled via: ${called.join(", ")}`);
+    }
+    return called;
 };
 /**
  * Gets the Steam interface back after a sleep it started itself.
@@ -671,13 +992,24 @@ const recoverSteamUi = () => {
         sharedUiInitiatedSleep = false;
         return;
     }
+    const before = sharedCenterBeforeSleep;
     sharedRecoveryTimers.push(setTimeout(() => {
-        if (sharedIsBackgroundMode || !screenLooksBlank()) {
+        // Our own overlay first: it is the cheapest and most precise thing to rule out,
+        // and it was the actual cause of the black screen all along.
+        if (overlayNodesInDom() > 0 && forceHideOverlayDom() > 0) {
+            call("log_debug", { kind: "ui_recovery", step: "hid_stale_overlay" }).catch(() => { });
+        }
+        const after = centerSignature();
+        // Unchanged middle of the screen means the interface is where it was.
+        if (sharedIsBackgroundMode || (before && after === before)) {
             sharedUiInitiatedSleep = false;
             return;
         }
-        console.warn("[DownloadInBackground] Screen still blank after waking -> navigating home.");
-        call("log_debug", { kind: "ui_recovery", step: "navigate_home" }).catch(() => { });
+        console.warn(`[DownloadInBackground] Screen changed across the sleep (${before} -> ${after}) -> navigating home.`);
+        call("log_debug", {
+            kind: "ui_recovery", step: "navigate_home", before, after,
+            has_content: centerHasContent(),
+        }).catch(() => { });
         try {
             const nav = DFL.Navigation;
             if (typeof nav.NavigateToLibraryTab === "function")
@@ -690,13 +1022,28 @@ const recoverSteamUi = () => {
         }
         sharedRecoveryTimers.push(setTimeout(() => {
             sharedUiInitiatedSleep = false;
-            if (sharedIsBackgroundMode || !screenLooksBlank())
+            sharedCenterBeforeSleep = null;
+            // The last resort needs two independent reasons to believe the interface is
+            // broken: the middle of the screen is not what it was, AND there is nothing
+            // readable there. A view that merely moved on still has content in it.
+            if (sharedIsBackgroundMode)
                 return;
+            const after = centerSignature();
+            if (before && after === before)
+                return;
+            if (centerHasContent()) {
+                call("log_debug", {
+                    kind: "ui_recovery", step: "skipped_reload", before, after, reason: "screen has content",
+                }).catch(() => { });
+                return;
+            }
             const restart = window.SteamClient?.Browser?.RestartJSContext;
-            console.warn("[DownloadInBackground] Screen STILL blank -> reloading the Steam UI.");
+            console.warn("[DownloadInBackground] Screen STILL empty -> reloading the Steam UI.");
             call("log_debug", {
                 kind: "ui_recovery",
                 step: "restart_js_context",
+                before,
+                after,
                 available: typeof restart === "function",
             }).catch(() => { });
             if (typeof restart !== "function")
@@ -753,13 +1100,15 @@ const probeWakeScreen = (reason) => {
     }
     try {
         const points = [[0.5, 0.5], [0.5, 0.2], [0.5, 0.8]];
+        const win = uiWindow();
+        const doc = uiDocument();
         const samples = points.map(([fx, fy]) => {
-            const x = Math.round(window.innerWidth * fx);
-            const y = Math.round(window.innerHeight * fy);
+            const x = Math.round(win.innerWidth * fx);
+            const y = Math.round(win.innerHeight * fy);
             const chain = [];
-            let node = document.elementFromPoint(x, y);
+            let node = doc.elementFromPoint(x, y);
             for (let depth = 0; node && depth < 5; depth++) {
-                const cs = window.getComputedStyle(node);
+                const cs = win.getComputedStyle(node);
                 const rect = node.getBoundingClientRect();
                 chain.push({
                     tag: node.tagName,
@@ -781,9 +1130,11 @@ const probeWakeScreen = (reason) => {
             reason,
             route: currentUiRoute(),
             route_at_takeover: sharedRouteBeforeTakeover,
-            visibility: document.visibilityState,
-            hidden: document.hidden,
-            viewport: [window.innerWidth, window.innerHeight],
+            visibility: doc.visibilityState,
+            hidden: doc.hidden,
+            viewport: [win.innerWidth, win.innerHeight],
+            ui_window: sharedUiWindow ? "interface" : "shared_context_fallback",
+            overlay_in_dom: overlayNodesInDom(),
             overlay_state: {
                 background_mode: sharedIsBackgroundMode,
                 show_hud: sharedShowHud,
@@ -813,17 +1164,33 @@ const clearStandbySplash = () => {
  * could leave state behind that the plugin's own overlay is drawn from.
  */
 const finishWakeUi = (reason) => {
+    const steamWasInvolved = sharedUiInitiatedSleep;
     sharedIsBackgroundMode = false;
     sharedShowHud = false;
     sharedStandbyMode = false;
     sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
     clearStandbySplash();
+    clearTakeover();
+    // If this sleep came from the Steam interface, Steam prepared for a suspend that never
+    // happened. This is the call it would have made itself on a real resume.
+    if (steamWasInvolved) {
+        resumeSteamFromPreparedSuspend();
+    }
     if (sharedHudTimer) {
         clearInterval(sharedHudTimer);
         sharedHudTimer = null;
     }
-    // Unmounts the overlay from the DOM before anything else is attempted.
+    // Unmounts the overlay from the DOM before anything else is attempted...
     notifyStateListeners();
+    // ...and then makes sure it is actually gone, whether or not React obliged. Repeated,
+    // because a component that re-renders late can put it back on screen.
+    forceHideOverlayDom();
+    // Not tracked with the recovery timers on purpose: those are cleared further down.
+    [120, 400, 1200].forEach((delay) => setTimeout(() => {
+        if (!sharedIsBackgroundMode && !sharedShowHud && !sharedShowSplash) {
+            forceHideOverlayDom();
+        }
+    }, delay));
     closeSteamSideMenus();
     // Records what is on screen while it is still wrong, then puts the interface back
     // where it was if Steam's own sleep handler moved it.
@@ -831,7 +1198,7 @@ const finishWakeUi = (reason) => {
     restoreUiRoute();
     // A nudge for anything that stopped repainting while the screen was off.
     try {
-        window.dispatchEvent(new Event("resize"));
+        uiWindow().dispatchEvent(new Event("resize"));
     }
     catch (e) { }
     // Only for a sleep the Steam interface started itself, and only if it is still blank.
@@ -854,6 +1221,7 @@ const triggerEnterStandby = async (reason) => {
     sharedIsBackgroundMode = true;
     sharedStandbyMode = true;
     sharedBackgroundModeEnteredTime = Date.now();
+    clearOverlayDomOverrides(); // The wake hides the overlay node by hand; undo that first
     notifyStateListeners();
     try {
         const success = await call("enter_background_mode", reason);
@@ -888,6 +1256,7 @@ const startStandbySplash = (seconds, reason = "standby_splash") => {
     clearStandbySplash();
     sharedShowHud = false;
     sharedShowSplash = true;
+    clearOverlayDomOverrides();
     notifyStateListeners();
     sharedSplashTimer = setTimeout(() => {
         sharedSplashTimer = null;
@@ -931,6 +1300,7 @@ const triggerEnterBlackout = async (reason = "countdown_completed") => {
     sharedShowHud = false;
     sharedIsBackgroundMode = true;
     sharedBackgroundModeEnteredTime = Date.now();
+    clearOverlayDomOverrides();
     notifyStateListeners();
     try {
         const success = await call("enter_background_mode", reason);
@@ -962,6 +1332,7 @@ const startHudCountdown = (customTimeout) => {
     sharedCountdown = timeoutSec;
     sharedShowHud = true;
     sharedIsBackgroundMode = false;
+    clearOverlayDomOverrides();
     notifyStateListeners();
     let remaining = timeoutSec;
     sharedHudTimer = setInterval(() => {
@@ -991,13 +1362,55 @@ const startHudCountdown = (customTimeout) => {
  * and SteamOS suspends exactly as it does without this plugin.
  */
 const SUSPEND_METHODS = [
+    // The one that actually puts the console to sleep.
     ["System", "SuspendPC"],
     ["System", "Suspend"],
+    // And the one that runs FIRST. This is what the console's log finally showed: the
+    // power menu calls User.PrepareForSystemSuspend() before SuspendPC(), and that call is
+    // where Steam suspends the running games and moves its interface into its sleeping
+    // state. Swallowing only SuspendPC stopped the suspend but left Steam prepared for one
+    // that never happened, with nothing to undo it - the interface came back half dead.
+    // The power button never goes through any of this, which is why it always came back clean.
+    ["User", "PrepareForSystemSuspend"],
     ["User", "StartSuspend"],
     ["User", "SuspendPC"],
 ];
 let suspendHooks = [];
 let suspendPassThrough = false;
+let sharedTakeover = null;
+/** A real suspend the plugin itself asked for: every hook gets out of the way. */
+let sharedRealSuspendUntil = 0;
+const clearTakeover = () => {
+    sharedTakeover = null;
+};
+const activeTakeover = () => {
+    if (sharedTakeover && Date.now() > sharedTakeover.expires) {
+        // A decision that never came back must never swallow sleeps forever.
+        console.warn("[DownloadInBackground] Sleep decision timed out; forgetting it.");
+        sharedTakeover = null;
+    }
+    return sharedTakeover;
+};
+/**
+ * Undoes Steam's own preparation for a sleep that is not going to happen.
+ *
+ * ResumeSuspendedGames is the exact counterpart of PrepareForSystemSuspend, and it is
+ * what Steam itself calls on a real resume. Harmless when nothing was suspended.
+ */
+const resumeSteamFromPreparedSuspend = () => {
+    const user = window.SteamClient?.User;
+    if (typeof user?.ResumeSuspendedGames !== "function")
+        return false;
+    try {
+        user.ResumeSuspendedGames();
+        console.log("[DownloadInBackground] Called User.ResumeSuspendedGames() to undo Steam's sleep preparation.");
+        return true;
+    }
+    catch (e) {
+        console.warn("[DownloadInBackground] ResumeSuspendedGames failed:", e);
+        return false;
+    }
+};
 /**
  * Calls the real Steam method. The flag covers the case of one suspend entry point
  * calling another one that is also wrapped, which would otherwise loop back in here.
@@ -1014,8 +1427,23 @@ const callOriginalSuspend = (hook, args) => {
     }
 };
 const handleMenuSuspend = (hook, args) => {
-    // Our own pass-through, or the plugin is off: stock behaviour.
-    if (suspendPassThrough || !sharedSettings.enabled) {
+    // Logged on every single call, before any decision. Whether these hooks fire at all
+    // for a sleep chosen in the power menu is the one thing the log could never answer,
+    // and it decides where the fix has to go: if nothing appears here, the sleep is not
+    // going through the Steam client methods this plugin wraps.
+    call("log_debug", {
+        kind: "sleep_hook_fired",
+        method: hook.name,
+        pass_through: suspendPassThrough,
+        enabled: sharedSettings.enabled,
+        in_background: sharedIsBackgroundMode,
+        takeover: sharedTakeover?.state ?? null,
+        standby: sharedSettings.standby_on_power_off,
+        downloading: sharedDownloadInfo.is_downloading,
+        paused: sharedDownloadInfo.is_paused,
+    }).catch(() => { });
+    // Our own pass-through, a real suspend the plugin asked for, or the plugin is off.
+    if (suspendPassThrough || !sharedSettings.enabled || Date.now() < sharedRealSuspendUntil) {
         return callOriginalSuspend(hook, args);
     }
     // Our screen is already up: a sleep request now is the way out of it, not a new one.
@@ -1026,6 +1454,19 @@ const handleMenuSuspend = (hook, args) => {
             triggerFullWake("menu_suspend_wake");
         }
         return Promise.resolve();
+    }
+    // One sleep, several calls: prepare and suspend both land here, and they must not be
+    // decided on separately.
+    const pending = activeTakeover();
+    if (pending) {
+        if (pending.state === "deciding") {
+            pending.held.push({ hook, args });
+            return Promise.resolve();
+        }
+        if (pending.state === "ours") {
+            return Promise.resolve();
+        }
+        return callOriginalSuspend(hook, args);
     }
     // The splash or the HUD is already counting down into our mode, or the console only
     // just woke up: swallow it either way.
@@ -1038,12 +1479,19 @@ const handleMenuSuspend = (hook, args) => {
     if (looksIdle && !sharedSettings.standby_on_power_off) {
         return callOriginalSuspend(hook, args);
     }
+    // Taking this sleep over. Everything Steam asks for from here on is held until the
+    // answer comes back, so the preparation never runs behind our back.
+    sharedTakeover = { state: "deciding", held: [{ hook, args }], expires: Date.now() + 15000 };
     // Remember where the interface was, and dismiss the power menu that is still open.
     // Steam's own suspend flow would have taken it down; the power-button path, which
     // comes back clean, never has a menu open in the first place.
     sharedRouteBeforeTakeover = currentUiRoute();
     sharedUiInitiatedSleep = true;
     closeSteamSideMenus();
+    // If Steam already prepared for the sleep before calling us, undo that preparation:
+    // nothing else ever will, because the suspend it was preparing for is not happening.
+    cancelSteamSuspendFlow();
+    resumeSteamFromPreparedSuspend();
     // The backend decides, on state it re-reads right now rather than on the last poll,
     // and starts the standby splash itself when standby is what takes over.
     console.log(`[DownloadInBackground] Power menu sleep (${hook.name}) -> asking the backend.`);
@@ -1051,21 +1499,39 @@ const handleMenuSuspend = (hook, args) => {
         .then((res) => {
         const verdict = String(res?.verdict ?? "");
         console.log(`[DownloadInBackground] Power menu sleep verdict: ${verdict}`);
-        if (verdict === "hud") {
-            startHudCountdown(sharedSettings.hud_timeout_seconds ?? 5);
+        if (verdict === "allow") {
+            releaseHeldSleep();
         }
-        else if (verdict === "allow") {
-            // Not ours after all (a download paused moments ago): hand the sleep back, and
-            // forget the route, since SteamOS is about to suspend for real.
-            sharedRouteBeforeTakeover = null;
-            callOriginalSuspend(hook, args);
+        else {
+            // Only long enough to cover the follow-up calls of this same sleep. Any longer
+            // and a second attempt - after cancelling the countdown, say - would be
+            // swallowed in silence instead of being decided on again.
+            if (sharedTakeover) {
+                sharedTakeover.state = "ours";
+                sharedTakeover.expires = Date.now() + 3000;
+            }
+            if (verdict === "hud") {
+                startHudCountdown(sharedSettings.hud_timeout_seconds ?? 5);
+            }
         }
     })
         .catch((e) => {
         console.error("[DownloadInBackground] trigger_suspend_intercept failed:", e);
-        callOriginalSuspend(hook, args);
+        releaseHeldSleep();
     });
     return Promise.resolve();
+};
+/**
+ * Not ours after all: let SteamOS have the whole sleep, in the order Steam asked for it,
+ * so the preparation still happens before the suspend.
+ */
+const releaseHeldSleep = () => {
+    const held = sharedTakeover?.held ?? [];
+    sharedTakeover = { state: "none", held: [], expires: Date.now() + 3000 };
+    sharedRouteBeforeTakeover = null;
+    sharedUiInitiatedSleep = false;
+    held.forEach(({ hook, args }) => callOriginalSuspend(hook, args));
+    setTimeout(clearTakeover, 2000);
 };
 const installSuspendMethodHooks = () => {
     const sc = window.SteamClient;
@@ -1125,6 +1591,19 @@ const removeSuspendMethodHooks = () => {
 // Global Overlay Container Component registered in routerHook
 const GlobalOverlayContainer = () => {
     const [, setTick] = SP_REACT.useState(0);
+    const probeRef = SP_REACT.useRef(null);
+    // Rendered in every state, including idle, so the plugin always has a reference into
+    // the window the interface is really drawn in. Without it everything this plugin
+    // measures about the screen describes Steam's hidden 1x1 scratch window instead.
+    SP_REACT.useEffect(() => {
+        const win = probeRef.current?.ownerDocument?.defaultView;
+        if (!win)
+            return;
+        if (!sharedUiWindow || (win.innerWidth ?? 0) > (sharedUiWindow.innerWidth ?? 0)) {
+            sharedUiWindow = win;
+        }
+        installMenuItemGuard(sharedUiWindow);
+    });
     SP_REACT.useEffect(() => {
         const update = () => setTick((t) => t + 1);
         stateListeners.add(update);
@@ -1155,9 +1634,9 @@ const GlobalOverlayContainer = () => {
     // CRITICAL: If NOT in background mode and NOT showing HUD: DO NOT RENDER ANYTHING!
     // This guarantees that once awakened, the black div is 100% UNMOUNTED from the DOM.
     if (!sharedIsBackgroundMode && !sharedShowHud && !sharedShowSplash) {
-        return null;
+        return SP_JSX.jsx("div", { ref: probeRef, style: { display: "none" } });
     }
-    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("style", { children: PLUGIN_STYLES }), SP_JSX.jsx(Overlay, { isBackgroundMode: sharedIsBackgroundMode, showHud: sharedShowHud, showSplash: sharedShowSplash, countdown: sharedCountdown, downloadInfo: sharedDownloadInfo, settings: sharedSettings, batteryCapacity: sharedBatteryCapacity, isCharging: sharedIsCharging, onWake: () => triggerFullWake("overlay_wake"), onEnterBlackout: () => triggerEnterBlackout("manual_screen_off") })] }));
+    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("div", { ref: probeRef, style: { display: "none" } }), SP_JSX.jsx("style", { children: PLUGIN_STYLES }), SP_JSX.jsx(Overlay, { isBackgroundMode: sharedIsBackgroundMode, showHud: sharedShowHud, showSplash: sharedShowSplash, countdown: sharedCountdown, downloadInfo: sharedDownloadInfo, settings: sharedSettings, batteryCapacity: sharedBatteryCapacity, isCharging: sharedIsCharging, onWake: () => triggerFullWake("overlay_wake"), onEnterBlackout: () => triggerEnterBlackout("manual_screen_off") })] }));
 };
 // Plugin Quick Access Menu Content
 const PluginContent = () => {
@@ -1264,6 +1743,9 @@ var index = definePlugin(() => {
     // Critical battery auto-suspend notification
     try {
         batteryCriticalUnregister = addEventListener("battery_critical_suspend", (data) => {
+            // A suspend the plugin itself asked for: Steam must be allowed to prepare for it.
+            sharedRealSuspendUntil = Date.now() + 60000;
+            clearTakeover();
             toaster.toast({
                 title: "Download in Background",
                 body: `Battery reached ${data?.capacity ?? 15}%. Entering sleep now.`,
@@ -1276,6 +1758,9 @@ var index = definePlugin(() => {
     // Downloads completed notification
     try {
         downloadsCompletedUnregister = addEventListener("downloads_completed_suspend", () => {
+            // Also a real suspend: let Steam suspend its games properly on the way down.
+            sharedRealSuspendUntil = Date.now() + 60000;
+            clearTakeover();
             toaster.toast({
                 title: "Download in Background",
                 body: "All downloads completed! Suspending console.",
@@ -1301,6 +1786,9 @@ var index = definePlugin(() => {
                 else {
                     sharedIsBackgroundMode = backendIsBg;
                 }
+                // Keep a picture of the interface while it is still working, for the recovery
+                // check after a wake.
+                sampleHealthyCenter();
                 sharedStandbyMode = Boolean(status.standby_mode);
                 sharedBatteryCapacity = Number(status.battery_capacity ?? 100);
                 sharedIsCharging = Boolean(status.is_charging);
@@ -1457,8 +1945,15 @@ var index = definePlugin(() => {
     // Hook Steam Client Suspend Request if available
     try {
         if (window.SteamClient?.System?.RegisterForOnSuspendRequest) {
-            const reg = window.SteamClient.System.RegisterForOnSuspendRequest(async () => {
-                console.log("[DownloadInBackground] SteamClient Suspend Request event received!");
+            const reg = window.SteamClient.System.RegisterForOnSuspendRequest(async (request) => {
+                console.log("[DownloadInBackground] SteamClient Suspend Request event received!", request);
+                call("log_debug", {
+                    kind: "suspend_request_fired",
+                    in_background: sharedIsBackgroundMode,
+                    enabled: sharedSettings.enabled,
+                    standby: sharedSettings.standby_on_power_off,
+                    request_type: typeof request,
+                }).catch(() => { });
                 const now = Date.now();
                 // 1. If currently in background mode, this suspend request is actually a WAKE request from the Power Button!
                 if (sharedIsBackgroundMode) {
@@ -1502,6 +1997,8 @@ var index = definePlugin(() => {
                     // Steam asked, so Steam may already have touched its own interface.
                     sharedRouteBeforeTakeover = currentUiRoute();
                     sharedUiInitiatedSleep = true;
+                    cancelSteamSuspendFlow(request);
+                    resumeSteamFromPreparedSuspend();
                     startStandbySplash(sharedSettings.hud_timeout_seconds ?? 5, "standby_sleep_request");
                     return false;
                 }
@@ -1520,6 +2017,8 @@ var index = definePlugin(() => {
                     }
                     sharedRouteBeforeTakeover = currentUiRoute();
                     sharedUiInitiatedSleep = true;
+                    cancelSteamSuspendFlow(request);
+                    resumeSteamFromPreparedSuspend();
                     startHudCountdown(sharedSettings.hud_timeout_seconds ?? 5);
                     return false; // Prevent suspend in SteamClient
                 }
@@ -1593,13 +2092,22 @@ var index = definePlugin(() => {
                 return null;
             }
         };
+        // Every namespace, not a filtered slice: the one call that puts Steam's interface
+        // back on screen has to be in here somewhere, and guessing at names has not worked.
+        const namespaces = {};
+        for (const name of keysOf(sc) ?? []) {
+            try {
+                const value = sc[name];
+                if (value && typeof value === "object") {
+                    namespaces[name] = keysOf(value);
+                }
+            }
+            catch (e) { }
+        }
         call("log_debug", {
             kind: "steamclient_api_surface",
             top_level: keysOf(sc),
-            Downloads: keysOf(sc?.Downloads),
-            Settings: keysOf(sc?.Settings),
-            Input: keysOf(sc?.Input),
-            System: keysOf(sc?.System),
+            namespaces,
             download_overview: safeCall(sc?.Downloads?.GetDownloadOverview?.bind(sc?.Downloads)),
         }).catch(() => { });
     };
@@ -1650,6 +2158,7 @@ var index = definePlugin(() => {
                 suspendHookTimer = null;
             }
             removeSuspendMethodHooks();
+            removeMenuItemGuard();
             if (heartbeatInterval) {
                 clearInterval(heartbeatInterval);
             }
