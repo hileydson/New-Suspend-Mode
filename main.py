@@ -750,7 +750,8 @@ class Plugin:
             fds = []
             grabbed_fds = set()
             for path, name, should_grab in devices:
-                self.power_device_paths.add(path)
+                if should_grab and ("power" in name.lower() or "sleep" in name.lower()):
+                    self.power_device_paths.add(path)
                 try:
                     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
                     if should_grab:
@@ -835,21 +836,14 @@ class Plugin:
             if self.loop and self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(self.trigger_suspend(), self.loop)
 
-    def _is_power_or_sleep_device(self, path: str) -> bool:
-        if path in self.power_device_paths:
-            return True
-        try:
-            with open(path, "rb") as f:
-                buf = bytearray(96)
-                fcntl.ioctl(f.fileno(), 0x80604521, buf)  # EVIOCGBIT(EV_KEY, 96)
-                has_power = bool(buf[14] & (1 << 4))
-                has_sleep = bool(buf[17] & (1 << 6))
-                if has_power or has_sleep:
-                    self.power_device_paths.add(path)
-                    return True
-        except Exception:
-            pass
-        return False
+    def _get_session_user(self) -> str:
+        for uid in [1000, 1001]:
+            try:
+                import pwd
+                return pwd.getpwuid(uid).pw_name
+            except Exception:
+                pass
+        return "deck"
 
     def _grab_all_gamepad_inputs(self):
         """
@@ -861,7 +855,7 @@ class Plugin:
         EVIOCGRAB = 0x40044590
         count = 0
         for path in sorted(glob.glob("/dev/input/event*")):
-            if path in self.grabbed_gamepad_fds or self._is_power_or_sleep_device(path):
+            if path in self.grabbed_gamepad_fds or path in self.power_device_paths:
                 continue
             try:
                 fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
@@ -940,25 +934,41 @@ class Plugin:
     def _set_gamescope_display(self, sleep: bool):
         arg = "1" if sleep else "0"
         bool_arg = "true" if sleep else "false"
+        user = self._get_session_user()
         for uid_dir in glob.glob("/run/user/*"):
             if os.path.basename(uid_dir).isdigit():
                 env = os.environ.copy()
                 env["XDG_RUNTIME_DIR"] = uid_dir
                 for cmd in ["gamescopectl", "/usr/bin/gamescopectl", "/usr/local/bin/gamescopectl"]:
+                    for val in [arg, bool_arg]:
+                        try:
+                            subprocess.run(
+                                [cmd, "drm_sleep_internal_screen", val],
+                                env=env,
+                                check=False,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=1.0,
+                            )
+                            subprocess.run(
+                                ["sudo", "-u", user, "env", f"XDG_RUNTIME_DIR={uid_dir}", cmd, "drm_sleep_internal_screen", val],
+                                check=False,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=1.0,
+                            )
+                        except Exception:
+                            pass
+
+                wlr_cmd = "off" if sleep else "on"
+                for target_out in ["eDP-1", "eDP", "DP-1"]:
                     try:
                         subprocess.run(
-                            [cmd, "drm_sleep_internal_screen", arg],
-                            env=env,
+                            ["sudo", "-u", user, "env", f"XDG_RUNTIME_DIR={uid_dir}", "wlr-randr", "--output", target_out, f"--{wlr_cmd}"],
                             check=False,
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
-                        )
-                        subprocess.run(
-                            [cmd, "drm_sleep_internal_screen", bool_arg],
-                            env=env,
-                            check=False,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
+                            timeout=1.0,
                         )
                     except Exception:
                         pass
@@ -1061,46 +1071,36 @@ class Plugin:
                 except Exception as e:
                     logger.debug(f"powerprofilesctl failed: {e}")
 
-            # D. Dynamic CPU Core Offlining:
-            # Keep cpu0 and cpu1 online for Steam download I/O; offline all other cores (cpu2..cpu15)
-            # This parks secondary cores into deep C6 sleep, eliminating heat and stopping fans!
-            self.offlined_cpus.clear()
-            candidate_online_files = sorted(
-                glob.glob("/sys/devices/system/cpu/cpu[2-9]/online") +
-                glob.glob("/sys/devices/system/cpu/cpu[1-9][0-9]/online")
-            )
-            for online_file in candidate_online_files:
-                try:
-                    with open(online_file, "r") as f:
-                        status = f.read().strip()
-                    if status == "1":
-                        try:
-                            with open(online_file, "w") as f:
-                                f.write("0")
-                            self.offlined_cpus.append(online_file)
-                        except PermissionError:
-                            subprocess.run(["sudo", "sh", "-c", f"echo 0 > '{online_file}'"], check=False)
-                            self.offlined_cpus.append(online_file)
-                except Exception:
-                    pass
-            if self.offlined_cpus:
-                logger.info(f"Offlined {len(self.offlined_cpus)} secondary CPU cores for deep low-power download.")
-
-            # E. Cap max frequency on remaining online cores (cpu0, cpu1)
+            # D. Throttle CPU Frequency to Minimum across ALL cores (keeps all cores online so EC thermal sensors stay valid and calm)
             self.saved_cpu_freqs.clear()
-            for freq_file in glob.glob("/sys/devices/system/cpu/cpu[0-1]/cpufreq/scaling_max_freq"):
+            for freq_file in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq"):
                 try:
                     with open(freq_file, "r") as f:
                         curr_freq = f.read().strip()
                     self.saved_cpu_freqs[freq_file] = curr_freq
+                    # Cap to 1.2 GHz (1200000) - extremely cool, prevents turbo, stops fans
                     with open(freq_file, "w") as f:
-                        f.write("1400000")
+                        f.write("1200000")
+                except Exception:
+                    pass
+            if self.saved_cpu_freqs:
+                logger.info(f"Capped CPU max frequency to 1.2 GHz across {len(self.saved_cpu_freqs)} cores for silent cooling.")
+
+            # E. Set CPU scaling governor to powersave across all cores
+            self.saved_cpu_governors.clear()
+            for gov_file in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"):
+                try:
+                    with open(gov_file, "r") as f:
+                        curr_gov = f.read().strip()
+                    self.saved_cpu_governors[gov_file] = curr_gov
+                    with open(gov_file, "w") as f:
+                        f.write("powersave")
                 except Exception:
                     pass
 
             # F. Set AMD Energy Performance Preference (EPP) to power
-            epp_paths = glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference")
-            for ep in epp_paths:
+            self.saved_cpu_epp.clear()
+            for ep in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference"):
                 try:
                     with open(ep, "r") as f:
                         curr_epp = f.read().strip()
@@ -1223,22 +1223,8 @@ class Plugin:
         except Exception:
             pass
 
-        # 2. Restore CPU Cores & Power Profiles
-        # A. Restore offlined CPU cores
-        for online_file in self.offlined_cpus:
-            try:
-                try:
-                    with open(online_file, "w") as f:
-                        f.write("1")
-                except PermissionError:
-                    subprocess.run(["sudo", "sh", "-c", f"echo 1 > '{online_file}'"], check=False)
-            except Exception:
-                pass
-        if self.offlined_cpus:
-            logger.info(f"Restored {len(self.offlined_cpus)} offlined CPU cores to online state.")
-        self.offlined_cpus.clear()
-
-        # B. Restore CPU max frequencies
+        # 2. Restore CPU Frequencies, Governors & Power Profiles
+        # A. Restore CPU max frequencies
         for freq_file, orig_freq in list(self.saved_cpu_freqs.items()):
             try:
                 if os.path.exists(freq_file):
@@ -1247,6 +1233,16 @@ class Plugin:
             except Exception:
                 pass
         self.saved_cpu_freqs.clear()
+
+        # B. Restore CPU governors
+        for gov_file, orig_gov in list(self.saved_cpu_governors.items()):
+            try:
+                if os.path.exists(gov_file):
+                    with open(gov_file, "w") as f:
+                        f.write(orig_gov)
+            except Exception:
+                pass
+        self.saved_cpu_governors.clear()
 
         # C. Restore ACPI platform profile
         if self.saved_platform_profile and os.path.exists("/sys/firmware/acpi/platform_profile"):
