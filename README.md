@@ -44,6 +44,8 @@ Isso vale tanto para o **botão Power físico** quanto para a opção **Sleep** 
 
 Esse "antes" é o ponto crítico. Bloquear a suspensão mais embaixo — com um inibidor do logind, ou mascarando `sleep.target` — chega tarde: a Steam já iniciou a sequência dela e apagou a tela, a suspensão falha, e a sessão fica **presa numa tela preta acesa** sem como voltar. Por isso nada é mascarado no systemd; se o plugin decidir que não é caso dele agir, o método original é chamado e o SteamOS suspende exatamente como sempre, com a animação dele.
 
+**Na volta**, o plugin desfaz a parte dele (overlay fora do DOM, hardware restaurado) e, se a interface da Steam tiver saído do lugar quando o Sleep foi clicado, **volta a rota de onde ela estava**. Se a Steam não mexeu na interface, nada é navegado. A limpeza da volta é uma função só, usada pelos três caminhos que podem acordar o console (botão, evento do backend e sincronização do poll) — antes era copiada três vezes, e duas das cópias esqueciam de limpar o splash e o estado de standby.
+
 **O que aparece na tela depende de qual recurso está em jogo:**
 
 | Situação | O que o plugin faz |

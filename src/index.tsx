@@ -109,12 +109,137 @@ const closeSteamSideMenus = () => {
   [150, 400, 800, 1400, 2000, 2800, 3600].forEach((delay) => setTimeout(close, delay));
 };
 
+/**
+ * The Steam UI route at the moment the power menu's Sleep was taken over.
+ *
+ * Picking Sleep is a UI action, unlike the power button: the menu is open and Steam's
+ * own click handler may move the interface somewhere (and dim or blank it) before the
+ * suspend call it ends with ever reaches us. If it did, the route is put back on wake;
+ * if it did not, nothing happens, because the route will not have changed.
+ */
+let sharedRouteBeforeTakeover: string | null = null;
+
+const currentUiRoute = (): string | null => {
+  try {
+    return window.location.pathname || null;
+  } catch (e) {
+    return null;
+  }
+};
+
+const restoreUiRoute = () => {
+  const target = sharedRouteBeforeTakeover;
+  sharedRouteBeforeTakeover = null;
+  if (!target) return;
+  const now = currentUiRoute();
+  if (!now || now === target) return;
+  console.log(`[DownloadInBackground] Steam UI moved to ${now} on sleep; going back to ${target}.`);
+  try {
+    (Navigation as any).Navigate?.(target);
+  } catch (e) {
+    console.warn("[DownloadInBackground] Could not restore the Steam UI route:", e);
+  }
+};
+
+/**
+ * Records what is actually on screen, for a wake that comes back only partially.
+ *
+ * The plugin's own overlay is unmounted synchronously on wake, and while it is up it
+ * swallows every pointer and key event, so a screen that is black with working menus is
+ * something else's. This names it: the elements under a handful of screen points, with
+ * their background, opacity and stacking.
+ */
+const probeWakeScreen = (reason: string) => {
+  if (sharedSettings.debug_logging === false) {
+    return;
+  }
+  try {
+    const points: Array<[number, number]> = [[0.5, 0.5], [0.5, 0.2], [0.5, 0.8]];
+    const samples = points.map(([fx, fy]) => {
+      const x = Math.round(window.innerWidth * fx);
+      const y = Math.round(window.innerHeight * fy);
+      const chain: any[] = [];
+      let node = document.elementFromPoint(x, y) as HTMLElement | null;
+      for (let depth = 0; node && depth < 5; depth++) {
+        const cs = window.getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        chain.push({
+          tag: node.tagName,
+          cls: String((node as any).className ?? "").slice(0, 120),
+          bg: cs.backgroundColor,
+          opacity: cs.opacity,
+          z: cs.zIndex,
+          pos: cs.position,
+          vis: cs.visibility,
+          display: cs.display,
+          size: [Math.round(rect.width), Math.round(rect.height)],
+        });
+        node = node.parentElement;
+      }
+      return { at: [fx, fy], chain };
+    });
+
+    call("log_debug", {
+      kind: "wake_screen_probe",
+      reason,
+      route: currentUiRoute(),
+      route_at_takeover: sharedRouteBeforeTakeover,
+      visibility: document.visibilityState,
+      hidden: document.hidden,
+      viewport: [window.innerWidth, window.innerHeight],
+      overlay_state: {
+        background_mode: sharedIsBackgroundMode,
+        show_hud: sharedShowHud,
+        show_splash: sharedShowSplash,
+        standby: sharedStandbyMode,
+      },
+      samples,
+    }).catch(() => {});
+  } catch (e) {
+    console.warn("[DownloadInBackground] Wake screen probe failed:", e);
+  }
+};
+
 const clearStandbySplash = () => {
   if (sharedSplashTimer) {
     clearTimeout(sharedSplashTimer);
     sharedSplashTimer = null;
   }
   sharedShowSplash = false;
+};
+
+/**
+ * Everything the interface has to undo on wake, shared by both ways a wake arrives:
+ * this side asking for it, and the backend announcing it already happened.
+ *
+ * It used to be written out twice, and the backend's copy was the shorter one: it never
+ * cleared the standby splash or the standby flag, so a wake that came from the backend
+ * could leave state behind that the plugin's own overlay is drawn from.
+ */
+const finishWakeUi = (reason: string) => {
+  sharedIsBackgroundMode = false;
+  sharedShowHud = false;
+  sharedStandbyMode = false;
+  sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
+  clearStandbySplash();
+  if (sharedHudTimer) {
+    clearInterval(sharedHudTimer);
+    sharedHudTimer = null;
+  }
+
+  // Unmounts the overlay from the DOM before anything else is attempted.
+  notifyStateListeners();
+  closeSteamSideMenus();
+
+  // Records what is on screen while it is still wrong, then puts the interface back
+  // where it was if Steam's own sleep handler moved it.
+  probeWakeScreen(reason);
+  restoreUiRoute();
+
+  // A nudge for anything that stopped repainting while the screen was off.
+  try {
+    window.dispatchEvent(new Event("resize"));
+  } catch (e) {}
 };
 
 /**
@@ -186,20 +311,7 @@ const startStandbySplash = (seconds: number, reason: string = "standby_splash") 
  */
 const triggerFullWake = async (reason: string = "wake") => {
   console.log("[DownloadInBackground] triggerFullWake called! Reason:", reason);
-  sharedIsBackgroundMode = false;
-  sharedShowHud = false;
-  sharedStandbyMode = false;
-  sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
-  clearStandbySplash();
-
-  if (sharedHudTimer) {
-    clearInterval(sharedHudTimer);
-    sharedHudTimer = null;
-  }
-
-  // Instantly unmounts overlay from the DOM
-  notifyStateListeners();
-  closeSteamSideMenus();
+  finishWakeUi(reason);
 
   try {
     await call("exit_background_mode", reason);
@@ -357,6 +469,12 @@ const handleMenuSuspend = (hook: SuspendHook, args: any[]): any => {
     return callOriginalSuspend(hook, args);
   }
 
+  // Remember where the interface was, and dismiss the power menu that is still open.
+  // Steam's own suspend flow would have taken it down; the power-button path, which
+  // comes back clean, never has a menu open in the first place.
+  sharedRouteBeforeTakeover = currentUiRoute();
+  closeSteamSideMenus();
+
   // The backend decides, on state it re-reads right now rather than on the last poll,
   // and starts the standby splash itself when standby is what takes over.
   console.log(`[DownloadInBackground] Power menu sleep (${hook.name}) -> asking the backend.`);
@@ -367,7 +485,9 @@ const handleMenuSuspend = (hook: SuspendHook, args: any[]): any => {
       if (verdict === "hud") {
         startHudCountdown(sharedSettings.hud_timeout_seconds ?? 5);
       } else if (verdict === "allow") {
-        // Not ours after all (a download paused moments ago): hand the sleep back.
+        // Not ours after all (a download paused moments ago): hand the sleep back, and
+        // forget the route, since SteamOS is about to suspend for real.
+        sharedRouteBeforeTakeover = null;
         callOriginalSuspend(hook, args);
       }
     })
@@ -562,16 +682,8 @@ export default definePlugin(() => {
       console.log("[DownloadInBackground] background_mode_changed event received:", data);
       const isBg = typeof data === "boolean" ? data : Boolean(data?.is_background_mode);
       if (!isBg) {
-        // System awakened from backend!
-        sharedIsBackgroundMode = false;
-        sharedShowHud = false;
-        sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
-        if (sharedHudTimer) {
-          clearInterval(sharedHudTimer);
-          sharedHudTimer = null;
-        }
-        notifyStateListeners();
-        closeSteamSideMenus();
+        // System awakened from the backend: same cleanup as a wake asked for here.
+        finishWakeUi(String(data?.reason ?? "backend_wake"));
       } else {
         sharedIsBackgroundMode = true;
         sharedBackgroundModeEnteredTime = Date.now();
@@ -658,15 +770,7 @@ export default definePlugin(() => {
         const backendIsBg = Boolean(status.is_background_mode);
         if (sharedIsBackgroundMode && !backendIsBg) {
           console.log("[DownloadInBackground] Backend woke up -> Synchronizing frontend!");
-          sharedIsBackgroundMode = false;
-          sharedShowHud = false;
-          sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
-          if (sharedHudTimer) {
-            clearInterval(sharedHudTimer);
-            sharedHudTimer = null;
-          }
-          notifyStateListeners();
-          closeSteamSideMenus();
+          finishWakeUi("status_poll_sync");
         } else {
           sharedIsBackgroundMode = backendIsBg;
         }
