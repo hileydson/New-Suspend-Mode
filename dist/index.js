@@ -99,9 +99,9 @@ const Overlay = ({ isBackgroundMode, showHud, countdown, downloadInfo, settings,
     if (!showHud && !isBackgroundMode) {
         return null;
     }
-    // Pure black screen mode (tapping or clicking wakes immediately)
+    // Pure black screen mode (hardware power button is the sole wake trigger)
     if (isBackgroundMode) {
-        return (SP_JSX.jsx("div", { className: "dib-overlay-container dib-overlay-blackout", onClick: onWake, tabIndex: 0, "aria-hidden": "true" }));
+        return (SP_JSX.jsx("div", { className: "dib-overlay-container dib-overlay-blackout", tabIndex: -1, "aria-hidden": "true" }));
     }
     // Download HUD Mode (Countdown before screen off)
     const percent = Math.min(100, Math.max(0, downloadInfo.progress_percent || 0));
@@ -491,6 +491,7 @@ let sharedBatteryCapacity = 100;
 let sharedIsCharging = false;
 let sharedPowerPlugged = false;
 let sharedIsBackgroundMode = false;
+let sharedBackgroundModeEnteredTime = 0;
 let sharedShowHud = false;
 let sharedCountdown = 5;
 let sharedWakeCooldownUntil = 0;
@@ -543,6 +544,7 @@ const triggerEnterBlackout = async (reason = "countdown_completed") => {
     }
     sharedShowHud = false;
     sharedIsBackgroundMode = true;
+    sharedBackgroundModeEnteredTime = Date.now();
     notifyStateListeners();
     try {
         const success = await call("enter_background_mode", reason);
@@ -608,13 +610,15 @@ const GlobalOverlayContainer = () => {
             e.stopImmediatePropagation();
             e.preventDefault();
         };
-        window.addEventListener("keydown", blockInput, true);
-        window.addEventListener("keyup", blockInput, true);
-        window.addEventListener("keypress", blockInput, true);
+        const events = [
+            "keydown", "keyup", "keypress",
+            "pointerdown", "pointerup", "pointermove",
+            "touchstart", "touchend", "touchmove",
+            "mousedown", "mouseup", "click", "contextmenu"
+        ];
+        events.forEach((ev) => window.addEventListener(ev, blockInput, true));
         return () => {
-            window.removeEventListener("keydown", blockInput, true);
-            window.removeEventListener("keyup", blockInput, true);
-            window.removeEventListener("keypress", blockInput, true);
+            events.forEach((ev) => window.removeEventListener(ev, blockInput, true));
         };
     }, [sharedIsBackgroundMode]);
     // CRITICAL: If NOT in background mode and NOT showing HUD: DO NOT RENDER ANYTHING!
@@ -681,6 +685,7 @@ var index = definePlugin(() => {
             }
             else {
                 sharedIsBackgroundMode = true;
+                sharedBackgroundModeEnteredTime = Date.now();
                 sharedShowHud = false;
                 notifyStateListeners();
             }
@@ -872,6 +877,11 @@ var index = definePlugin(() => {
                 const now = Date.now();
                 // 1. If currently in background mode, this suspend request is actually a WAKE request from the Power Button!
                 if (sharedIsBackgroundMode) {
+                    const timeInBg = Date.now() - sharedBackgroundModeEnteredTime;
+                    if (timeInBg < 2000) {
+                        console.log(`[DownloadInBackground] Ignoring suspend request in initial transition grace period (${timeInBg}ms).`);
+                        return false;
+                    }
                     console.log("[DownloadInBackground] Power button pressed while in background mode -> WAKING UP!");
                     await triggerFullWake("power_button_wake");
                     return false; // Prevent Steam from suspending
@@ -921,7 +931,13 @@ var index = definePlugin(() => {
         const now = Date.now();
         const delta = now - lastHeartbeat;
         lastHeartbeat = now;
-        if (delta > 3500) {
+        // CRITICAL: Do NOT trigger clock jump wake if we are intentionally in background mode!
+        // Background mode intentionally throttles CPU and browser threads, causing setInterval delays.
+        // Clock-jump detection is ONLY meant to wake up from actual Linux kernel sleep.
+        if (sharedIsBackgroundMode) {
+            return;
+        }
+        if (delta > 15000) {
             console.log(`[DownloadInBackground] Kernel resume detected (delta=${delta}ms)! Enforcing wake state.`);
             sharedWakeCooldownUntil = Date.now() + 12000;
             if (sharedHudTimer) {

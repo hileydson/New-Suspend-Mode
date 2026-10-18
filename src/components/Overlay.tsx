@@ -30,13 +30,12 @@ export const Overlay: FC<OverlayProps> = ({
     return null;
   }
 
-  // Pure black screen mode (tapping or clicking wakes immediately)
+  // Pure black screen mode (hardware power button is the sole wake trigger)
   if (isBackgroundMode) {
     return (
       <div
         className="dib-overlay-container dib-overlay-blackout"
-        onClick={onWake}
-        tabIndex={0}
+        tabIndex={-1}
         aria-hidden="true"
       />
     );

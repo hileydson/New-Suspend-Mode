@@ -56,6 +56,7 @@ let sharedBatteryCapacity: number = 100;
 let sharedIsCharging: boolean = false;
 let sharedPowerPlugged: boolean = false;
 let sharedIsBackgroundMode: boolean = false;
+let sharedBackgroundModeEnteredTime: number = 0;
 let sharedShowHud: boolean = false;
 let sharedCountdown: number = 5;
 let sharedWakeCooldownUntil: number = 0;
@@ -153,6 +154,7 @@ const triggerEnterBlackout = async (reason: string = "countdown_completed") => {
 
   sharedShowHud = false;
   sharedIsBackgroundMode = true;
+  sharedBackgroundModeEnteredTime = Date.now();
   notifyStateListeners();
 
   try {
@@ -228,14 +230,17 @@ const GlobalOverlayContainer: FC = () => {
       e.preventDefault();
     };
 
-    window.addEventListener("keydown", blockInput, true);
-    window.addEventListener("keyup", blockInput, true);
-    window.addEventListener("keypress", blockInput, true);
+    const events = [
+      "keydown", "keyup", "keypress",
+      "pointerdown", "pointerup", "pointermove",
+      "touchstart", "touchend", "touchmove",
+      "mousedown", "mouseup", "click", "contextmenu"
+    ];
+
+    events.forEach((ev) => window.addEventListener(ev, blockInput, true));
 
     return () => {
-      window.removeEventListener("keydown", blockInput, true);
-      window.removeEventListener("keyup", blockInput, true);
-      window.removeEventListener("keypress", blockInput, true);
+      events.forEach((ev) => window.removeEventListener(ev, blockInput, true));
     };
   }, [sharedIsBackgroundMode]);
 
@@ -336,6 +341,7 @@ export default definePlugin(() => {
         notifyStateListeners();
       } else {
         sharedIsBackgroundMode = true;
+        sharedBackgroundModeEnteredTime = Date.now();
         sharedShowHud = false;
         notifyStateListeners();
       }
@@ -540,6 +546,11 @@ export default definePlugin(() => {
 
         // 1. If currently in background mode, this suspend request is actually a WAKE request from the Power Button!
         if (sharedIsBackgroundMode) {
+          const timeInBg = Date.now() - sharedBackgroundModeEnteredTime;
+          if (timeInBg < 2000) {
+            console.log(`[DownloadInBackground] Ignoring suspend request in initial transition grace period (${timeInBg}ms).`);
+            return false;
+          }
           console.log("[DownloadInBackground] Power button pressed while in background mode -> WAKING UP!");
           await triggerFullWake("power_button_wake");
           return false; // Prevent Steam from suspending
@@ -597,7 +608,14 @@ export default definePlugin(() => {
     const delta = now - lastHeartbeat;
     lastHeartbeat = now;
 
-    if (delta > 3500) {
+    // CRITICAL: Do NOT trigger clock jump wake if we are intentionally in background mode!
+    // Background mode intentionally throttles CPU and browser threads, causing setInterval delays.
+    // Clock-jump detection is ONLY meant to wake up from actual Linux kernel sleep.
+    if (sharedIsBackgroundMode) {
+      return;
+    }
+
+    if (delta > 15000) {
       console.log(`[DownloadInBackground] Kernel resume detected (delta=${delta}ms)! Enforcing wake state.`);
       sharedWakeCooldownUntil = Date.now() + 12000;
       if (sharedHudTimer) {
