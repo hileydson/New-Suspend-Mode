@@ -498,43 +498,6 @@ function notifyStateListeners() {
     stateListeners.forEach((cb) => cb());
 }
 /**
- * Forcibly navigates SteamOS Gaming Mode directly to the HOME screen,
- * closing any side menus and executing official route methods.
- */
-const navigateToSteamHome = () => {
-    console.log("[DownloadInBackground] Forcing navigation to Steam Home screen...");
-    try {
-        DFL.Navigation.CloseSideMenus?.();
-    }
-    catch (e) { }
-    try {
-        DFL.Navigation.Navigate?.("/library/home");
-    }
-    catch (e) { }
-    try {
-        DFL.Navigation.NavigateToLibraryTab?.();
-    }
-    catch (e) { }
-    try {
-        window.SteamClient?.URL?.ExecuteSteamURL?.("steam://open/library/home");
-    }
-    catch (e) { }
-    try {
-        window.SteamClient?.URL?.ExecuteSteamURL?.("steam://open/main");
-    }
-    catch (e) { }
-    try {
-        window.SteamClient?.System?.NavigateToLibraryHome?.();
-    }
-    catch (e) { }
-    try {
-        if (window.location && window.location.hash !== "#/library/home") {
-            window.location.hash = "#/library/home";
-        }
-    }
-    catch (e) { }
-};
-/**
  * Triggers a complete system wake:
  * 1. Synchronously drops any black screen or HUD from the DOM
  * 2. Activates 12-second cooldown against re-sleep
@@ -558,14 +521,10 @@ const triggerFullWake = async (reason = "wake") => {
     catch (e) {
         console.error("[DownloadInBackground] Error calling exit_background_mode:", e);
     }
-    // Force redirection to HOME multiple times to ensure transitions finish
-    navigateToSteamHome();
-    setTimeout(() => navigateToSteamHome(), 400);
-    setTimeout(() => navigateToSteamHome(), 1000);
     toaster.toast({
         title: "Download in Background",
-        body: "Console awakened! Returning to Home.",
-        duration: 2500,
+        body: "Console awakened!",
+        duration: 2000,
     });
 };
 /**
@@ -699,8 +658,6 @@ var index = definePlugin(() => {
                     sharedHudTimer = null;
                 }
                 notifyStateListeners();
-                navigateToSteamHome();
-                setTimeout(() => navigateToSteamHome(), 400);
             }
             else {
                 sharedIsBackgroundMode = true;
@@ -772,8 +729,6 @@ var index = definePlugin(() => {
                         sharedHudTimer = null;
                     }
                     notifyStateListeners();
-                    navigateToSteamHome();
-                    setTimeout(() => navigateToSteamHome(), 400);
                 }
                 else {
                     sharedIsBackgroundMode = backendIsBg;
@@ -957,9 +912,6 @@ var index = definePlugin(() => {
             sharedIsBackgroundMode = false;
             notifyStateListeners();
             call("exit_background_mode", "kernel_resume_clock_jump").catch(() => { });
-            navigateToSteamHome();
-            setTimeout(() => navigateToSteamHome(), 400);
-            setTimeout(() => navigateToSteamHome(), 1000);
         }
     }, 1000);
     return {

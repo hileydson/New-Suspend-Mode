@@ -130,15 +130,10 @@ const triggerFullWake = async (reason: string = "wake") => {
     console.error("[DownloadInBackground] Error calling exit_background_mode:", e);
   }
 
-  // Force redirection to HOME multiple times to ensure transitions finish
-  navigateToSteamHome();
-  setTimeout(() => navigateToSteamHome(), 400);
-  setTimeout(() => navigateToSteamHome(), 1000);
-
   toaster.toast({
     title: "Download in Background",
-    body: "Console awakened! Returning to Home.",
-    duration: 2500,
+    body: "Console awakened!",
+    duration: 2000,
   });
 };
 
@@ -318,8 +313,6 @@ export default definePlugin(() => {
           sharedHudTimer = null;
         }
         notifyStateListeners();
-        navigateToSteamHome();
-        setTimeout(() => navigateToSteamHome(), 400);
       } else {
         sharedIsBackgroundMode = true;
         sharedShowHud = false;
@@ -390,8 +383,6 @@ export default definePlugin(() => {
             sharedHudTimer = null;
           }
           notifyStateListeners();
-          navigateToSteamHome();
-          setTimeout(() => navigateToSteamHome(), 400);
         } else {
           sharedIsBackgroundMode = backendIsBg;
         }
@@ -596,9 +587,6 @@ export default definePlugin(() => {
       sharedIsBackgroundMode = false;
       notifyStateListeners();
       call("exit_background_mode", "kernel_resume_clock_jump").catch(() => {});
-      navigateToSteamHome();
-      setTimeout(() => navigateToSteamHome(), 400);
-      setTimeout(() => navigateToSteamHome(), 1000);
     }
   }, 1000);
 

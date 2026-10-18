@@ -11,7 +11,7 @@ import asyncio
 import logging
 import threading
 import subprocess
-from typing import Dict, Any, Optional, List, Set
+from typing import Dict, Any, Optional, List, Set, Tuple
 
 # Setup Decky compatibility
 try:
@@ -37,8 +37,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "min_battery_threshold": 15,
     "hud_timeout_seconds": 5,
     "auto_suspend_delay_seconds": 120,
-    "throttle_cpu": True,
-    "throttle_gpu": True,
+    "throttle_cpu": False,
+    "throttle_gpu": False,
     "mute_audio": True,
     "turn_off_backlight": True,
     "oled_black_screen": True,
@@ -472,13 +472,39 @@ class Plugin:
         return True
 
     # ==========================================
-    # Systemd Inhibitor Control
+    # Systemd Inhibitor & Sleep Target Masking Control
     # ==========================================
+    def _mask_sleep_targets(self):
+        try:
+            subprocess.run(
+                ["sudo", "systemctl", "mask", "--runtime", "sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            logger.info("Masked systemd sleep/suspend targets (runtime).")
+        except Exception as e:
+            logger.error(f"Failed to mask sleep targets: {e}")
+
+    def _unmask_sleep_targets(self):
+        try:
+            subprocess.run(
+                ["sudo", "systemctl", "unmask", "--runtime", "sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            logger.info("Unmasked systemd sleep/suspend targets (runtime).")
+        except Exception as e:
+            logger.error(f"Failed to unmask sleep targets: {e}")
+
     def _acquire_sleep_inhibitor(self):
+        self._mask_sleep_targets()
         if self.inhibitor_proc is not None:
             return
 
         cmd = [
+            "sudo",
             "systemd-inhibit",
             "--what=sleep:handle-power-key:handle-suspend-key",
             "--who=DownloadInBackground",
@@ -499,6 +525,7 @@ class Plugin:
             self.inhibitor_proc = None
 
     def _release_sleep_inhibitor(self):
+        self._unmask_sleep_targets()
         if self.inhibitor_proc is not None:
             try:
                 self.inhibitor_proc.terminate()
@@ -521,10 +548,15 @@ class Plugin:
             and not self.download_info.get("is_paused", False)
         )
         should_inhibit = self.is_background_mode or is_active_download
-        if should_inhibit and self.inhibitor_proc is None:
-            self._acquire_sleep_inhibitor()
-        elif not should_inhibit and self.inhibitor_proc is not None:
-            self._release_sleep_inhibitor()
+        if should_inhibit:
+            self._mask_sleep_targets()
+            if self.inhibitor_proc is None:
+                self._acquire_sleep_inhibitor()
+        elif not should_inhibit:
+            if self.inhibitor_proc is not None:
+                self._release_sleep_inhibitor()
+            else:
+                self._unmask_sleep_targets()
 
     # ==========================================
     # Suspend Interception & Logind Watcher
@@ -663,8 +695,8 @@ class Plugin:
     # ==========================================
     # Hardware Power / Sleep Key Monitoring
     # ==========================================
-    def _find_power_sleep_devices(self) -> List[str]:
-        """Finds all input devices with KEY_POWER or KEY_SLEEP using kernel EVIOCGBIT."""
+    def _find_power_sleep_devices(self) -> List[Tuple[str, str, bool]]:
+        """Finds all input devices with KEY_POWER or KEY_SLEEP using kernel EVIOCGBIT and EVIOCGNAME."""
         devs = []
         for path in sorted(glob.glob("/dev/input/event*")):
             try:
@@ -676,26 +708,52 @@ class Plugin:
                     # KEY_SLEEP = 142 (byte 17, bit 6)
                     has_sleep = bool(buf[17] & (1 << 6))
                     if has_power or has_sleep:
-                        devs.append(path)
+                        name_buf = bytearray(256)
+                        try:
+                            fcntl.ioctl(f.fileno(), 0x82004506, name_buf)  # EVIOCGNAME(256)
+                            name = name_buf.split(b"\x00")[0].decode("utf-8", errors="ignore")
+                        except Exception:
+                            name = "Unknown Device"
+
+                        name_lower = name.lower()
+                        # Power button device (e.g. 'Power Button', 'Sleep Button', 'gpio-keys', 'Asus WMI')
+                        # Must NOT be a keyboard (to avoid grabbing user's typing keyboard)
+                        is_keyboard = "keyboard" in name_lower
+                        is_grab_candidate = (
+                            not is_keyboard
+                            or "power" in name_lower
+                            or "button" in name_lower
+                        ) and "remapper" not in name_lower
+                        devs.append((path, name, is_grab_candidate))
             except Exception:
                 pass
         return devs
 
     def _power_button_listener_worker(self):
         logger.info("Starting hardware power key listener worker...")
+        EVIOCGRAB = 0x40044590
         while not self.stop_threads:
-            device_paths = self._find_power_sleep_devices()
-            if not device_paths:
+            devices = self._find_power_sleep_devices()
+            if not devices:
                 time.sleep(3.0)
                 continue
 
             fds = []
-            for path in device_paths:
+            grabbed_fds = set()
+            for path, name, should_grab in devices:
                 try:
                     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+                    if should_grab:
+                        try:
+                            # EVIOCGRAB: Grab exclusively so systemd-logind and Steam never see KEY_POWER!
+                            fcntl.ioctl(fd, EVIOCGRAB, 1)
+                            grabbed_fds.add(fd)
+                            logger.info(f"Exclusively grabbed power device with EVIOCGRAB: {name} ({path})")
+                        except Exception as ge:
+                            logger.warning(f"Could not grab {name} ({path}): {ge}")
                     fds.append(fd)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Could not open {path}: {e}")
 
             if not fds:
                 time.sleep(3.0)
@@ -713,7 +771,7 @@ class Plugin:
                                 _, _, ev_type, ev_code, ev_value = struct.unpack(INPUT_EVENT_FORMAT, chunk)
 
                                 if ev_type == EV_KEY and (ev_code == KEY_POWER or ev_code == KEY_SLEEP) and ev_value == 1:
-                                    logger.info(f"Hardware key event: code={ev_code}")
+                                    logger.info(f"Hardware key event intercepted exclusively: code={ev_code}")
                                     self._on_hardware_power_key()
                         except BlockingIOError:
                             pass
@@ -723,6 +781,11 @@ class Plugin:
             finally:
                 for fd in fds:
                     try:
+                        if fd in grabbed_fds:
+                            try:
+                                fcntl.ioctl(fd, EVIOCGRAB, 0)
+                            except Exception:
+                                pass
                         os.close(fd)
                     except Exception:
                         pass
@@ -748,9 +811,11 @@ class Plugin:
                 )
             return
 
+        net_rx = self.detector.get_network_rx_rate()
         is_active_dl = (
-            self.download_info.get("is_downloading", False)
-            and not self.download_info.get("is_paused", False)
+            (self.download_info.get("is_downloading", False)
+            and not self.download_info.get("is_paused", False))
+            or (net_rx > 20000)
         )
         if is_active_dl:
             self._trigger_suspend_intercepted()
@@ -806,26 +871,8 @@ class Plugin:
             except Exception:
                 pass
 
-        # 2. CPU governor / Power profile
-        if self.settings.get("throttle_cpu", True):
-            try:
-                res = subprocess.run(["powerprofilesctl", "get"], capture_output=True, text=True, check=False)
-                if res.returncode == 0:
-                    self.saved_power_profile = res.stdout.strip()
-                    subprocess.run(["powerprofilesctl", "set", "power-saver"], check=False)
-            except Exception:
-                pass
-
-            gov_paths = glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor")
-            for gp in gov_paths:
-                try:
-                    with open(gp, "r") as f:
-                        curr_gov = f.read().strip()
-                    self.saved_cpu_governors[gp] = curr_gov
-                    with open(gp, "w") as f:
-                        f.write("powersave")
-                except Exception:
-                    pass
+        # 2. Keep CPU governor on schedutil/balanced so download speeds and TLS/decompression stay fast
+        # Note: We intentionally avoid pinning CPU to 'powersave' (400MHz) to keep Wi-Fi and Steam downloads at full speed.
 
         # 3. AMD GPU DPM clock level
         if self.settings.get("throttle_gpu", True):
@@ -986,10 +1033,11 @@ class Plugin:
             self.is_background_mode = False
 
         self._release_sleep_inhibitor()
+        self._unmask_sleep_targets()
         await asyncio.sleep(0.5)
 
         try:
-            subprocess.run(["systemctl", "suspend"], check=False)
+            subprocess.run(["sudo", "systemctl", "suspend"], check=False)
         except Exception as e:
             logger.error(f"Failed to execute systemctl suspend: {e}")
 
