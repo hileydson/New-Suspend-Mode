@@ -1557,6 +1557,21 @@ class Plugin:
                 if current:
                     self._save_original(self.saved_gpu_dpm, path, current, "low")
 
+        # ryzenadj HAS to be snapshotted here, same as everything else - and for the same
+        # reason. Reading `ryzenadj -i` in the apply section used to come AFTER the ACPI
+        # profile had been dropped to low-power, which makes the firmware re-apply its
+        # own clock and power limits. The read therefore returned the already-throttled
+        # STAPM/PPT values, those got saved as the originals, and restore wrote them back
+        # on wake. Each cycle recorded a slightly lower "original", so after a few runs
+        # the console sat at the low-power profile's defaults until the next reboot.
+        if (self.settings.get("throttle_cpu", True) and shutil.which("ryzenadj")
+                and self.saved_ryzenadj is None):
+            limits = self._read_ryzenadj_limits()
+            if limits:
+                self.saved_ryzenadj = limits
+                if self.settings.get("debug_logging", True):
+                    logger.info(f"[DIB SNAPSHOT] ryzenadj originals captured: {limits}")
+
         if self.settings.get("debug_logging", True):
             logger.info(
                 "[DIB SNAPSHOT] Recorded originals before touching anything: "
@@ -3155,14 +3170,12 @@ class Plugin:
                     except Exception:
                         pass
 
-            # D. ryzenadj fallback (hardware-cap APU power to 6W)
-            # Only ever applied when the current limits can be read back first: a fixed
-            # "restore" value would cap the APU at the wrong wattage forever, which is
-            # exactly what used to leave the machine slow after waking up (and would cap
-            # a desktop APU far below its stock limits).
+            # D. ryzenadj hardware-cap: APU to 6 W. The originals have already been
+            # snapshotted at the top of this function, BEFORE any firmware re-apply could
+            # change what ryzenadj would report. If that read came back empty, the write
+            # is skipped on purpose: without a real original to put back, "restoring" was
+            # how the console used to end up at the wrong wattage until the next reboot.
             if shutil.which("ryzenadj"):
-                if self.saved_ryzenadj is None:
-                    self.saved_ryzenadj = self._read_ryzenadj_limits()
                 if self.saved_ryzenadj:
                     try:
                         subprocess.run(
