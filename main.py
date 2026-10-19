@@ -1003,6 +1003,11 @@ class Plugin:
         a false positive would bounce the ACPI profile without reason, and that is a
         firmware event the user feels. Only values this plugin is known to have set are
         counted - anything an external tool wrote is left alone.
+
+        Covers every scenario the plugin applies throttles to, from a handheld AMD APU
+        (ROG Ally, Steam Deck) to a desktop PC with a dedicated GPU. The handheld-only
+        checks (ryzenadj, platform_profile) sit quietly on hardware that does not have
+        them, so a desktop pays nothing for their presence here.
         """
         signs: List[str] = []
 
@@ -1036,6 +1041,52 @@ class Plugin:
             baseline = self.watchdog_targets.get(self.PLATFORM_PROFILE_FILE)
             if now_profile in ("quiet", "low-power") and baseline and baseline != now_profile:
                 signs.append(f"platform_profile={now_profile}")
+
+        # 5. GPU DPM level still at "low" when the baseline said otherwise. Covers desktop
+        # PCs with a dedicated AMD GPU, where this is the biggest performance hit.
+        for path in glob.glob("/sys/class/drm/card*/device/power_dpm_force_performance_level"):
+            if self._read_text(path) != "low":
+                continue
+            baseline = self.watchdog_targets.get(path)
+            if baseline and baseline != "low":
+                signs.append(f"gpu_dpm=low")
+                break
+
+        # 6. CPU scaling governor stuck at "powersave" when the baseline said otherwise.
+        # Only acts when the baseline exists, so a system that genuinely defaults to
+        # "powersave" (amd-pstate) is not fought.
+        for path in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"):
+            if self._read_text(path) != "powersave":
+                continue
+            baseline = self.watchdog_targets.get(path)
+            if baseline and baseline != "powersave":
+                signs.append(f"governor=powersave")
+                break
+
+        # 7. EPP stuck at "power" with the same guard: a baseline change is required.
+        for path in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference"):
+            if self._read_text(path) != "power":
+                continue
+            baseline = self.watchdog_targets.get(path)
+            if baseline and baseline != "power":
+                signs.append(f"epp=power")
+                break
+
+        # 8. The cgroup v2 CPU quota: a leftover here throttles Steam to a fraction of a
+        # core until the next reboot, which on a desktop is the single most noticeable cap.
+        if self.last_cpu_quota_path and os.path.exists(self.last_cpu_quota_path):
+            current = self._read_text(self.last_cpu_quota_path)
+            if current and not current.startswith("max"):
+                signs.append(f"cpu.max={current}")
+
+        # 9. The tc ingress policer: a leftover caps every download on that interface at
+        # a few megabytes per second, which looks like a terrible internet connection.
+        tc = self._tc_binary()
+        if tc:
+            for iface in self._network_interfaces(default_only=False):
+                if self._tc_has_ingress(tc, iface):
+                    signs.append(f"tc_ingress={iface}")
+                    break
 
         return signs
 
@@ -1132,6 +1183,69 @@ class Plugin:
                     ceilings.add(f"{now_at}->{ceiling}")
         if raised:
             done.append(f"raised the frequency ceiling on {raised} node(s): {sorted(ceilings)}")
+
+        # 4. GPU DPM: desktop PC with a dedicated AMD GPU usually feels this the most. If
+        # any card is still at "low" and the baseline knew another value, put it back; the
+        # safe generic fallback is "auto".
+        for path in glob.glob("/sys/class/drm/card*/device/power_dpm_force_performance_level"):
+            if self._read_text(path) != "low":
+                continue
+            baseline = self.watchdog_targets.get(path)
+            target = baseline if baseline and baseline != "low" else "auto"
+            if self._write_sysfs(path, target):
+                done.append(f"gpu dpm {os.path.basename(os.path.dirname(path))}: low->{target}")
+
+        # 5. CPU scaling governor stuck at "powersave" with a different baseline. On a
+        # system where "powersave" is the real default (amd-pstate), the baseline matches
+        # and this does nothing - which is correct.
+        gov_fixed = 0
+        for path in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"):
+            if self._read_text(path) != "powersave":
+                continue
+            baseline = self.watchdog_targets.get(path)
+            if baseline and baseline != "powersave":
+                if self._write_sysfs(path, baseline):
+                    gov_fixed += 1
+        if gov_fixed:
+            done.append(f"restored CPU governor on {gov_fixed} node(s) to baseline")
+
+        # 6. EPP: same rule. Default on most AMD systems is "balance_performance", on
+        # Intel often "balance_performance" or "performance".
+        epp_fixed = 0
+        for path in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference"):
+            if self._read_text(path) != "power":
+                continue
+            baseline = self.watchdog_targets.get(path)
+            target = baseline if baseline and baseline != "power" else "balance_performance"
+            if self._write_sysfs(path, target):
+                epp_fixed += 1
+        if epp_fixed:
+            done.append(f"restored EPP on {epp_fixed} node(s)")
+
+        # 7. The cgroup CPU quota: a leftover here throttles Steam until the next reboot.
+        # Writing "max 100000" uncaps it. This is the single most impactful thing to clear
+        # on a desktop PC with the plugin's download pacing enabled.
+        if self.last_cpu_quota_path and os.path.exists(self.last_cpu_quota_path):
+            current = self._read_text(self.last_cpu_quota_path)
+            if current and not current.startswith("max"):
+                if self._write_sysfs(self.last_cpu_quota_path, f"max {CPU_QUOTA_PERIOD}"):
+                    done.append(f"cleared cpu.max on {self.last_cpu_quota_path} (was '{current}')")
+
+        # 8. The tc ingress policer: a leftover caps every download on that interface.
+        tc = self._tc_binary()
+        if tc:
+            for iface in self._network_interfaces(default_only=False):
+                try:
+                    if not self._tc_has_ingress(tc, iface):
+                        continue
+                    res = subprocess.run(
+                        [tc, "qdisc", "del", "dev", iface, "ingress"],
+                        capture_output=True, text=True, check=False, timeout=5.0,
+                    )
+                    if res.returncode == 0:
+                        done.append(f"cleared tc ingress on {iface}")
+                except Exception:
+                    pass
 
         if done:
             logger.warning(f"[DIB HARD RESET] {done}")
@@ -2887,42 +3001,69 @@ class Plugin:
 
     def _set_gamescope_display(self, sleep: bool):
         """
-        Asks Gamescope to put the internal panel to sleep (or wake it).
+        Puts the display into a real standby, so an external TV or monitor stops showing
+        a black screen and enters its own no-signal state.
 
-        Only runs if gamescopectl actually exists, so machines without it (a desktop PC
-        running SteamOS, where there is no internal panel anyway) do not pay for a dozen
-        failed process spawns on every transition.
+        On a handheld (ROG Ally, Steam Deck) the backlight sysfs path above was enough -
+        the panel itself went dark. On a desktop PC connected to a TV, the TV manages its
+        own backlight: it only enters standby when the GPU stops sending video. That is
+        what this does, trying every path a given SteamOS build may expose:
+
+          1. gamescopectl drm_sleep_internal_screen  -> handheld panel
+          2. gamescopectl drm_sleep_external_screen  -> dock / desktop TV
+          3. The DRM connector dpms attribute        -> works outside gamescope, too
+          4. The DRM connector enabled attribute     -> harder shut-off, same end result
+
+        Each one is wrapped in its own try, so a path a given gamescope build does not
+        support just logs 'no' and the next one runs.
         """
+        arg = "1" if sleep else "0"
+        dpms_state = "4" if sleep else "0"   # 4 = DRM_MODE_DPMS_OFF, 0 = ON
+
+        # Paths 1 and 2: gamescope.
         gamescopectl = shutil.which("gamescopectl") or next(
             (p for p in ("/usr/bin/gamescopectl", "/usr/local/bin/gamescopectl") if os.path.exists(p)),
             None,
         )
-        if not gamescopectl:
-            return
+        if gamescopectl:
+            user = self._get_session_user()
+            for uid_dir in glob.glob("/run/user/*"):
+                if not os.path.basename(uid_dir).isdigit():
+                    continue
+                env = os.environ.copy()
+                env["XDG_RUNTIME_DIR"] = uid_dir
+                for subcommand in ("drm_sleep_internal_screen", "drm_sleep_external_screen"):
+                    for cmd in (
+                        [gamescopectl, subcommand, arg],
+                        ["sudo", "-u", user, "env", f"XDG_RUNTIME_DIR={uid_dir}", gamescopectl, subcommand, arg],
+                    ):
+                        try:
+                            subprocess.run(
+                                cmd, env=env, check=False,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0,
+                            )
+                        except Exception:
+                            pass
 
-        arg = "1" if sleep else "0"
-        user = self._get_session_user()
-        for uid_dir in glob.glob("/run/user/*"):
-            if not os.path.basename(uid_dir).isdigit():
+        # Path 3: DRM DPMS on each connected connector. Standard kernel interface, works
+        # on amdgpu, i915, nvidia-drm. Writing to this attribute does not need the DRM
+        # master, only root (which this plugin has through plugin.json flags).
+        for conn in glob.glob("/sys/class/drm/card*-*"):
+            try:
+                if self._read_text(os.path.join(conn, "status")) != "connected":
+                    continue
+            except Exception:
                 continue
-            env = os.environ.copy()
-            env["XDG_RUNTIME_DIR"] = uid_dir
-            for cmd in (
-                [gamescopectl, "drm_sleep_internal_screen", arg],
-                # Gamescope only answers on its own user session's socket.
-                ["sudo", "-u", user, "env", f"XDG_RUNTIME_DIR={uid_dir}", gamescopectl, "drm_sleep_internal_screen", arg],
-            ):
-                try:
-                    subprocess.run(
-                        cmd,
-                        env=env,
-                        check=False,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=2.0,
-                    )
-                except Exception:
-                    pass
+            dpms_file = os.path.join(conn, "dpms")
+            if not os.path.exists(dpms_file):
+                continue
+            label = os.path.basename(conn)
+            try:
+                before = self._read_text(dpms_file)
+                if self._write_sysfs(dpms_file, dpms_state):
+                    logger.info(f"DRM DPMS on {label}: {before} -> {dpms_state} (sleep={sleep}).")
+            except Exception as e:
+                logger.debug(f"DRM DPMS on {label} failed: {e}")
 
     # ==========================================
     # Download Pacing (the "handheld console" profile)
