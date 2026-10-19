@@ -352,6 +352,15 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
 
             <PanelSectionRow>
               <ToggleField
+                label="Force TV Off (real no-signal)"
+                description="Desktop with a TV only. A black screen is still a valid HDMI signal, so the TV stays lit. This stops the video signal entirely by disabling the HDMI/DP connector, so the TV reports no signal and reaches its own standby. The built-in panel of a handheld is never touched. EXPERIMENTAL: on a single-display desktop the session becomes headless while in the mode — the same as unplugging the cable — so test it before relying on it."
+                checked={settings.tv_force_connector_off === true}
+                onChange={(checked) => updateSetting("tv_force_connector_off", checked)}
+              />
+            </PanelSectionRow>
+
+            <PanelSectionRow>
+              <ToggleField
                 label="Throttle CPU to Powersave"
                 description="Switches power profile to power-saver and lowers CPU clock frequencies."
                 checked={settings.throttle_cpu}

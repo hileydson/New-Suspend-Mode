@@ -9,6 +9,7 @@ export interface PluginSettings {
   mute_audio: boolean; // default true
   turn_off_backlight: boolean; // default true
   oled_black_screen: boolean; // default true
+  tv_force_connector_off: boolean; // default false — desktop/TV: force a real "no signal"
   deep_input_lockout: boolean; // default true
   block_controller_hidraw: boolean; // default false (experimental escalation)
   limit_download_speed: boolean; // default true

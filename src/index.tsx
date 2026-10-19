@@ -38,6 +38,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
   mute_audio: true,
   turn_off_backlight: true,
   oled_black_screen: true,
+  tv_force_connector_off: false,
   deep_input_lockout: true,
   block_controller_hidraw: false,
   limit_download_speed: true,

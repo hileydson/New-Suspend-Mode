@@ -49,6 +49,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "mute_audio": True,
     "turn_off_backlight": True,
     "oled_black_screen": True,
+    # Desktop/TV only. A black frame is still a valid HDMI signal, so a TV keeps its
+    # backlight on and never reaches its own standby. The only way to produce a real
+    # "no signal" is to stop the TMDS clock, i.e. disable the connector. Forcing the
+    # connector's sysfs `status` to "off" does that: the kernel reports it as
+    # disconnected and the compositor drops the output, the same event as unplugging
+    # the cable. Off by default because it leaves a single-display desktop headless.
+    "tv_force_connector_off": False,
     "deep_input_lockout": True,
     "block_controller_hidraw": False,
     "limit_download_speed": True,
@@ -486,6 +493,10 @@ class Plugin:
         self.power_profile_set_by_us: bool = False
         self.display_slept_by_us: bool = False
         self.power_saving_applied: bool = False
+        # DRM connectors whose sysfs `status` this plugin forced to "off". Tracked so the
+        # restore puts back exactly what was touched, and persisted in the runtime state
+        # so a crash or plugin reload cannot leave a desktop with no display.
+        self.forced_off_connectors: List[str] = []
 
         self.inhibitor_proc: Optional[subprocess.Popen] = None
         self.power_button_thread: Optional[threading.Thread] = None
@@ -3284,66 +3295,122 @@ class Plugin:
         Puts the display into a real standby, so an external TV or monitor stops showing
         a black screen and enters its own no-signal state.
 
-        On a handheld (ROG Ally, Steam Deck) the backlight sysfs path above was enough -
-        the panel itself went dark. On a desktop PC connected to a TV, the TV manages its
-        own backlight: it only enters standby when the GPU stops sending video. That is
-        what this does, trying every path a given SteamOS build may expose:
+        On a handheld (ROG Ally, Steam Deck) the backlight sysfs path was enough - the
+        panel itself went dark. A TV is different: it manages its own backlight and
+        decides "signal present" from the TMDS clock and sync, not from pixel content.
+        A black frame is a perfectly valid signal, so the TV stays lit. There is no
+        "null video signal" to send instead; the only way to reach its standby is to
+        stop the clock, which means disabling the connector.
 
-          1. gamescopectl drm_sleep_internal_screen  -> handheld panel
-          2. gamescopectl drm_sleep_external_screen  -> dock / desktop TV
-          3. The DRM connector dpms attribute        -> works outside gamescope, too
-          4. The DRM connector enabled attribute     -> harder shut-off, same end result
+          1. gamescopectl drm_sleep_{internal,external}_screen -> ask the DRM master
+          2. The DRM connector `status` attribute              -> force "no signal"
 
-        Each one is wrapped in its own try, so a path a given gamescope build does not
-        support just logs 'no' and the next one runs.
+        Both are wrapped per-call, so a path a given build does not support only logs
+        what the compositor said and the next one runs.
         """
         arg = "1" if sleep else "0"
-        dpms_state = "4" if sleep else "0"   # 4 = DRM_MODE_DPMS_OFF, 0 = ON
 
-        # Paths 1 and 2: gamescope.
+        # Path 1: gamescope, the DRM master. Only the compositor can stop scanning out,
+        # so this is the cooperative route and is tried first.
+        #
+        # gamescopectl reads GAMESCOPE_WAYLAND_DISPLAY (default "gamescope-0") and never
+        # WAYLAND_DISPLAY, and its socket lives in the SESSION user's runtime dir, not
+        # root's - a root caller that leaves XDG_RUNTIME_DIR at /run/user/0 silently
+        # reaches nothing. It also returns 0 after the roundtrip whether or not the
+        # property was accepted, so the only way to know is to read stderr.
         gamescopectl = shutil.which("gamescopectl") or next(
             (p for p in ("/usr/bin/gamescopectl", "/usr/local/bin/gamescopectl") if os.path.exists(p)),
             None,
         )
         if gamescopectl:
             user = self._get_session_user()
-            for uid_dir in glob.glob("/run/user/*"):
-                if not os.path.basename(uid_dir).isdigit():
+            for uid_dir in sorted(glob.glob("/run/user/*")):
+                uid = os.path.basename(uid_dir)
+                # /run/user/0 is root's own dir; gamescope never runs there, and a root
+                # shell inherits it, which is what made every previous attempt a no-op.
+                if not uid.isdigit() or uid == "0":
                     continue
-                env = os.environ.copy()
-                env["XDG_RUNTIME_DIR"] = uid_dir
-                for subcommand in ("drm_sleep_internal_screen", "drm_sleep_external_screen"):
-                    for cmd in (
-                        [gamescopectl, subcommand, arg],
-                        ["sudo", "-u", user, "env", f"XDG_RUNTIME_DIR={uid_dir}", gamescopectl, subcommand, arg],
-                    ):
-                        try:
-                            subprocess.run(
-                                cmd, env=env, check=False,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0,
-                            )
-                        except Exception:
-                            pass
+                sockets = [
+                    os.path.basename(p)
+                    for p in glob.glob(os.path.join(uid_dir, "gamescope-*"))
+                    if not p.endswith(".lock")
+                ] or ["gamescope-0"]
+                for socket in sockets:
+                    env = os.environ.copy()
+                    env["XDG_RUNTIME_DIR"] = uid_dir
+                    env["GAMESCOPE_WAYLAND_DISPLAY"] = socket
+                    for subcommand in ("drm_sleep_internal_screen", "drm_sleep_external_screen"):
+                        for cmd in (
+                            [gamescopectl, subcommand, arg],
+                            ["sudo", "-u", user, "env",
+                             f"XDG_RUNTIME_DIR={uid_dir}",
+                             f"GAMESCOPE_WAYLAND_DISPLAY={socket}",
+                             gamescopectl, subcommand, arg],
+                        ):
+                            try:
+                                res = subprocess.run(
+                                    cmd, env=env, check=False, capture_output=True,
+                                    text=True, timeout=2.0,
+                                )
+                                detail = (res.stderr or res.stdout or "").strip()
+                                logger.info(
+                                    f"gamescopectl {subcommand} {arg} "
+                                    f"[{uid_dir}:{socket}] rc={res.returncode}"
+                                    + (f" :: {detail[:200]}" if detail else "")
+                                )
+                            except Exception as e:
+                                logger.debug(f"gamescopectl {subcommand} failed: {e}")
 
-        # Path 3: DRM DPMS on each connected connector. Standard kernel interface, works
-        # on amdgpu, i915, nvidia-drm. Writing to this attribute does not need the DRM
-        # master, only root (which this plugin has through plugin.json flags).
-        for conn in glob.glob("/sys/class/drm/card*-*"):
-            try:
-                if self._read_text(os.path.join(conn, "status")) != "connected":
+        # Path 2: force the DRM connector's status, which is the ONLY way to produce a
+        # real "no signal" for an external TV.
+        #
+        # The connector's `dpms` and `enabled` attributes are 0444 - read-only even for
+        # root - so writing them was always a no-op, whatever earlier versions claimed.
+        # `status` is 0644 and accepts "off" / "on" / "detect": writing "off" makes the
+        # kernel report the connector disconnected and fire a hotplug uevent, so the
+        # compositor drops the output and the TMDS clock stops. That is the same event
+        # as unplugging the cable, which compositors handle routinely.
+        #
+        # Internal panels (eDP / LVDS / DSI) are never touched: on a handheld the
+        # backlight path already blanks the panel, and disabling its only connector
+        # would leave the device with nowhere to draw.
+        if sleep:
+            if not self.settings.get("tv_force_connector_off", False):
+                return
+            for conn in sorted(glob.glob("/sys/class/drm/card*-*")):
+                label = os.path.basename(conn)
+                if any(k in label.upper() for k in ("EDP", "LVDS", "DSI", "WRITEBACK")):
                     continue
-            except Exception:
-                continue
-            dpms_file = os.path.join(conn, "dpms")
-            if not os.path.exists(dpms_file):
-                continue
-            label = os.path.basename(conn)
-            try:
-                before = self._read_text(dpms_file)
-                if self._write_sysfs(dpms_file, dpms_state):
-                    logger.info(f"DRM DPMS on {label}: {before} -> {dpms_state} (sleep={sleep}).")
-            except Exception as e:
-                logger.debug(f"DRM DPMS on {label} failed: {e}")
+                status_file = os.path.join(conn, "status")
+                if not os.path.exists(status_file):
+                    continue
+                try:
+                    if self._read_text(status_file) != "connected":
+                        continue
+                    if self._write_sysfs(status_file, "off"):
+                        if label not in self.forced_off_connectors:
+                            self.forced_off_connectors.append(label)
+                        logger.info(f"Forced DRM connector {label} status -> off (TV should lose signal).")
+                    else:
+                        logger.info(f"Could not force {label} status to off.")
+                except Exception as e:
+                    logger.debug(f"Forcing {label} status off failed: {e}")
+            self._save_runtime_state()
+        else:
+            # Restore every connector this plugin forced off. "detect" hands control back
+            # to normal hotplug detection rather than pinning it on.
+            for label in list(self.forced_off_connectors):
+                status_file = os.path.join("/sys/class/drm", label, "status")
+                try:
+                    if os.path.exists(status_file) and self._write_sysfs(status_file, "detect"):
+                        logger.info(f"Restored DRM connector {label} status -> detect.")
+                    else:
+                        logger.warning(f"Could not restore {label} status; it may need a replug.")
+                except Exception as e:
+                    logger.warning(f"Restoring {label} status failed: {e}")
+            if self.forced_off_connectors:
+                self.forced_off_connectors = []
+                self._save_runtime_state()
 
     # ==========================================
     # Download Pacing (the "handheld console" profile)
@@ -3586,6 +3653,9 @@ class Plugin:
             "power_profile_set_by_us": self.power_profile_set_by_us,
             "audio_muted": self.audio_muted_by_us,
             "display_slept": self.display_slept_by_us,
+            # Connectors forced to "no signal". Persisted so a crash cannot leave a
+            # desktop with no display until the next replug.
+            "forced_off_connectors": list(self.forced_off_connectors),
             "ryzenadj": dict(self.saved_ryzenadj) if self.saved_ryzenadj else None,
             "applied_marks": dict(self.applied_marks),
             # Watchdog baselines, so the safety net survives a plugin reload.
@@ -3622,6 +3692,9 @@ class Plugin:
         self.power_profile_set_by_us = bool(state.get("power_profile_set_by_us"))
         self.audio_muted_by_us = bool(state.get("audio_muted"))
         self.display_slept_by_us = bool(state.get("display_slept"))
+        self.forced_off_connectors = [
+            str(c) for c in (state.get("forced_off_connectors") or []) if c
+        ]
         ryzenadj = state.get("ryzenadj")
         self.saved_ryzenadj = {k: int(v) for k, v in ryzenadj.items()} if isinstance(ryzenadj, dict) else None
         # Carried across a reload so the forced pass can still recognise its own work.
@@ -4189,8 +4262,11 @@ class Plugin:
             except Exception:
                 pass
 
-        # Wake the internal display back up through Gamescope (only if we slept it)
-        if self.display_slept_by_us:
+        # Wake the display back up through Gamescope. Also runs when only
+        # forced_off_connectors is set, which is the case after loading the runtime
+        # state of a session that crashed mid-standby: a display left at "no signal"
+        # has to come back even if the flag that put it there did not survive.
+        if self.display_slept_by_us or self.forced_off_connectors:
             self._set_gamescope_display(sleep=False)
             self.display_slept_by_us = False
 
@@ -4793,6 +4869,21 @@ class Plugin:
                     logger.warning("Input was still blocked outside background mode; releasing it now.")
                     self._uninhibit_all_inputs()
                     self._release_all_gamepad_inputs()
+
+                # Same reasoning for the display: a screen left at "no signal" outside
+                # the mode is as bad as dead input, and on a single-display desktop it
+                # would look like the machine died. Checked every pass rather than
+                # trusted to the exit path alone.
+                if (
+                    not self.is_background_mode
+                    and not self.transition_in_progress
+                    and self.forced_off_connectors
+                ):
+                    logger.warning(
+                        "Display connectors were still forced off outside background "
+                        f"mode ({', '.join(self.forced_off_connectors)}); restoring them now."
+                    )
+                    self._set_gamescope_display(sleep=False)
 
                 # A restore can be undone a second or two AFTER it finishes, because
                 # changing the ACPI profile makes the firmware re-apply its own limits on
