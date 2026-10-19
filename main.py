@@ -37,6 +37,10 @@ logger = decky.logger
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "enabled": True,
+    # When True, the plugin force-enables itself whenever the device is plugged into AC.
+    # Useful on a PC that is always on mains, or on a handheld the user only wants the
+    # plugin active for while charging. Overrides a False "enabled" only on AC.
+    "enable_plugin_when_plugged_in": False,
     "min_battery_threshold": 15,
     "hud_timeout_seconds": 5,
     "auto_suspend_delay_seconds": 120,
@@ -53,19 +57,23 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "debug_logging": True,
     "ui_recovery_on_wake": True,
     "auto_hard_reset_after_wake": True,
-    # Quiet-hours option: during the period [start_hour, end_hour), replace the plugin's
-    # standby with the real SteamOS sleep, as long as no download is active. The watchdog
-    # takes care of restoring the hardware on the next wake. The period wraps across
-    # midnight when end_hour < start_hour (so 23 - 07 means 23:00 through 06:59).
-    "enter_real_sleep_after_time": False,
-    "real_sleep_start_hour": 0,
-    "real_sleep_end_hour": 7,
-    # Programs the RTC to wake the console at end_hour, then re-enters the plugin's own
+    # Quiet-hours option: during the period [start, end), replace the plugin's standby
+    # with the real SteamOS sleep, as long as no download is active. The watchdog takes
+    # care of restoring the hardware on the next wake. Values are minutes-of-day in
+    # 10-minute steps (0..1430); the period wraps across midnight when end <= start
+    # (so 23:00 - 07:00 means 23:00 through 06:59).
+    "enter_real_sleep_after_time": True,
+    "real_sleep_start_minutes": 0,     # 00:00
+    "real_sleep_end_minutes": 420,     # 07:00
+    # Programs the RTC to wake the console at end, then re-enters the plugin's own
     # standby so a controller can wake it as usual. Pure Linux kernel feature, works on
     # any handheld or PC that exposes /sys/class/rtc/rtc0/wakealarm.
-    "wake_at_period_end": False,
+    "wake_at_period_end": True,
     # Standby: turn the power button into "console off, wakes on a controller"
-    "standby_on_power_off": False,
+    "standby_on_power_off": True,
+    # Advanced mode: when False, the UI hides anything that is not among the essentials.
+    # The backend uses every option regardless of this flag; it only affects the panel.
+    "advanced_mode": False,
     "wake_on_bluetooth_connect": True,
     "wake_on_controller_button": True,
 }
@@ -607,10 +615,39 @@ class Plugin:
                 with open(self.settings_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.settings.update(data)
+                self._migrate_legacy_settings()
             else:
                 self._save_settings_sync()
         except Exception as e:
             logger.error(f"Failed to load settings: {e}")
+
+    def _migrate_legacy_settings(self):
+        """One-shot upgrades for keys whose names or units changed between versions."""
+        changed = False
+        # real_sleep_{start,end}_hour (0..23) -> real_sleep_{start,end}_minutes (0..1430)
+        if "real_sleep_start_hour" in self.settings:
+            try:
+                self.settings["real_sleep_start_minutes"] = (
+                    int(self.settings["real_sleep_start_hour"]) * 60
+                )
+            except (TypeError, ValueError):
+                pass
+            self.settings.pop("real_sleep_start_hour", None)
+            changed = True
+        if "real_sleep_end_hour" in self.settings:
+            try:
+                self.settings["real_sleep_end_minutes"] = (
+                    int(self.settings["real_sleep_end_hour"]) * 60
+                )
+            except (TypeError, ValueError):
+                pass
+            self.settings.pop("real_sleep_end_hour", None)
+            changed = True
+        if changed:
+            try:
+                self._save_settings_sync()
+            except Exception:
+                pass
 
     def _save_settings_sync(self):
         try:
@@ -628,7 +665,7 @@ class Plugin:
         self._save_settings_sync()
         logger.info(f"Updated settings: {self.settings}")
 
-        if not self.settings.get("enabled", True) and self.is_background_mode:
+        if not self._effective_enabled() and self.is_background_mode:
             await self.exit_background_mode("disabled_in_settings")
 
         self._update_inhibitor_state()
@@ -858,6 +895,26 @@ class Plugin:
                 )
         return is_dl
 
+    def _effective_enabled(self) -> bool:
+        """
+        True iff the plugin should behave as enabled right now.
+
+        The user-facing 'Enable Plugin' toggle is the baseline. 'Enable Plugin When
+        Plugged In' is an overriding opt-in that force-enables the plugin while on AC,
+        even if the baseline toggle is off — meant for a desktop PC permanently plugged
+        in, or a handheld the user only wants the plugin active for while charging.
+        """
+        if self.settings.get("enabled", True):
+            return True
+        if self.settings.get("enable_plugin_when_plugged_in", False):
+            try:
+                bat = self._get_battery_info()
+                if bat and bat.get("is_plugged"):
+                    return True
+            except Exception:
+                pass
+        return False
+
     def _plugin_should_act(self) -> bool:
         """
         The single answer to 'may the plugin touch the system right now?'.
@@ -869,7 +926,7 @@ class Plugin:
         Standby mode is the one exception: there the power button has to be ours at all
         times, because turning it into "console off, wakes on a controller" is the point.
         """
-        if self.suspend_in_progress or not self.settings.get("enabled", True):
+        if self.suspend_in_progress or not self._effective_enabled():
             return False
         if self.settings.get("standby_on_power_off", False):
             return True
@@ -964,34 +1021,41 @@ class Plugin:
     RTC_WAKEALARM = "/sys/class/rtc/rtc0/wakealarm"
 
     def _quiet_hours_bounds(self) -> Optional[Tuple[int, int]]:
-        """(start_hour, end_hour) when the option is on and the hours are valid."""
+        """
+        (start_minutes_of_day, end_minutes_of_day) when the option is on and valid.
+
+        Values are 0..1430, snapped to 10-minute steps so the slider's values and the
+        bounds always line up. An empty period (start == end) returns None.
+        """
         if not self.settings.get("enter_real_sleep_after_time", False):
             return None
         try:
-            start = max(0, min(23, int(self.settings.get("real_sleep_start_hour", 0))))
-            end = max(0, min(23, int(self.settings.get("real_sleep_end_hour", 7))))
+            start = int(self.settings.get("real_sleep_start_minutes", 0))
+            end = int(self.settings.get("real_sleep_end_minutes", 420))
         except (TypeError, ValueError):
             return None
+        start = max(0, min(1430, (start // 10) * 10))
+        end = max(0, min(1430, (end // 10) * 10))
         if start == end:
-            return None  # Empty period
+            return None
         return (start, end)
 
     def _inside_quiet_hours(self) -> bool:
         """
         True when the clock is inside the user's quiet-hours period.
 
-        Period is [start, end): the start hour counts, the end hour does not. Natural
-        wrap-around for a period that crosses midnight: 23 - 07 means 23:00 through
-        06:59, so 02:00 is inside and 07:00 is outside.
+        Period is [start, end): the start minute counts, the end minute does not.
+        Natural wrap-around for a period that crosses midnight: 23:00 - 07:00 means
+        23:00 through 06:59, so 02:00 is inside and 07:00 is outside.
         """
         bounds = self._quiet_hours_bounds()
         if not bounds:
             return False
         start, end = bounds
-        current = datetime.datetime.now().hour
+        now = datetime.datetime.now()
+        current = now.hour * 60 + now.minute
         if start < end:
             return start <= current < end
-        # Wraps midnight
         return current >= start or current < end
 
     def _next_quiet_hours_end(self) -> Optional[int]:
@@ -1000,8 +1064,9 @@ class Plugin:
         if not bounds:
             return None
         _start, end = bounds
+        end_hour, end_min = divmod(end, 60)
         now = datetime.datetime.now()
-        target = now.replace(hour=end, minute=0, second=0, microsecond=0)
+        target = now.replace(hour=end_hour, minute=end_min, second=0, microsecond=0)
         if target <= now:
             target += datetime.timedelta(days=1)
         return int(target.timestamp())
@@ -1781,7 +1846,7 @@ class Plugin:
                 logger.info("Released power key device(s); SteamOS handles the power button again.")
 
     def _on_hardware_power_key(self):
-        if not self.settings.get("enabled", True):
+        if not self._effective_enabled():
             return
 
         now = time.time()
@@ -4613,7 +4678,7 @@ class Plugin:
                 now = time.time()
                 dt = now - self.last_loop_timestamp
                 self.last_loop_timestamp = now
-                enabled = bool(self.settings.get("enabled", True))
+                enabled = self._effective_enabled()
                 slept_for = interval
 
                 # Poll fast only when there is something to watch over. Idle means the

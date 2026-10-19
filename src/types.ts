@@ -1,5 +1,6 @@
 export interface PluginSettings {
   enabled: boolean;
+  enable_plugin_when_plugged_in: boolean; // default false — force-enables the plugin on AC regardless of 'enabled'
   min_battery_threshold: number; // default 15
   hud_timeout_seconds: number; // default 5
   auto_suspend_delay_seconds: number; // default 120
@@ -16,13 +17,14 @@ export interface PluginSettings {
   debug_logging: boolean; // default true
   ui_recovery_on_wake: boolean; // default true
   auto_hard_reset_after_wake: boolean; // default true
-  enter_real_sleep_after_time: boolean; // default false
-  real_sleep_start_hour: number; // 0-23, default 0
-  real_sleep_end_hour: number; // 0-23, default 7
-  wake_at_period_end: boolean; // default false, uses the RTC
-  standby_on_power_off: boolean; // default false
+  enter_real_sleep_after_time: boolean; // default true
+  real_sleep_start_minutes: number; // minutes-of-day, 0..1430 step 10, default 0 (00:00)
+  real_sleep_end_minutes: number;   // minutes-of-day, 0..1430 step 10, default 420 (07:00)
+  wake_at_period_end: boolean; // default true, uses the RTC
+  standby_on_power_off: boolean; // default true
   wake_on_bluetooth_connect: boolean; // default true
   wake_on_controller_button: boolean; // default true
+  advanced_mode: boolean; // default false — when off, the panel shows only the essentials
 }
 
 export interface DownloadInfo {

@@ -29,6 +29,7 @@ declare global {
 
 const DEFAULT_SETTINGS: PluginSettings = {
   enabled: true,
+  enable_plugin_when_plugged_in: false,
   min_battery_threshold: 15,
   hud_timeout_seconds: 5,
   auto_suspend_delay_seconds: 120,
@@ -45,13 +46,14 @@ const DEFAULT_SETTINGS: PluginSettings = {
   debug_logging: true,
   ui_recovery_on_wake: true,
   auto_hard_reset_after_wake: true,
-  enter_real_sleep_after_time: false,
-  real_sleep_start_hour: 0,
-  real_sleep_end_hour: 7,
-  wake_at_period_end: false,
-  standby_on_power_off: false,
+  enter_real_sleep_after_time: true,
+  real_sleep_start_minutes: 0,     // 00:00
+  real_sleep_end_minutes: 420,     // 07:00
+  wake_at_period_end: true,
+  standby_on_power_off: true,
   wake_on_bluetooth_connect: true,
   wake_on_controller_button: true,
+  advanced_mode: false,
 };
 
 // Must match WAKE_COOLDOWN_SECONDS in main.py: the window after a wake in which
