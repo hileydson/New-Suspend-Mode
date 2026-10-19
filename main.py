@@ -470,6 +470,11 @@ class Plugin:
         # RTC-based wake-at-end-of-quiet-hours. Persisted across plugin reloads so the
         # resume handler still fires if the plugin was reloaded during the sleep.
         self.rtc_wake_pending: bool = False
+        # After an RTC wake, the clock may still read a hair inside the quiet-hours
+        # window (end minute boundary). Without a grace period, the monitor loop sees
+        # that and triggers real sleep again — a loop. 10 minutes is enough for the
+        # minute to tick past, which is why the slider is 10-min granular to begin with.
+        self.rtc_wake_grace_until: float = 0.0
         self.rtc_wake_target: int = 0
         self.throttled_interfaces: List[str] = []
         self.runtime_state_file: str = ""
@@ -1152,16 +1157,18 @@ class Plugin:
         if not self.settings.get("standby_on_power_off", False):
             logger.info("[DIB RTC WAKE] Standby option is off; staying awake.")
             return
-        if self._inside_quiet_hours():
-            logger.info("[DIB RTC WAKE] Woke inside the quiet-hours window; running real sleep again.")
-            await self.trigger_suspend()
-            return
         self.wake_cooldown_until = 0.0
-        logger.info("[DIB RTC WAKE] Quiet-hours ended; entering the plugin's standby.")
-        ok = await self.request_standby("quiet_hours_rtc_end")
-        if not ok and not self.is_background_mode:
-            logger.info("[DIB RTC WAKE] request_standby declined; entering background mode directly.")
+        logger.info("[DIB RTC WAKE] Entering the plugin's new suspend mode.")
+        # Both `_maybe_real_sleep_instead` (called from request_standby) and the main
+        # loop's periodic check will see us as inside quiet hours if the RTC fired a
+        # hair before the end minute, and would re-trigger real sleep in a loop. The
+        # direct enter_background_mode path skips both.
+        if not self.is_background_mode:
             await self.enter_background_mode("quiet_hours_rtc_end")
+        await decky.emit("background_mode_changed", {
+            "is_background_mode": True,
+            "reason": "quiet_hours_rtc_end",
+        })
 
     async def request_standby(self, reason: str = "standby") -> bool:
         """
@@ -1550,6 +1557,7 @@ class Plugin:
                                 )
                                 self.rtc_wake_pending = False
                                 self.rtc_wake_target = 0
+                                self.rtc_wake_grace_until = now + 600.0
                                 if self.loop and self.loop.is_running():
                                     asyncio.run_coroutine_threadsafe(
                                         self._enter_standby_after_rtc_wake(), self.loop
@@ -4720,6 +4728,30 @@ class Plugin:
                             "reason": "system_resume_clock_jump",
                         })
 
+                    # Quiet-hours RTC wake handling, independent of logind journal messages.
+                    # The journal path may miss the resume event on some distros (different
+                    # log phrasing, journald not up yet), so the clock-jump path has to
+                    # own the hand-off into our new suspend mode as well.
+                    if self.rtc_wake_pending:
+                        diff = abs(now - self.rtc_wake_target)
+                        if diff <= 180:
+                            logger.info(
+                                f"[DIB RTC WAKE] Clock-jump resume at {int(now)}, target was "
+                                f"{self.rtc_wake_target} (diff {diff:.1f}s) -> entering new suspend mode."
+                            )
+                            self.rtc_wake_pending = False
+                            self.rtc_wake_target = 0
+                            self.rtc_wake_grace_until = now + 600.0
+                            self._save_runtime_state()
+                            asyncio.create_task(self._enter_standby_after_rtc_wake())
+                        else:
+                            logger.info(
+                                f"[DIB RTC WAKE] Clock-jump resume at {int(now)} is far from the "
+                                f"RTC target {self.rtc_wake_target} (diff {diff:.1f}s); "
+                                "treating as a manual wake and clearing the alarm."
+                            )
+                            self._clear_rtc_wake()
+
                 if not enabled:
                     continue
 
@@ -4805,7 +4837,12 @@ class Plugin:
                     # 22:50 reaches 23:00 while sitting here, and the user chose the
                     # real sleep for that case too. The exit comes first so the mode's
                     # restore runs cleanly; the real suspend follows.
-                    if self.standby_mode and self._inside_quiet_hours() and not self._is_active_download():
+                    if (
+                        self.standby_mode
+                        and self._inside_quiet_hours()
+                        and not self._is_active_download()
+                        and time.time() >= self.rtc_wake_grace_until
+                    ):
                         logger.info(
                             "[DIB QUIET HOURS] Entered the quiet-hours period while in our mode; "
                             "exiting it and running real SteamOS sleep."
