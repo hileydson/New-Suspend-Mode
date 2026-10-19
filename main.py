@@ -75,6 +75,15 @@ DISABLED_LOOP_INTERVAL = 10.0
 WAKE_COOLDOWN_SECONDS = 5.0
 # How long after a restore the plugin keeps checking that it stayed restored.
 POST_RESTORE_WATCH_SECONDS = 25.0
+# The permanent watchdog, in addition to the above: a periodic check that the plugin's
+# own throttles are not stuck in place long after a wake, as a workaround for every
+# unforeseen way a restore could fail. Runs only while NOT in the mode.
+THROTTLE_WATCHDOG_INTERVAL = 20.0
+# ryzenadj limits at or below this many milliwatts can only be a leftover of the plugin's
+# own 6 W cap: used by the snapshot (do not save as the originals) and the watchdog (re-apply
+# the real originals when they drift back down). 10 W is well below any sane APU default,
+# so a healthy machine never triggers.
+RYZENADJ_SANE_FLOOR_MW = 10000
 
 # Grace periods after entering background mode, before power/logind events count as a wake.
 POWER_KEY_GRACE_SECONDS = 2.5
@@ -425,6 +434,14 @@ class Plugin:
         self.post_restore_targets: Dict[str, str] = {}
         self.post_restore_marks: Dict[str, str] = {}
         self.post_restore_until: float = 0.0
+        # Permanent throttle watchdog. Known-good targets and the throttled values the
+        # plugin is known to have written, so a stuck setting can be told apart from
+        # another tool's choice. Updated at the END of each successful restore, kept for
+        # the whole plugin session (and across reloads, through the on-disk state).
+        self.watchdog_targets: Dict[str, str] = {}
+        self.watchdog_marks: Dict[str, str] = {}
+        self.watchdog_ryzenadj: Dict[str, int] = {}
+        self.last_watchdog_check: float = 0.0
         self.throttled_interfaces: List[str] = []
         self.runtime_state_file: str = ""
         self.last_telemetry_time: float = 0.0
@@ -1568,9 +1585,31 @@ class Plugin:
                 and self.saved_ryzenadj is None):
             limits = self._read_ryzenadj_limits()
             if limits:
-                self.saved_ryzenadj = limits
-                if self.settings.get("debug_logging", True):
-                    logger.info(f"[DIB SNAPSHOT] ryzenadj originals captured: {limits}")
+                # Guard against a failed restore from the previous cycle: if the limits are
+                # already at or below the plugin's own cap, they can only be the leftover
+                # of that cap, and saving them here would make the next restore write them
+                # back for good. Reuse the watchdog's known-good baseline when it has one,
+                # otherwise skip ryzenadj for this cycle entirely (no cap, no "restore"
+                # that would permanently throttle the APU).
+                suspect = any(
+                    0 < limits.get(k, 0) <= RYZENADJ_SANE_FLOOR_MW
+                    for k in ("stapm-limit", "fast-limit", "slow-limit")
+                )
+                if suspect and self.watchdog_ryzenadj:
+                    logger.warning(
+                        f"[DIB SNAPSHOT] ryzenadj reports {limits}, which looks like a leftover "
+                        f"of this plugin; using the last known-good baseline {self.watchdog_ryzenadj}."
+                    )
+                    self.saved_ryzenadj = dict(self.watchdog_ryzenadj)
+                elif suspect:
+                    logger.warning(
+                        f"[DIB SNAPSHOT] ryzenadj reports {limits}, which looks like a plugin cap; "
+                        "skipping ryzenadj for this cycle so we never write these back as originals."
+                    )
+                else:
+                    self.saved_ryzenadj = limits
+                    if self.settings.get("debug_logging", True):
+                        logger.info(f"[DIB SNAPSHOT] ryzenadj originals captured: {limits}")
 
         if self.settings.get("debug_logging", True):
             logger.info(
@@ -2228,6 +2267,61 @@ class Plugin:
             self.standby_known_gamepads.add(pad["input_dir"])
             names.append(pad["name"] or pad["input_dir"])
         return names
+
+    def _refresh_standby_wake_sources(self) -> int:
+        """
+        Picks up USB/dongle gamepads that connected AFTER standby began.
+
+        Without this, a controller plugged in during the mode had no wake capability (not
+        opened as a wake source) AND its input was accepted (not grabbed, not inhibited
+        until the next loop pass). The exact scenario is: a dongle controller is turned
+        off, then back on, Steam re-enumerates it and the kernel registers it, and in
+        the window before the next pass the user's buttons act on the console.
+
+        The lockout is extended first: a new pad is unbound/inhibited by the usual pass
+        in the monitor loop a moment later anyway, but doing it here closes the window.
+        """
+        added = 0
+        for pad in self._find_external_gamepads():
+            if pad["input_dir"] in self.standby_known_gamepads:
+                continue
+            if pad["event_path"] in self.wake_event_fds:
+                continue
+            self.standby_known_gamepads.add(pad["input_dir"])
+
+            # Try to open it as a wake source now, so a button press on it can bring the
+            # console back the same way one on a controller present at entry does.
+            if self.settings.get("wake_on_controller_button", True):
+                event_path, name = pad["event_path"], pad["name"]
+                try:
+                    fd = os.open(event_path, os.O_RDONLY | os.O_NONBLOCK)
+                    try:
+                        fcntl.ioctl(fd, EVIOCGRAB, 1)
+                        self.wake_event_fds[event_path] = fd
+                        self.wake_source_paths.add(event_path)
+                        added += 1
+                        logger.info(f"Standby: new controller '{name}' added as a wake source.")
+                        continue
+                    except Exception:
+                        os.close(fd)
+                except Exception as e:
+                    logger.info(f"Standby: new controller '{name}' could not be grabbed ({e}).")
+
+                hidraw = self._hidraw_for_input(pad["input_dir"])
+                if hidraw and os.path.exists(hidraw):
+                    try:
+                        hfd = os.open(hidraw, os.O_RDONLY | os.O_NONBLOCK)
+                        self.wake_hidraw_fds[hidraw] = hfd
+                        self.hidraw_state[hidraw] = {
+                            "baseline": None, "noisy": set(),
+                            "learn_until": time.time() + HIDRAW_LEARN_SECONDS,
+                            "hits": 0, "name": name,
+                        }
+                        added += 1
+                        logger.info(f"Standby: new controller '{name}' added as a raw HID wake source.")
+                    except Exception as e:
+                        logger.warning(f"Standby: could not open hidraw for new '{name}': {e}")
+        return added
 
     def _map_device_readers(self) -> Dict[str, List[str]]:
         """
@@ -2929,6 +3023,10 @@ class Plugin:
             "display_slept": self.display_slept_by_us,
             "ryzenadj": dict(self.saved_ryzenadj) if self.saved_ryzenadj else None,
             "applied_marks": dict(self.applied_marks),
+            # Watchdog baselines, so the safety net survives a plugin reload.
+            "watchdog_targets": dict(self.watchdog_targets),
+            "watchdog_marks": dict(self.watchdog_marks),
+            "watchdog_ryzenadj": dict(self.watchdog_ryzenadj) if self.watchdog_ryzenadj else None,
         }
 
     def _load_runtime_state(self, state: Dict[str, Any]):
@@ -2958,6 +3056,12 @@ class Plugin:
         self.saved_ryzenadj = {k: int(v) for k, v in ryzenadj.items()} if isinstance(ryzenadj, dict) else None
         # Carried across a reload so the forced pass can still recognise its own work.
         self.applied_marks = {str(k): str(v) for k, v in (state.get("applied_marks") or {}).items()}
+        # Watchdog baselines survive a reload: the plugin can still rescue a system that
+        # went slow between the previous instance's unload and this one's load.
+        self.watchdog_targets = {str(k): str(v) for k, v in (state.get("watchdog_targets") or {}).items()}
+        self.watchdog_marks = {str(k): str(v) for k, v in (state.get("watchdog_marks") or {}).items()}
+        wr = state.get("watchdog_ryzenadj")
+        self.watchdog_ryzenadj = {str(k): int(v) for k, v in wr.items()} if isinstance(wr, dict) else {}
 
     def _save_runtime_state(self):
         """
@@ -3383,6 +3487,10 @@ class Plugin:
         # Keep watching for a short while: see _recheck_after_restore.
         self.post_restore_targets = dict(targets)
         self.post_restore_until = time.time() + POST_RESTORE_WATCH_SECONDS
+
+        # Keep watching forever (while NOT in the mode) as a safety net: see
+        # _throttle_watchdog. This is the "contorno" the user asked for.
+        self._arm_watchdog_from_targets()
         if failed or forced or stubborn:
             logger.warning(
                 f"Restore finished with problems. failed_stages={failed or 'none'} "
@@ -3677,6 +3785,97 @@ class Plugin:
         if fallback and fallback != mark and self._write_sysfs(path, fallback):
             return f"{path} was still at {mark}, set to {fallback}"
         return ""
+
+    def _arm_watchdog_from_targets(self):
+        """
+        After a successful restore, record the known-good values so the watchdog can
+        tell them apart from another tool's choice.
+
+        Called at the end of _restore_system_power_and_display. Values are added, never
+        removed: an alternate restore might not touch everything a previous one did, and
+        anything left out would stop being guarded.
+        """
+        self.watchdog_targets.update(self.post_restore_targets)
+        self.watchdog_marks.update(self.post_restore_marks)
+        if self.saved_ryzenadj:
+            # Ignore a saved value that was itself our own cap: that would make the
+            # watchdog write the cap back forever.
+            if not any(
+                0 < self.saved_ryzenadj.get(k, 0) <= RYZENADJ_SANE_FLOOR_MW
+                for k in ("stapm-limit", "fast-limit", "slow-limit")
+            ):
+                self.watchdog_ryzenadj = dict(self.saved_ryzenadj)
+        self._save_runtime_state()
+
+    def _throttle_watchdog(self) -> List[str]:
+        """
+        Periodic safety net: a check that this plugin's own throttles are not stuck in
+        place long after a wake.
+
+        Only acts on values that match EXACTLY what the apply would have written, so a
+        value a different tool chose (PowerTools, HHD TDP control, the user themselves)
+        is never fought. Only runs while the plugin is NOT in the mode, past the wake
+        cooldown. Logged every time it corrects anything.
+
+        This is a workaround on purpose: the apply, the restore and the convergence are
+        the real paths. The watchdog is here for the cases none of them handles - a
+        kernel driver re-asserting its limits an hour later, a firmware event, another
+        tool crashing with the plugin's cap still in place. The user asked for exactly
+        this: "seria legal ficar checkando de tempos em tempos, porque caso aconteca
+        alguma falha ao voltar, esse check faz voltar ao normal".
+        """
+        if self.is_background_mode or self.transition_in_progress:
+            return []
+        now = time.time()
+        if now < self.wake_cooldown_until + 3.0:
+            return []
+        if now - self.last_watchdog_check < THROTTLE_WATCHDOG_INTERVAL:
+            return []
+        self.last_watchdog_check = now
+
+        repairs: List[str] = []
+
+        # sysfs: a value that matches our cap AND has a recorded target to put back.
+        for path, want in self.watchdog_targets.items():
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r") as f:
+                    have = f.read().strip()
+            except Exception:
+                continue
+            if have == want:
+                continue
+            mark = self.watchdog_marks.get(path)
+            if mark is None or have != mark:
+                continue  # Something else wrote it; leave it alone
+            if self._write_sysfs(path, want):
+                repairs.append(f"{os.path.basename(path)}: {have}->{want}")
+
+        # ryzenadj: the APU limits can drift back down from firmware events the sysfs
+        # paths above do not catch. Re-apply the real originals if any of them has
+        # dropped at or below the plugin's own cap.
+        if self.watchdog_ryzenadj and shutil.which("ryzenadj"):
+            current = self._read_ryzenadj_limits()
+            if current:
+                too_low = any(
+                    0 < current.get(k, 999999) <= RYZENADJ_SANE_FLOOR_MW
+                    for k in ("stapm-limit", "fast-limit", "slow-limit")
+                )
+                if too_low:
+                    args = [f"--{opt}={val}" for opt, val in sorted(self.watchdog_ryzenadj.items())]
+                    try:
+                        subprocess.run(
+                            ["ryzenadj"] + args, check=False,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8.0,
+                        )
+                        repairs.append(f"ryzenadj {current} -> {self.watchdog_ryzenadj}")
+                    except Exception as e:
+                        logger.warning(f"Watchdog ryzenadj re-apply failed: {e}")
+
+        if repairs:
+            logger.warning(f"[DIB WATCHDOG] Repaired drifted throttles: {repairs}")
+        return repairs
 
     def _recheck_after_restore(self) -> List[str]:
         """
@@ -3988,6 +4187,12 @@ class Plugin:
                         self.post_restore_targets = {}
                         self.post_restore_marks = {}
 
+                # Permanent watchdog: a safety net for the cases none of the paths above
+                # catch. Runs quietly every ~20s while NOT in the mode, and corrects
+                # ONLY values that match the plugin's own cap exactly. See the function.
+                if self.watchdog_targets or self.watchdog_ryzenadj:
+                    self._throttle_watchdog()
+
                 # 2. In Background Mode Checks
                 if self.is_background_mode and not self.transition_in_progress:
                     # Keep the panels we dimmed dark (Steam re-lights them on its own)
@@ -4012,6 +4217,12 @@ class Plugin:
                     self._flush_grabbed_inputs()
                     self._grab_new_inputs()
                     self._inhibit_all_inputs()
+
+                    # A USB/dongle controller that connects AFTER standby began has no wake
+                    # capability unless this adds it, and its buttons would act on the
+                    # console in the window before the next grab/inhibit pass.
+                    if self.standby_mode:
+                        self._refresh_standby_wake_sources()
 
                     # A Bluetooth controller connecting is itself the wake signal: there is
                     # no button to press, the pairing is the request for the console back.
