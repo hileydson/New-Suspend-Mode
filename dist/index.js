@@ -1,4 +1,4 @@
-const manifest = {"name":"Download in Background"};
+const manifest = {"name":"New Suspend Mode"};
 const API_VERSION = 2;
 const internalAPIConnection = window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit;
 if (!internalAPIConnection) {
@@ -101,12 +101,12 @@ const Overlay = ({ isBackgroundMode, showHud, showSplash, countdown, downloadInf
     }
     // Pure black screen mode (hardware power button, or a controller, is the wake trigger)
     if (isBackgroundMode) {
-        return (SP_JSX.jsx("div", { className: "dib-overlay-container dib-overlay-blackout", tabIndex: -1, "aria-hidden": "true" }));
+        return (SP_JSX.jsx("div", { className: "nsm-overlay-container nsm-overlay-blackout", tabIndex: -1, "aria-hidden": "true" }));
     }
     // Standby splash: shown while the panel is still lit, just before the screen goes
     // dark. Takes the place of the download card when there is no download to report.
     if (showSplash) {
-        return (SP_JSX.jsx("div", { className: "dib-overlay-container dib-overlay-splash", tabIndex: -1, "aria-hidden": "true", children: SP_JSX.jsxs("div", { className: "dib-splash", children: [SP_JSX.jsx(FaDownload, { className: "dib-splash-icon" }), SP_JSX.jsx("div", { className: "dib-splash-title", children: "New Suspend Mode" }), SP_JSX.jsx("div", { className: "dib-splash-subtitle", children: "Press POWER or use a controller to wake" })] }) }));
+        return (SP_JSX.jsx("div", { className: "nsm-overlay-container nsm-overlay-splash", tabIndex: -1, "aria-hidden": "true", children: SP_JSX.jsxs("div", { className: "nsm-splash", children: [SP_JSX.jsx(FaDownload, { className: "nsm-splash-icon" }), SP_JSX.jsx("div", { className: "nsm-splash-title", children: "New Suspend Mode" }), SP_JSX.jsx("div", { className: "nsm-splash-subtitle", children: "Press POWER or use a controller to wake" })] }) }));
     }
     // Download HUD Mode (Countdown before screen off)
     const percent = Math.min(100, Math.max(0, downloadInfo.progress_percent || 0));
@@ -138,7 +138,7 @@ const Overlay = ({ isBackgroundMode, showHud, showSplash, countdown, downloadInf
         }
         return `${m}m ${s}s`;
     };
-    return (SP_JSX.jsx("div", { className: "dib-overlay-container dib-overlay-hud", children: SP_JSX.jsxs("div", { className: "dib-hud-card", children: [SP_JSX.jsxs("div", { className: "dib-hud-header", children: [SP_JSX.jsxs("div", { className: "dib-hud-title-box", children: [SP_JSX.jsx(FaDownload, { className: "dib-hud-icon" }), SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { className: "dib-hud-title", children: "Download in Background" }), SP_JSX.jsx("div", { className: "dib-hud-subtitle", children: "System entering low-power mode to continue downloads" })] })] }), SP_JSX.jsxs("div", { className: "dib-countdown-badge", children: [SP_JSX.jsx(FaMoon, {}), "Screen off in ", countdown, "s"] })] }), SP_JSX.jsxs("div", { className: "dib-game-info", children: [SP_JSX.jsx("div", { className: "dib-game-title", children: gameTitle }), SP_JSX.jsx("div", { className: "dib-progress-container", children: SP_JSX.jsx("div", { className: "dib-progress-bar", style: { width: `${percent > 0 ? percent : 2}%` } }) }), SP_JSX.jsxs("div", { className: "dib-metrics-row", children: [SP_JSX.jsxs("div", { className: "dib-metric-item", children: [SP_JSX.jsx("span", { children: "Speed:" }), SP_JSX.jsx("span", { className: "dib-metric-value", children: formatSpeed(downloadInfo.bytes_per_second) })] }), SP_JSX.jsxs("div", { className: "dib-metric-item", children: [SP_JSX.jsx("span", { children: "Progress:" }), SP_JSX.jsxs("span", { className: "dib-metric-value", children: [percent.toFixed(1), "% (", formatSize(downloadInfo.completed_bytes), " / ", formatSize(downloadInfo.total_bytes), ")"] })] }), SP_JSX.jsxs("div", { className: "dib-metric-item", children: [SP_JSX.jsx("span", { children: "Time Left:" }), SP_JSX.jsx("span", { className: "dib-metric-value", children: formatTime(downloadInfo.estimated_seconds_remaining) })] })] })] }), SP_JSX.jsxs("div", { className: "dib-status-badges", children: [SP_JSX.jsxs("div", { className: "dib-badge", children: [SP_JSX.jsx(FaBatteryThreeQuarters, { className: `dib-badge-icon ${batteryCapacity <= 20 ? "warning" : ""}` }), SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { className: "dib-badge-title", children: "Battery Level" }), SP_JSX.jsxs("div", { className: "dib-badge-val", children: [batteryCapacity, "% ", isCharging ? "(Charging)" : ""] })] })] }), SP_JSX.jsxs("div", { className: "dib-badge", children: [SP_JSX.jsx(FaBolt, { className: "dib-badge-icon" }), SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { className: "dib-badge-title", children: "Auto-Suspend Threshold" }), SP_JSX.jsxs("div", { className: "dib-badge-val", children: ["At \u2264 ", settings.min_battery_threshold, "% or on finish"] })] })] })] }), SP_JSX.jsxs("div", { className: "dib-hud-actions", children: [SP_JSX.jsx("button", { className: "dib-btn-primary", onClick: onEnterBlackout, children: "Turn Off Screen Now" }), SP_JSX.jsxs("button", { className: "dib-btn-secondary", onClick: onWake, children: [SP_JSX.jsx(FaTimes, { style: { marginRight: 6 } }), " Cancel & Keep Awake"] })] }), SP_JSX.jsx("div", { className: "dib-hud-footer", children: "Screen turns off automatically. Press the POWER button at any time to wake console back to normal." })] }) }));
+    return (SP_JSX.jsx("div", { className: "nsm-overlay-container nsm-overlay-hud", children: SP_JSX.jsxs("div", { className: "nsm-hud-card", children: [SP_JSX.jsxs("div", { className: "nsm-hud-header", children: [SP_JSX.jsxs("div", { className: "nsm-hud-title-box", children: [SP_JSX.jsx(FaDownload, { className: "nsm-hud-icon" }), SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { className: "nsm-hud-title", children: "New Suspend Mode" }), SP_JSX.jsx("div", { className: "nsm-hud-subtitle", children: "System entering low-power mode to continue downloads" })] })] }), SP_JSX.jsxs("div", { className: "nsm-countdown-badge", children: [SP_JSX.jsx(FaMoon, {}), "Screen off in ", countdown, "s"] })] }), SP_JSX.jsxs("div", { className: "nsm-game-info", children: [SP_JSX.jsx("div", { className: "nsm-game-title", children: gameTitle }), SP_JSX.jsx("div", { className: "nsm-progress-container", children: SP_JSX.jsx("div", { className: "nsm-progress-bar", style: { width: `${percent > 0 ? percent : 2}%` } }) }), SP_JSX.jsxs("div", { className: "nsm-metrics-row", children: [SP_JSX.jsxs("div", { className: "nsm-metric-item", children: [SP_JSX.jsx("span", { children: "Speed:" }), SP_JSX.jsx("span", { className: "nsm-metric-value", children: formatSpeed(downloadInfo.bytes_per_second) })] }), SP_JSX.jsxs("div", { className: "nsm-metric-item", children: [SP_JSX.jsx("span", { children: "Progress:" }), SP_JSX.jsxs("span", { className: "nsm-metric-value", children: [percent.toFixed(1), "% (", formatSize(downloadInfo.completed_bytes), " / ", formatSize(downloadInfo.total_bytes), ")"] })] }), SP_JSX.jsxs("div", { className: "nsm-metric-item", children: [SP_JSX.jsx("span", { children: "Time Left:" }), SP_JSX.jsx("span", { className: "nsm-metric-value", children: formatTime(downloadInfo.estimated_seconds_remaining) })] })] })] }), SP_JSX.jsxs("div", { className: "nsm-status-badges", children: [SP_JSX.jsxs("div", { className: "nsm-badge", children: [SP_JSX.jsx(FaBatteryThreeQuarters, { className: `nsm-badge-icon ${batteryCapacity <= 20 ? "warning" : ""}` }), SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { className: "nsm-badge-title", children: "Battery Level" }), SP_JSX.jsxs("div", { className: "nsm-badge-val", children: [batteryCapacity, "% ", isCharging ? "(Charging)" : ""] })] })] }), SP_JSX.jsxs("div", { className: "nsm-badge", children: [SP_JSX.jsx(FaBolt, { className: "nsm-badge-icon" }), SP_JSX.jsxs("div", { children: [SP_JSX.jsx("div", { className: "nsm-badge-title", children: "Auto-Suspend Threshold" }), SP_JSX.jsxs("div", { className: "nsm-badge-val", children: ["At \u2264 ", settings.min_battery_threshold, "% or on finish"] })] })] })] }), SP_JSX.jsxs("div", { className: "nsm-hud-actions", children: [SP_JSX.jsx("button", { className: "nsm-btn-primary", onClick: onEnterBlackout, children: "Turn Off Screen Now" }), SP_JSX.jsxs("button", { className: "nsm-btn-secondary", onClick: onWake, children: [SP_JSX.jsx(FaTimes, { style: { marginRight: 6 } }), " Cancel & Keep Awake"] })] }), SP_JSX.jsx("div", { className: "nsm-hud-footer", children: "Screen turns off automatically. Press the POWER button at any time to wake console back to normal." })] }) }));
 };
 
 const formatHM = (minutes) => {
@@ -155,7 +155,7 @@ const SettingsPanel = ({ settings, setSettings, downloadInfo, isBackgroundMode, 
             await call("save_settings", updated);
         }
         catch (e) {
-            console.error("[DownloadInBackground] Error saving settings:", e);
+            console.error("[NewSuspendMode] Error saving settings:", e);
         }
     };
     const formatSpeed = (bytesPerSec) => {
@@ -177,7 +177,7 @@ const SettingsPanel = ({ settings, setSettings, downloadInfo, isBackgroundMode, 
                                 ? `${downloadInfo.game_title || "Steam Download"} (${formatSpeed(downloadInfo.bytes_per_second)})`
                                 : isPaused
                                     ? `${downloadInfo.game_title ? downloadInfo.game_title + " (Paused)" : "Downloads paused"}`
-                                    : "No active downloads", children: SP_JSX.jsx("span", { className: `dib-status-tag ${isDownloading ? "downloading" : isPaused ? "paused" : "idle"}`, children: isDownloading ? "DOWNLOADING" : isPaused ? "PAUSED" : "IDLE" }) }) }), (isDownloading || (isPaused && downloadInfo.total_bytes > 0)) && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { width: "100%", margin: "4px 0" }, children: [SP_JSX.jsxs("div", { style: {
+                                    : "No active downloads", children: SP_JSX.jsx("span", { className: `nsm-status-tag ${isDownloading ? "downloading" : isPaused ? "paused" : "idle"}`, children: isDownloading ? "DOWNLOADING" : isPaused ? "PAUSED" : "IDLE" }) }) }), (isDownloading || (isPaused && downloadInfo.total_bytes > 0)) && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { width: "100%", margin: "4px 0" }, children: [SP_JSX.jsxs("div", { style: {
                                         display: "flex",
                                         justifyContent: "space-between",
                                         fontSize: "12px",
@@ -189,18 +189,18 @@ const SettingsPanel = ({ settings, setSettings, downloadInfo, isBackgroundMode, 
                                 ? "Console off, waiting for a controller"
                                 : isBackgroundMode
                                     ? "Active (Screen off & power saving enabled)"
-                                    : "Inactive (Normal operation)", children: SP_JSX.jsx("span", { className: `dib-status-tag ${isBackgroundMode ? "active" : "idle"}`, children: standbyMode ? "STANDBY" : isBackgroundMode ? "ACTIVE" : "IDLE" }) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Essentials", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Replace Sleep With New Suspend Mode", description: "The power button AND the Sleep option in the SteamOS power menu both enter the plugin's new suspend mode instead of the stock one: screen black, downloads carry on, a controller brings it back. Shut Down still powers off for real.", checked: settings.standby_on_power_off, onChange: (checked) => updateSetting("standby_on_power_off", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Real Sleep During A Time Period", description: "Inside the period below, with no download running, a Sleep from the power menu or the power button triggers the REAL SteamOS sleep instead of our standby. The period wraps across midnight (e.g. 23:00 - 07:00 means 23:00 through 06:59).", checked: settings.enter_real_sleep_after_time === true, onChange: (checked) => updateSetting("enter_real_sleep_after_time", checked) }) }), settings.enter_real_sleep_after_time && (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: `Period Start — ${formatHM(startMin)}`, description: `Period: ${formatHM(startMin)} - ${formatHM(endMin)}. Inside the window, real sleep. Outside, our standby as usual.`, value: startMin, min: 0, max: 1430, step: 10, onChange: (val) => updateSetting("real_sleep_start_minutes", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: `Period End — ${formatHM(endMin)}`, value: endMin, min: 0, max: 1430, step: 10, onChange: (val) => updateSetting("real_sleep_end_minutes", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Return To New Suspend Mode At Period End", description: "At the end of the period, the RTC wakes the system from the real sleep and the plugin immediately re-enters the new suspend mode, so a controller can wake it. If off, the console stays in the real sleep until you wake it manually.", checked: settings.wake_at_period_end === true, onChange: (checked) => updateSetting("wake_at_period_end", checked) }) })] })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Slow Down Download", description: "Caps incoming speed so there is far less to decompress and write. Downloads take longer, the console stays cold and the fans stay off.", checked: settings.limit_download_speed, onChange: (checked) => updateSetting("limit_download_speed", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: async () => {
+                                    : "Inactive (Normal operation)", children: SP_JSX.jsx("span", { className: `nsm-status-tag ${isBackgroundMode ? "active" : "idle"}`, children: standbyMode ? "STANDBY" : isBackgroundMode ? "ACTIVE" : "IDLE" }) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Essentials", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Replace Sleep With New Suspend Mode", description: "The power button AND the Sleep option in the SteamOS power menu both enter the plugin's new suspend mode instead of the stock one: screen black, downloads carry on, a controller brings it back. Shut Down still powers off for real.", checked: settings.standby_on_power_off, onChange: (checked) => updateSetting("standby_on_power_off", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Real Sleep During A Time Period", description: "Inside the period below, with no download running, a Sleep from the power menu or the power button triggers the REAL SteamOS sleep instead of our standby. The period wraps across midnight (e.g. 23:00 - 07:00 means 23:00 through 06:59).", checked: settings.enter_real_sleep_after_time === true, onChange: (checked) => updateSetting("enter_real_sleep_after_time", checked) }) }), settings.enter_real_sleep_after_time && (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: `Period Start — ${formatHM(startMin)}`, description: `Period: ${formatHM(startMin)} - ${formatHM(endMin)}. Inside the window, real sleep. Outside, our standby as usual.`, value: startMin, min: 0, max: 1430, step: 10, onChange: (val) => updateSetting("real_sleep_start_minutes", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: `Period End — ${formatHM(endMin)}`, value: endMin, min: 0, max: 1430, step: 10, onChange: (val) => updateSetting("real_sleep_end_minutes", val) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Return To New Suspend Mode At Period End", description: "At the end of the period, the RTC wakes the system from the real sleep and the plugin immediately re-enters the new suspend mode, so a controller can wake it. If off, the console stays in the real sleep until you wake it manually.", checked: settings.wake_at_period_end === true, onChange: (checked) => updateSetting("wake_at_period_end", checked) }) })] })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Slow Down Download", description: "Caps incoming speed so there is far less to decompress and write. Downloads take longer, the console stays cold and the fans stay off.", checked: settings.limit_download_speed, onChange: (checked) => updateSetting("limit_download_speed", checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: async () => {
                                 try {
                                     await call("force_restore");
                                     toaster.toast({
-                                        title: "Download in Background",
+                                        title: "New Suspend Mode",
                                         body: "Hardware restored: clocks, power limits and speed caps are back to normal.",
                                         duration: 4000,
                                     });
                                 }
                                 catch (e) {
                                     toaster.toast({
-                                        title: "Download in Background",
+                                        title: "New Suspend Mode",
                                         body: "Could not restore the hardware; see the plugin log.",
                                         duration: 4000,
                                     });
@@ -211,9 +211,9 @@ const SettingsPanel = ({ settings, setSettings, downloadInfo, isBackgroundMode, 
 };
 
 const PLUGIN_STYLES = `
-/* Download in Background - Styles */
+/* New Suspend Mode - Styles */
 
-.dib-overlay-container {
+.nsm-overlay-container {
   position: fixed;
   top: 0;
   left: 0;
@@ -230,7 +230,7 @@ const PLUGIN_STYLES = `
 }
 
 /* Blackout mode: 100% pitch black for OLED and LCD */
-.dib-overlay-blackout {
+.nsm-overlay-blackout {
   background-color: #000000 !important;
   cursor: none;
   pointer-events: all;
@@ -239,12 +239,12 @@ const PLUGIN_STYLES = `
 
 /* Standby splash: the plugin mark on a black screen, shown while the panel is still lit,
    just before the console goes dark. Takes the place of the download card. */
-.dib-overlay-splash {
+.nsm-overlay-splash {
   background-color: #000000;
   animation: dibFadeIn 0.25s ease-out;
 }
 
-.dib-splash {
+.nsm-splash {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -252,20 +252,20 @@ const PLUGIN_STYLES = `
   animation: dibSplashIn 0.5s ease-out;
 }
 
-.dib-splash-icon {
+.nsm-splash-icon {
   font-size: 60px;
   color: #4aa3ff;
   filter: drop-shadow(0 0 22px rgba(74, 163, 255, 0.45));
 }
 
-.dib-splash-title {
+.nsm-splash-title {
   font-size: 19px;
   font-weight: 600;
   letter-spacing: 0.3px;
   color: #e8eefc;
 }
 
-.dib-splash-subtitle {
+.nsm-splash-subtitle {
   font-size: 13px;
   color: #93a4c4;
 }
@@ -276,7 +276,7 @@ const PLUGIN_STYLES = `
 }
 
 /* HUD Mode: Dark glassmorphic overlay */
-.dib-overlay-hud {
+.nsm-overlay-hud {
   background: radial-gradient(circle at center, rgba(16, 24, 40, 0.94) 0%, rgba(10, 14, 23, 0.98) 100%);
   backdrop-filter: blur(16px);
   animation: dibFadeIn 0.3s ease-out;
@@ -293,7 +293,7 @@ const PLUGIN_STYLES = `
   }
 }
 
-.dib-hud-card {
+.nsm-hud-card {
   width: 600px;
   max-width: 90vw;
   background: rgba(30, 41, 59, 0.85);
@@ -307,38 +307,38 @@ const PLUGIN_STYLES = `
   position: relative;
 }
 
-.dib-hud-header {
+.nsm-hud-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
 }
 
-.dib-hud-title-box {
+.nsm-hud-title-box {
   display: flex;
   align-items: center;
   gap: 14px;
 }
 
-.dib-hud-icon {
+.nsm-hud-icon {
   font-size: 32px;
   color: #38bdf8;
   filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.5));
 }
 
-.dib-hud-title {
+.nsm-hud-title {
   font-size: 22px;
   font-weight: 700;
   letter-spacing: 0.5px;
   color: #f8fafc;
 }
 
-.dib-hud-subtitle {
+.nsm-hud-subtitle {
   font-size: 13px;
   color: #94a3b8;
   margin-top: 2px;
 }
 
-.dib-countdown-badge {
+.nsm-countdown-badge {
   background: rgba(56, 189, 248, 0.15);
   border: 1px solid rgba(56, 189, 248, 0.4);
   color: #38bdf8;
@@ -351,14 +351,14 @@ const PLUGIN_STYLES = `
   gap: 6px;
 }
 
-.dib-game-info {
+.nsm-game-info {
   background: rgba(15, 23, 42, 0.6);
   border-radius: 12px;
   padding: 16px 20px;
   border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
-.dib-game-title {
+.nsm-game-title {
   font-size: 18px;
   font-weight: 600;
   color: #ffffff;
@@ -368,7 +368,7 @@ const PLUGIN_STYLES = `
   text-overflow: ellipsis;
 }
 
-.dib-progress-container {
+.nsm-progress-container {
   width: 100%;
   height: 12px;
   background: rgba(51, 65, 85, 0.6);
@@ -377,7 +377,7 @@ const PLUGIN_STYLES = `
   position: relative;
 }
 
-.dib-progress-bar {
+.nsm-progress-bar {
   height: 100%;
   background: linear-gradient(90deg, #0284c7 0%, #38bdf8 50%, #818cf8 100%);
   border-radius: 6px;
@@ -385,7 +385,7 @@ const PLUGIN_STYLES = `
   box-shadow: 0 0 12px rgba(56, 189, 248, 0.6);
 }
 
-.dib-metrics-row {
+.nsm-metrics-row {
   display: flex;
   justify-content: space-between;
   margin-top: 10px;
@@ -393,23 +393,23 @@ const PLUGIN_STYLES = `
   color: #cbd5e1;
 }
 
-.dib-metric-item {
+.nsm-metric-item {
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
-.dib-metric-value {
+.nsm-metric-value {
   font-weight: 600;
   color: #38bdf8;
 }
 
-.dib-status-badges {
+.nsm-status-badges {
   display: flex;
   gap: 12px;
 }
 
-.dib-badge {
+.nsm-badge {
   flex: 1;
   background: rgba(15, 23, 42, 0.5);
   border: 1px solid rgba(255, 255, 255, 0.06);
@@ -421,35 +421,35 @@ const PLUGIN_STYLES = `
   font-size: 13px;
 }
 
-.dib-badge-icon {
+.nsm-badge-icon {
   font-size: 18px;
   color: #10b981;
 }
 
-.dib-badge-icon.warning {
+.nsm-badge-icon.warning {
   color: #f59e0b;
 }
 
-.dib-badge-title {
+.nsm-badge-title {
   font-size: 11px;
   color: #94a3b8;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 
-.dib-badge-val {
+.nsm-badge-val {
   font-size: 14px;
   font-weight: 600;
   color: #f1f5f9;
 }
 
-.dib-hud-actions {
+.nsm-hud-actions {
   display: flex;
   gap: 12px;
   margin-top: 4px;
 }
 
-.dib-btn-primary {
+.nsm-btn-primary {
   flex: 1;
   background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
   color: #ffffff;
@@ -463,12 +463,12 @@ const PLUGIN_STYLES = `
   box-shadow: 0 4px 12px rgba(2, 132, 199, 0.3);
 }
 
-.dib-btn-primary:hover {
+.nsm-btn-primary:hover {
   background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%);
   transform: translateY(-1px);
 }
 
-.dib-btn-secondary {
+.nsm-btn-secondary {
   flex: 1;
   background: rgba(51, 65, 85, 0.6);
   color: #e2e8f0;
@@ -481,12 +481,12 @@ const PLUGIN_STYLES = `
   transition: all 0.2s;
 }
 
-.dib-btn-secondary:hover {
+.nsm-btn-secondary:hover {
   background: rgba(71, 85, 105, 0.8);
   color: #ffffff;
 }
 
-.dib-hud-footer {
+.nsm-hud-footer {
   text-align: center;
   font-size: 12px;
   color: #64748b;
@@ -494,7 +494,7 @@ const PLUGIN_STYLES = `
 }
 
 /* QAM Panel Styles */
-.dib-panel-status-card {
+.nsm-panel-status-card {
   background: rgba(30, 41, 59, 0.5);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
@@ -502,7 +502,7 @@ const PLUGIN_STYLES = `
   margin-bottom: 12px;
 }
 
-.dib-status-tag {
+.nsm-status-tag {
   display: inline-block;
   padding: 4px 8px;
   border-radius: 6px;
@@ -511,25 +511,25 @@ const PLUGIN_STYLES = `
   text-transform: uppercase;
 }
 
-.dib-status-tag.active {
+.nsm-status-tag.active {
   background: rgba(16, 185, 129, 0.2);
   color: #34d399;
   border: 1px solid rgba(16, 185, 129, 0.4);
 }
 
-.dib-status-tag.downloading {
+.nsm-status-tag.downloading {
   background: rgba(56, 189, 248, 0.2);
   color: #38bdf8;
   border: 1px solid rgba(56, 189, 248, 0.4);
 }
 
-.dib-status-tag.paused {
+.nsm-status-tag.paused {
   background: rgba(245, 158, 11, 0.2);
   color: #fbbf24;
   border: 1px solid rgba(245, 158, 11, 0.4);
 }
 
-.dib-status-tag.idle {
+.nsm-status-tag.idle {
   background: rgba(148, 163, 184, 0.15);
   color: #94a3b8;
   border: 1px solid rgba(148, 163, 184, 0.3);
@@ -667,7 +667,7 @@ const centerSignature = () => {
         const el = uiDocument().elementFromPoint(Math.round(win.innerWidth / 2), Math.round(win.innerHeight / 2));
         if (!el)
             return "none";
-        if (typeof el.closest === "function" && el.closest(".dib-overlay-container"))
+        if (typeof el.closest === "function" && el.closest(".nsm-overlay-container"))
             return "ours";
         const parent = el.parentElement;
         return [
@@ -709,7 +709,7 @@ let sharedCenterBeforeSleep = null;
  * Takes the plugin's own black overlay off the screen, without going through React.
  *
  * This is what the console's log finally caught: after waking, the element covering the
- * middle of the screen was `dib-overlay-container dib-overlay-blackout` - the plugin's
+ * middle of the screen was `nsm-overlay-container nsm-overlay-blackout` - the plugin's
  * own blackout, still in the document, at z-index 9999999, while the plugin's state said
  * it had woken up. The state is what React renders from, so if that component does not
  * re-render, the black stays on screen for good. The side menus still worked because
@@ -734,7 +734,7 @@ const forceHideOverlayDom = () => {
     catch (e) { }
     for (const doc of docs) {
         try {
-            const nodes = doc?.querySelectorAll?.(".dib-overlay-container");
+            const nodes = doc?.querySelectorAll?.(".nsm-overlay-container");
             if (!nodes)
                 continue;
             Array.prototype.forEach.call(nodes, (node) => {
@@ -746,7 +746,7 @@ const forceHideOverlayDom = () => {
         catch (e) { }
     }
     if (hidden) {
-        console.warn(`[DownloadInBackground] Overlay was still in the DOM on wake; hid ${hidden} node(s).`);
+        console.warn(`[NewSuspendMode] Overlay was still in the DOM on wake; hid ${hidden} node(s).`);
     }
     return hidden;
 };
@@ -764,7 +764,7 @@ const clearOverlayDomOverrides = () => {
     catch (e) { }
     for (const doc of docs) {
         try {
-            const nodes = doc?.querySelectorAll?.(".dib-overlay-container");
+            const nodes = doc?.querySelectorAll?.(".nsm-overlay-container");
             if (!nodes)
                 continue;
             Array.prototype.forEach.call(nodes, (node) => {
@@ -850,7 +850,7 @@ const takeOverSleepFromMenu = (label) => {
     clearTakeover();
     closeSteamSideMenus();
     call("log_debug", { kind: "menu_sleep_intercepted", label }).catch(() => { });
-    call("request_standby", "standby_power_menu").catch((e) => console.error("[DownloadInBackground] request_standby failed:", e));
+    call("request_standby", "standby_power_menu").catch((e) => console.error("[NewSuspendMode] request_standby failed:", e));
 };
 const installMenuItemGuard = (win) => {
     if (!win || win === menuGuardWindow)
@@ -888,13 +888,13 @@ const installMenuItemGuard = (win) => {
                 }
                 return;
             }
-            console.log(`[DownloadInBackground] Power menu "${hit.label}" caught before Steam saw it.`);
+            console.log(`[NewSuspendMode] Power menu "${hit.label}" caught before Steam saw it.`);
             e.stopImmediatePropagation();
             e.preventDefault();
             takeOverSleepFromMenu(hit.label);
         }
         catch (err) {
-            console.error("[DownloadInBackground] Menu guard failed:", err);
+            console.error("[NewSuspendMode] Menu guard failed:", err);
         }
     };
     ["click", "keydown"].forEach((type) => {
@@ -904,7 +904,7 @@ const installMenuItemGuard = (win) => {
         catch (e) { }
     });
     menuGuardWindow = win;
-    console.log("[DownloadInBackground] Power menu guard installed on the interface window.");
+    console.log("[NewSuspendMode] Power menu guard installed on the interface window.");
 };
 const removeMenuItemGuard = () => {
     if (!menuGuardWindow || !menuGuardHandler)
@@ -921,7 +921,7 @@ const removeMenuItemGuard = () => {
 /** How many of the plugin's overlay nodes are in the document right now. */
 const overlayNodesInDom = () => {
     try {
-        return uiDocument()?.querySelectorAll?.(".dib-overlay-container")?.length ?? 0;
+        return uiDocument()?.querySelectorAll?.(".nsm-overlay-container")?.length ?? 0;
     }
     catch (e) {
         return 0;
@@ -1006,7 +1006,7 @@ const cancelSteamSuspendFlow = (request) => {
         ui: methodNames(sc?.UI).filter((n) => /susp|sleep|resume|power|mode/i.test(n)),
     }).catch(() => { });
     if (called.length) {
-        console.log(`[DownloadInBackground] Told Steam its suspend was cancelled via: ${called.join(", ")}`);
+        console.log(`[NewSuspendMode] Told Steam its suspend was cancelled via: ${called.join(", ")}`);
     }
     return called;
 };
@@ -1039,7 +1039,7 @@ const recoverSteamUi = () => {
             sharedUiInitiatedSleep = false;
             return;
         }
-        console.warn(`[DownloadInBackground] Screen changed across the sleep (${before} -> ${after}) -> navigating home.`);
+        console.warn(`[NewSuspendMode] Screen changed across the sleep (${before} -> ${after}) -> navigating home.`);
         call("log_debug", {
             kind: "ui_recovery", step: "navigate_home", before, after,
             has_content: centerHasContent(),
@@ -1052,7 +1052,7 @@ const recoverSteamUi = () => {
                 nav.Navigate?.("/library/home");
         }
         catch (e) {
-            console.warn("[DownloadInBackground] Could not navigate home:", e);
+            console.warn("[NewSuspendMode] Could not navigate home:", e);
         }
         sharedRecoveryTimers.push(setTimeout(() => {
             sharedUiInitiatedSleep = false;
@@ -1072,7 +1072,7 @@ const recoverSteamUi = () => {
                 return;
             }
             const restart = window.SteamClient?.Browser?.RestartJSContext;
-            console.warn("[DownloadInBackground] Screen STILL empty -> reloading the Steam UI.");
+            console.warn("[NewSuspendMode] Screen STILL empty -> reloading the Steam UI.");
             call("log_debug", {
                 kind: "ui_recovery",
                 step: "restart_js_context",
@@ -1083,7 +1083,7 @@ const recoverSteamUi = () => {
             if (typeof restart !== "function")
                 return;
             toaster.toast({
-                title: "Download in Background",
+                title: "New Suspend Mode",
                 body: "Reloading the Steam interface to finish waking up",
                 duration: 3000,
             });
@@ -1091,7 +1091,7 @@ const recoverSteamUi = () => {
                 restart();
             }
             catch (e) {
-                console.error("[DownloadInBackground] Could not reload the Steam UI:", e);
+                console.error("[NewSuspendMode] Could not reload the Steam UI:", e);
             }
         }, 2500));
     }, 1500));
@@ -1112,12 +1112,12 @@ const restoreUiRoute = () => {
     const now = currentUiRoute();
     if (!now || now === target)
         return;
-    console.log(`[DownloadInBackground] Steam UI moved to ${now} on sleep; going back to ${target}.`);
+    console.log(`[NewSuspendMode] Steam UI moved to ${now} on sleep; going back to ${target}.`);
     try {
         DFL.Navigation.Navigate?.(target);
     }
     catch (e) {
-        console.warn("[DownloadInBackground] Could not restore the Steam UI route:", e);
+        console.warn("[NewSuspendMode] Could not restore the Steam UI route:", e);
     }
 };
 /**
@@ -1179,7 +1179,7 @@ const probeWakeScreen = (reason) => {
         }).catch(() => { });
     }
     catch (e) {
-        console.warn("[DownloadInBackground] Wake screen probe failed:", e);
+        console.warn("[NewSuspendMode] Wake screen probe failed:", e);
     }
 };
 const clearStandbySplash = () => {
@@ -1243,7 +1243,7 @@ const finishWakeUi = (reason) => {
  */
 const triggerEnterStandby = async (reason) => {
     if (Date.now() < sharedWakeCooldownUntil) {
-        console.log("[DownloadInBackground] Wake cooldown active, not entering standby.");
+        console.log("[NewSuspendMode] Wake cooldown active, not entering standby.");
         return;
     }
     if (sharedHudTimer) {
@@ -1265,7 +1265,7 @@ const triggerEnterStandby = async (reason) => {
         }
     }
     catch (e) {
-        console.error("[DownloadInBackground] Error entering standby:", e);
+        console.error("[NewSuspendMode] Error entering standby:", e);
     }
 };
 /**
@@ -1305,16 +1305,16 @@ const startStandbySplash = (seconds, reason = "standby_splash") => {
  * 4. Keeps dismissing any menu a stray button press may have opened
  */
 const triggerFullWake = async (reason = "wake") => {
-    console.log("[DownloadInBackground] triggerFullWake called! Reason:", reason);
+    console.log("[NewSuspendMode] triggerFullWake called! Reason:", reason);
     finishWakeUi(reason);
     try {
         await call("exit_background_mode", reason);
     }
     catch (e) {
-        console.error("[DownloadInBackground] Error calling exit_background_mode:", e);
+        console.error("[NewSuspendMode] Error calling exit_background_mode:", e);
     }
     toaster.toast({
-        title: "Download in Background",
+        title: "New Suspend Mode",
         body: "Console awakened!",
         duration: 2000,
     });
@@ -1324,7 +1324,7 @@ const triggerFullWake = async (reason = "wake") => {
  */
 const triggerEnterBlackout = async (reason = "countdown_completed") => {
     if (Date.now() < sharedWakeCooldownUntil) {
-        console.log("[DownloadInBackground] Wake cooldown active, blocking enter blackout.");
+        console.log("[NewSuspendMode] Wake cooldown active, blocking enter blackout.");
         return;
     }
     if (sharedHudTimer) {
@@ -1345,7 +1345,7 @@ const triggerEnterBlackout = async (reason = "countdown_completed") => {
         }
     }
     catch (e) {
-        console.error("[DownloadInBackground] Error entering background mode:", e);
+        console.error("[NewSuspendMode] Error entering background mode:", e);
     }
 };
 /**
@@ -1420,7 +1420,7 @@ const clearTakeover = () => {
 const activeTakeover = () => {
     if (sharedTakeover && Date.now() > sharedTakeover.expires) {
         // A decision that never came back must never swallow sleeps forever.
-        console.warn("[DownloadInBackground] Sleep decision timed out; forgetting it.");
+        console.warn("[NewSuspendMode] Sleep decision timed out; forgetting it.");
         sharedTakeover = null;
     }
     return sharedTakeover;
@@ -1437,11 +1437,11 @@ const resumeSteamFromPreparedSuspend = () => {
         return false;
     try {
         user.ResumeSuspendedGames();
-        console.log("[DownloadInBackground] Called User.ResumeSuspendedGames() to undo Steam's sleep preparation.");
+        console.log("[NewSuspendMode] Called User.ResumeSuspendedGames() to undo Steam's sleep preparation.");
         return true;
     }
     catch (e) {
-        console.warn("[DownloadInBackground] ResumeSuspendedGames failed:", e);
+        console.warn("[NewSuspendMode] ResumeSuspendedGames failed:", e);
         return false;
     }
 };
@@ -1484,7 +1484,7 @@ const handleMenuSuspend = (hook, args) => {
     if (sharedIsBackgroundMode) {
         const timeInBg = Date.now() - sharedBackgroundModeEnteredTime;
         if (timeInBg >= 2000) {
-            console.log(`[DownloadInBackground] ${hook.name} while in our mode -> waking up.`);
+            console.log(`[NewSuspendMode] ${hook.name} while in our mode -> waking up.`);
             triggerFullWake("menu_suspend_wake");
         }
         return Promise.resolve();
@@ -1528,11 +1528,11 @@ const handleMenuSuspend = (hook, args) => {
     resumeSteamFromPreparedSuspend();
     // The backend decides, on state it re-reads right now rather than on the last poll,
     // and starts the standby splash itself when standby is what takes over.
-    console.log(`[DownloadInBackground] Power menu sleep (${hook.name}) -> asking the backend.`);
+    console.log(`[NewSuspendMode] Power menu sleep (${hook.name}) -> asking the backend.`);
     call("trigger_suspend_intercept")
         .then((res) => {
         const verdict = String(res?.verdict ?? "");
-        console.log(`[DownloadInBackground] Power menu sleep verdict: ${verdict}`);
+        console.log(`[NewSuspendMode] Power menu sleep verdict: ${verdict}`);
         if (verdict === "allow") {
             releaseHeldSleep();
         }
@@ -1550,7 +1550,7 @@ const handleMenuSuspend = (hook, args) => {
         }
     })
         .catch((e) => {
-        console.error("[DownloadInBackground] trigger_suspend_intercept failed:", e);
+        console.error("[NewSuspendMode] trigger_suspend_intercept failed:", e);
         releaseHeldSleep();
     });
     return Promise.resolve();
@@ -1587,23 +1587,23 @@ const installSuspendMethodHooks = () => {
                     return handleMenuSuspend(hook, args);
                 }
                 catch (e) {
-                    console.error("[DownloadInBackground] Suspend hook failed, falling back to SteamOS:", e);
+                    console.error("[NewSuspendMode] Suspend hook failed, falling back to SteamOS:", e);
                     return callOriginalSuspend(hook, args);
                 }
             };
             if (owner[name] === original) {
                 // A read-only or proxied property: do not claim it was hooked.
-                console.warn(`[DownloadInBackground] SteamClient.${group}.${name} could not be replaced.`);
+                console.warn(`[NewSuspendMode] SteamClient.${group}.${name} could not be replaced.`);
                 continue;
             }
             suspendHooks.push(hook);
             hooked.push(hook.name);
         }
         catch (e) {
-            console.warn(`[DownloadInBackground] Could not hook SteamClient.${group}.${name}:`, e);
+            console.warn(`[NewSuspendMode] Could not hook SteamClient.${group}.${name}:`, e);
         }
     }
-    console.log(`[DownloadInBackground] Suspend entry points hooked: ${hooked.join(", ") || "none"}`);
+    console.log(`[NewSuspendMode] Suspend entry points hooked: ${hooked.join(", ") || "none"}`);
     call("log_debug", {
         kind: "suspend_hooks",
         hooked,
@@ -1705,7 +1705,7 @@ const PluginContent = () => {
 };
 var index = definePlugin(() => {
     // Register global overlay in SteamOS DOM
-    routerHook.addGlobalComponent("DownloadInBackgroundOverlay", GlobalOverlayContainer);
+    routerHook.addGlobalComponent("NewSuspendModeOverlay", GlobalOverlayContainer);
     let pollTimer = null;
     let pollStopped = false;
     let dlUnregister = null;
@@ -1718,7 +1718,7 @@ var index = definePlugin(() => {
     // Listen directly for background mode changes from Python backend
     try {
         modeUnregister = addEventListener("background_mode_changed", (data) => {
-            console.log("[DownloadInBackground] background_mode_changed event received:", data);
+            console.log("[NewSuspendMode] background_mode_changed event received:", data);
             const isBg = typeof data === "boolean" ? data : Boolean(data?.is_background_mode);
             if (!isBg) {
                 // System awakened from the backend: same cleanup as a wake asked for here.
@@ -1737,12 +1737,12 @@ var index = definePlugin(() => {
         });
     }
     catch (e) {
-        console.warn("[DownloadInBackground] Could not register background_mode_changed listener:", e);
+        console.warn("[NewSuspendMode] Could not register background_mode_changed listener:", e);
     }
     // Listen for suspend intercepted events from backend
     try {
         suspendEventUnregister = addEventListener("on_suspend_intercepted", (data) => {
-            console.log("[DownloadInBackground] on_suspend_intercepted event received:", data);
+            console.log("[NewSuspendMode] on_suspend_intercepted event received:", data);
             const now = Date.now();
             if (sharedIsBackgroundMode) {
                 // If already in background mode, this is a wake action!
@@ -1750,7 +1750,7 @@ var index = definePlugin(() => {
                 return;
             }
             if (now < sharedWakeCooldownUntil) {
-                console.log("[DownloadInBackground] Ignoring on_suspend_intercepted during wake cooldown.");
+                console.log("[NewSuspendMode] Ignoring on_suspend_intercepted during wake cooldown.");
                 return;
             }
             const timeoutSec = data?.hud_timeout ?? sharedSettings.hud_timeout_seconds ?? 5;
@@ -1758,12 +1758,12 @@ var index = definePlugin(() => {
         });
     }
     catch (e) {
-        console.warn("[DownloadInBackground] Could not register on_suspend_intercepted listener:", e);
+        console.warn("[NewSuspendMode] Could not register on_suspend_intercepted listener:", e);
     }
     // Backend asked for standby: draw the plugin mark first, then go dark
     try {
         standbyRequestUnregister = addEventListener("on_standby_requested", (data) => {
-            console.log("[DownloadInBackground] on_standby_requested received:", data);
+            console.log("[NewSuspendMode] on_standby_requested received:", data);
             if (sharedIsBackgroundMode) {
                 return;
             }
@@ -1772,7 +1772,7 @@ var index = definePlugin(() => {
         });
     }
     catch (e) {
-        console.warn("[DownloadInBackground] Could not register on_standby_requested listener:", e);
+        console.warn("[NewSuspendMode] Could not register on_standby_requested listener:", e);
     }
     // Critical battery auto-suspend notification
     try {
@@ -1781,7 +1781,7 @@ var index = definePlugin(() => {
             sharedRealSuspendUntil = Date.now() + 60000;
             clearTakeover();
             toaster.toast({
-                title: "Download in Background",
+                title: "New Suspend Mode",
                 body: `Battery reached ${data?.capacity ?? 15}%. Entering sleep now.`,
                 duration: 4000,
                 critical: true,
@@ -1796,7 +1796,7 @@ var index = definePlugin(() => {
             sharedRealSuspendUntil = Date.now() + 60000;
             clearTakeover();
             toaster.toast({
-                title: "Download in Background",
+                title: "New Suspend Mode",
                 body: "All downloads completed! Suspending console.",
                 duration: 3500,
             });
@@ -1814,7 +1814,7 @@ var index = definePlugin(() => {
             if (status) {
                 const backendIsBg = Boolean(status.is_background_mode);
                 if (sharedIsBackgroundMode && !backendIsBg) {
-                    console.log("[DownloadInBackground] Backend woke up -> Synchronizing frontend!");
+                    console.log("[NewSuspendMode] Backend woke up -> Synchronizing frontend!");
                     finishWakeUi("status_poll_sync");
                 }
                 else {
@@ -1841,7 +1841,7 @@ var index = definePlugin(() => {
             }
         }
         catch (e) {
-            console.error("[DownloadInBackground] Error polling backend status:", e);
+            console.error("[NewSuspendMode] Error polling backend status:", e);
         }
     };
     // Hand download metrics to the backend only when they actually changed, or every 8s
@@ -1956,7 +1956,7 @@ var index = definePlugin(() => {
         }
     }
     catch (e) {
-        console.warn("[DownloadInBackground] Could not register for download overview changes:", e);
+        console.warn("[NewSuspendMode] Could not register for download overview changes:", e);
     }
     // Take over the power menu's Sleep before Steam starts suspending. SteamClient is not
     // always populated the moment a plugin loads, so this retries for a while.
@@ -1969,7 +1969,7 @@ var index = definePlugin(() => {
             installed = installSuspendMethodHooks();
         }
         catch (e) {
-            console.warn("[DownloadInBackground] Could not install suspend hooks:", e);
+            console.warn("[NewSuspendMode] Could not install suspend hooks:", e);
         }
         if (installed === 0 && ++suspendHookAttempts < 6) {
             suspendHookTimer = setTimeout(tryInstallSuspendHooks, 3000);
@@ -1980,7 +1980,7 @@ var index = definePlugin(() => {
     try {
         if (window.SteamClient?.System?.RegisterForOnSuspendRequest) {
             const reg = window.SteamClient.System.RegisterForOnSuspendRequest(async (request) => {
-                console.log("[DownloadInBackground] SteamClient Suspend Request event received!", request);
+                console.log("[NewSuspendMode] SteamClient Suspend Request event received!", request);
                 call("log_debug", {
                     kind: "suspend_request_fired",
                     in_background: sharedIsBackgroundMode,
@@ -1993,16 +1993,16 @@ var index = definePlugin(() => {
                 if (sharedIsBackgroundMode) {
                     const timeInBg = Date.now() - sharedBackgroundModeEnteredTime;
                     if (timeInBg < 2000) {
-                        console.log(`[DownloadInBackground] Ignoring suspend request in initial transition grace period (${timeInBg}ms).`);
+                        console.log(`[NewSuspendMode] Ignoring suspend request in initial transition grace period (${timeInBg}ms).`);
                         return false;
                     }
-                    console.log("[DownloadInBackground] Power button pressed while in background mode -> WAKING UP!");
+                    console.log("[NewSuspendMode] Power button pressed while in background mode -> WAKING UP!");
                     await triggerFullWake("power_button_wake");
                     return false; // Prevent Steam from suspending
                 }
                 // 2. Cooldown check: ignore suspend request if the system just woke up
                 if (now < sharedWakeCooldownUntil) {
-                    console.log("[DownloadInBackground] Ignoring suspend request: within wake cooldown period.");
+                    console.log("[NewSuspendMode] Ignoring suspend request: within wake cooldown period.");
                     return false;
                 }
                 // 3. Plugin off: get out of the way immediately, no backend round-trip, so
@@ -2014,14 +2014,14 @@ var index = definePlugin(() => {
                 // just the physical button. With standby on, that sleep becomes our mode.
                 const looksIdle = !sharedDownloadInfo.is_downloading || sharedDownloadInfo.is_paused;
                 if (looksIdle && !sharedSettings.standby_on_power_off) {
-                    console.log("[DownloadInBackground] No active download and standby off -> Allowing stock SteamOS suspend.");
+                    console.log("[NewSuspendMode] No active download and standby off -> Allowing stock SteamOS suspend.");
                     return true;
                 }
                 // 5. Confirm against the Steam client before taking the suspend over
                 await querySteamDownloads();
                 const isDownloading = Boolean(sharedDownloadInfo.is_downloading && !sharedDownloadInfo.is_paused);
                 if (!isDownloading && sharedSettings.standby_on_power_off) {
-                    console.log("[DownloadInBackground] Sleep requested with standby enabled -> splash, then standby.");
+                    console.log("[NewSuspendMode] Sleep requested with standby enabled -> splash, then standby.");
                     call("log_debug", {
                         kind: "suspend_request",
                         source: "RegisterForOnSuspendRequest",
@@ -2037,17 +2037,17 @@ var index = definePlugin(() => {
                     return false;
                 }
                 if (isDownloading) {
-                    console.log("[DownloadInBackground] Active download running -> Intercepting suspend and showing HUD");
+                    console.log("[NewSuspendMode] Active download running -> Intercepting suspend and showing HUD");
                     try {
                         const res = await call("trigger_suspend_intercept");
                         if (String(res?.verdict ?? "") === "allow") {
                             // The backend re-read the state and found nothing running after all.
-                            console.log("[DownloadInBackground] Backend says idle -> allowing stock suspend.");
+                            console.log("[NewSuspendMode] Backend says idle -> allowing stock suspend.");
                             return true;
                         }
                     }
                     catch (e) {
-                        console.error("[DownloadInBackground] Error calling trigger_suspend_intercept:", e);
+                        console.error("[NewSuspendMode] Error calling trigger_suspend_intercept:", e);
                     }
                     sharedRouteBeforeTakeover = currentUiRoute();
                     sharedUiInitiatedSleep = true;
@@ -2056,7 +2056,7 @@ var index = definePlugin(() => {
                     startHudCountdown(sharedSettings.hud_timeout_seconds ?? 5);
                     return false; // Prevent suspend in SteamClient
                 }
-                console.log("[DownloadInBackground] Download is paused or idle -> Allowing normal Steam suspend without intercepting.");
+                console.log("[NewSuspendMode] Download is paused or idle -> Allowing normal Steam suspend without intercepting.");
                 return true; // Allow suspend immediately
             });
             if (reg && typeof reg.unregister === "function") {
@@ -2065,7 +2065,7 @@ var index = definePlugin(() => {
         }
     }
     catch (e) {
-        console.warn("[DownloadInBackground] Could not hook SteamClient.System.RegisterForOnSuspendRequest:", e);
+        console.warn("[NewSuspendMode] Could not hook SteamClient.System.RegisterForOnSuspendRequest:", e);
     }
     // Poll the backend on an adaptive schedule instead of a fixed 1.5s interval
     const scheduleNextPoll = () => {
@@ -2163,7 +2163,7 @@ var index = definePlugin(() => {
             return;
         }
         if (delta > 15000) {
-            console.log(`[DownloadInBackground] Kernel resume detected (delta=${delta}ms)! Enforcing wake state.`);
+            console.log(`[NewSuspendMode] Kernel resume detected (delta=${delta}ms)! Enforcing wake state.`);
             sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
             if (sharedHudTimer) {
                 clearInterval(sharedHudTimer);
@@ -2176,11 +2176,11 @@ var index = definePlugin(() => {
         }
     }, 2000);
     return {
-        name: "Download in Background",
+        name: "New Suspend Mode",
         icon: SP_JSX.jsx(FaDownload, {}),
         content: SP_JSX.jsx(PluginContent, {}),
         onDismount() {
-            routerHook.removeGlobalComponent("DownloadInBackgroundOverlay");
+            routerHook.removeGlobalComponent("NewSuspendModeOverlay");
             pollStopped = true;
             if (pollTimer) {
                 clearTimeout(pollTimer);

@@ -22,11 +22,11 @@ try:
 except ImportError:
     # Dummy mock for standalone linting / local testing outside Decky
     class DummyDecky:
-        DECKY_PLUGIN_SETTINGS_DIR = os.path.expanduser("~/.config/DownloadInBackground")
-        DECKY_PLUGIN_LOG_DIR = os.path.expanduser("~/.config/DownloadInBackground/logs")
+        DECKY_PLUGIN_SETTINGS_DIR = os.path.expanduser("~/.config/NewSuspendMode")
+        DECKY_PLUGIN_LOG_DIR = os.path.expanduser("~/.config/NewSuspendMode/logs")
         DECKY_USER_HOME = os.path.expanduser("~")
         DECKY_HOME = os.path.expanduser("~/homebrew")
-        logger = logging.getLogger("DownloadInBackground")
+        logger = logging.getLogger("NewSuspendMode")
         @staticmethod
         async def emit(event_name: str, *args):
             pass
@@ -531,10 +531,33 @@ class Plugin:
     async def _migration(self):
         try:
             os.makedirs(decky.DECKY_PLUGIN_SETTINGS_DIR, exist_ok=True)
+            self._migrate_from_old_settings_dir()
             self.settings_file = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
             self._load_settings()
         except Exception as e:
             logger.error(f"Error during migration: {e}")
+
+    def _migrate_from_old_settings_dir(self):
+        """
+        One-shot: copy settings.json and runtime_state.json from the plugin's old
+        name (DownloadInBackground) to the new location on first run under the new
+        name. Users keep their configured sliders, toggles and standby state across
+        the rename instead of starting fresh.
+        """
+        try:
+            new_dir = decky.DECKY_PLUGIN_SETTINGS_DIR
+            old_dir = os.path.join(os.path.dirname(new_dir), "DownloadInBackground")
+            if old_dir == new_dir or not os.path.isdir(old_dir):
+                return
+            for name in ("settings.json", "runtime_state.json"):
+                src_path = os.path.join(old_dir, name)
+                dst_path = os.path.join(new_dir, name)
+                if os.path.isfile(src_path) and not os.path.exists(dst_path):
+                    import shutil
+                    shutil.copy2(src_path, dst_path)
+                    logger.info(f"Migrated {name} from the old plugin folder: {old_dir}")
+        except Exception as e:
+            logger.warning(f"Old-settings migration skipped: {e}")
 
     async def _main(self):
         self.loop = asyncio.get_running_loop()
@@ -542,7 +565,7 @@ class Plugin:
         self._load_settings()
         self.stop_threads = False
 
-        logger.info("Download in Background plugin started.")
+        logger.info("New Suspend Mode plugin started.")
 
         # 0. Undo anything a previous run (or a crash) may have left behind: masked
         # sleep targets, frozen controller daemons and Steam processes stuck at idle
@@ -563,7 +586,7 @@ class Plugin:
         self.power_button_thread = threading.Thread(
             target=self._power_button_listener_worker,
             daemon=True,
-            name="DownloadInBackground-PowerButton"
+            name="NewSuspendMode-PowerButton"
         )
         self.power_button_thread.start()
 
@@ -571,7 +594,7 @@ class Plugin:
         self.logind_watcher_thread = threading.Thread(
             target=self._logind_watcher_worker,
             daemon=True,
-            name="DownloadInBackground-LogindWatcher"
+            name="NewSuspendMode-LogindWatcher"
         )
         self.logind_watcher_thread.start()
 
@@ -579,7 +602,7 @@ class Plugin:
         self.wake_watcher_thread = threading.Thread(
             target=self._standby_wake_watcher_worker,
             daemon=True,
-            name="DownloadInBackground-WakeWatcher"
+            name="NewSuspendMode-WakeWatcher"
         )
         self.wake_watcher_thread.start()
 
@@ -587,7 +610,7 @@ class Plugin:
         self.monitor_task = self.loop.create_task(self._background_monitor_loop())
 
     async def _unload(self):
-        logger.info("Unloading Download in Background plugin...")
+        logger.info("Unloading New Suspend Mode plugin...")
         self.stop_threads = True
 
         if self.monitor_task and not self.monitor_task.done():
@@ -682,7 +705,7 @@ class Plugin:
         Steam client exposes on this console ends up in the same file as everything else.
         """
         try:
-            logger.info(f"[DIB FRONTEND] {json.dumps(payload, default=str)[:12000]}")
+            logger.info(f"[NSM FRONTEND] {json.dumps(payload, default=str)[:12000]}")
         except Exception as e:
             logger.error(f"Could not log frontend diagnostics: {e}")
         return True
@@ -815,7 +838,7 @@ class Plugin:
         cmd = [
             "systemd-inhibit",
             "--what=sleep:handle-power-key:handle-suspend-key",
-            "--who=DownloadInBackground",
+            "--who=NewSuspendMode",
             "--why=Steam game download active in background",
             "--mode=block",
             "cat",
@@ -992,7 +1015,7 @@ class Plugin:
                     return "ignored"
                 self.last_suspend_intercept_time = now
                 logger.info(
-                    f"[DIB SLEEP SOURCE] Sleep requested from '{source}' with standby enabled "
+                    f"[NSM SLEEP SOURCE] Sleep requested from '{source}' with standby enabled "
                     "-> standby splash, then entering."
                 )
                 if self.loop and self.loop.is_running():
@@ -1010,7 +1033,7 @@ class Plugin:
             return "ignored"
         self.last_suspend_intercept_time = now
 
-        logger.info(f"[DIB SLEEP SOURCE] Suspend attempt from '{source}' intercepted while downloading -> Showing HUD!")
+        logger.info(f"[NSM SLEEP SOURCE] Suspend attempt from '{source}' intercepted while downloading -> Showing HUD!")
         self._acquire_sleep_inhibitor()
 
         if self.loop and self.loop.is_running():
@@ -1123,13 +1146,13 @@ class Plugin:
             return False
         if self._is_active_download():
             logger.info(
-                "[DIB QUIET HOURS] Inside the period, but a download is active; "
+                "[NSM QUIET HOURS] Inside the period, but a download is active; "
                 "entering the plugin's own mode as usual."
             )
             return False
         bounds = self._quiet_hours_bounds()
         logger.info(
-            f"[DIB QUIET HOURS] Inside the period ({bounds[0]:02d}:00 - {bounds[1]:02d}:00) "
+            f"[NSM QUIET HOURS] Inside the period ({bounds[0]:02d}:00 - {bounds[1]:02d}:00) "
             f"and nothing is downloading (reason: {reason}) -> real SteamOS sleep."
         )
         if self.settings.get("wake_at_period_end", False):
@@ -1155,10 +1178,10 @@ class Plugin:
         if self.is_background_mode:
             return
         if not self.settings.get("standby_on_power_off", False):
-            logger.info("[DIB RTC WAKE] Standby option is off; staying awake.")
+            logger.info("[NSM RTC WAKE] Standby option is off; staying awake.")
             return
         self.wake_cooldown_until = 0.0
-        logger.info("[DIB RTC WAKE] Entering the plugin's new suspend mode.")
+        logger.info("[NSM RTC WAKE] Entering the plugin's new suspend mode.")
         # Both `_maybe_real_sleep_instead` (called from request_standby) and the main
         # loop's periodic check will see us as inside quiet hours if the RTC fired a
         # hair before the end minute, and would re-trigger real sleep in a loop. The
@@ -1343,17 +1366,17 @@ class Plugin:
         if not self.settings.get("auto_hard_reset_after_wake", True):
             return
 
-        logger.warning("[DIB AUTO-RESET] 8 s post-wake: running the hard reset.")
+        logger.warning("[NSM AUTO-RESET] 8 s post-wake: running the hard reset.")
         try:
             done = await self.loop.run_in_executor(None, self._run_transition_locked_safe,
                                                    self._hard_reset_power_limits)
             self.last_auto_hard_reset_time = time.time()
             if done:
-                logger.warning(f"[DIB AUTO-RESET] Repaired: {done}")
+                logger.warning(f"[NSM AUTO-RESET] Repaired: {done}")
             else:
-                logger.info("[DIB AUTO-RESET] Nothing needed repair.")
+                logger.info("[NSM AUTO-RESET] Nothing needed repair.")
         except Exception as e:
-            logger.error(f"[DIB AUTO-RESET] Failed: {e}")
+            logger.error(f"[NSM AUTO-RESET] Failed: {e}")
 
     def _run_transition_locked_safe(self, func):
         """Non-throwing wrapper for a hardware repair run from a schedule."""
@@ -1478,7 +1501,7 @@ class Plugin:
                     pass
 
         if done:
-            logger.warning(f"[DIB HARD RESET] {done}")
+            logger.warning(f"[NSM HARD RESET] {done}")
         return done
 
     async def force_restore(self) -> Dict[str, Any]:
@@ -1552,7 +1575,7 @@ class Plugin:
                             diff = abs(now - self.rtc_wake_target)
                             if diff <= 120:
                                 logger.info(
-                                    f"[DIB RTC WAKE] Resume at {int(now)}, target was "
+                                    f"[NSM RTC WAKE] Resume at {int(now)}, target was "
                                     f"{self.rtc_wake_target} (diff {diff:.1f}s) -> entering standby."
                                 )
                                 self.rtc_wake_pending = False
@@ -1565,7 +1588,7 @@ class Plugin:
                                 continue
                             else:
                                 logger.info(
-                                    f"[DIB RTC WAKE] Resume at {int(now)} is far from the "
+                                    f"[NSM RTC WAKE] Resume at {int(now)} is far from the "
                                     f"RTC target {self.rtc_wake_target} (diff {diff:.1f}s); "
                                     "treating as a manual wake and clearing the alarm."
                                 )
@@ -2061,23 +2084,23 @@ class Plugin:
                 )
                 if suspect and self.watchdog_ryzenadj:
                     logger.warning(
-                        f"[DIB SNAPSHOT] ryzenadj reports {limits}, which looks like a leftover "
+                        f"[NSM SNAPSHOT] ryzenadj reports {limits}, which looks like a leftover "
                         f"of this plugin; using the last known-good baseline {self.watchdog_ryzenadj}."
                     )
                     self.saved_ryzenadj = dict(self.watchdog_ryzenadj)
                 elif suspect:
                     logger.warning(
-                        f"[DIB SNAPSHOT] ryzenadj reports {limits}, which looks like a plugin cap; "
+                        f"[NSM SNAPSHOT] ryzenadj reports {limits}, which looks like a plugin cap; "
                         "skipping ryzenadj for this cycle so we never write these back as originals."
                     )
                 else:
                     self.saved_ryzenadj = limits
                     if self.settings.get("debug_logging", True):
-                        logger.info(f"[DIB SNAPSHOT] ryzenadj originals captured: {limits}")
+                        logger.info(f"[NSM SNAPSHOT] ryzenadj originals captured: {limits}")
 
         if self.settings.get("debug_logging", True):
             logger.info(
-                "[DIB SNAPSHOT] Recorded originals before touching anything: "
+                "[NSM SNAPSHOT] Recorded originals before touching anything: "
                 f"platform_profile={self.saved_platform_profile} asus_thermal={self.saved_asus_thermal} "
                 f"boost={self.saved_cpu_boost} ppt={self.saved_asus_ppt or 'none'} "
                 f"fan_boost={self.saved_fan_boost or 'none'} "
@@ -2975,7 +2998,7 @@ class Plugin:
 
             net_mb = self.detector.get_network_rx_rate() / (1024 * 1024)
             logger.info(
-                f"[DIB TELEMETRY] net={net_mb:.2f}MB/s apu={power_w or 'n/a'} "
+                f"[NSM TELEMETRY] net={net_mb:.2f}MB/s apu={power_w or 'n/a'} "
                 f"cpu=[{' '.join(freqs) or 'n/a'}] fans=[{' '.join(fans) or 'none reported'}] "
                 f"pwm=[{' '.join(pwms) or 'n/a'}] temps=[{' '.join(temps[:8]) or 'n/a'}] "
                 f"quota={'on' if self.saved_cpu_quota else 'off'} "
@@ -3974,10 +3997,10 @@ class Plugin:
         # plugin dies from here on, the next start replays this exact restore.
         self._save_runtime_state()
         if self.settings.get("debug_logging", True):
-            # The counterpart of [DIB RESTORE CHECK]: what was taken away, and what has
+            # The counterpart of [NSM RESTORE CHECK]: what was taken away, and what has
             # to come back. A report of "still slow" is then a diff of two log lines.
             logger.info(
-                "[DIB APPLY CHECK] "
+                "[NSM APPLY CHECK] "
                 f"will_restore_cpu_freqs={len(self.saved_cpu_freqs)} "
                 f"governors={len(self.saved_cpu_governors)} epp={len(self.saved_cpu_epp)} "
                 f"policy_boost={len(self.saved_policy_boost)} gpu_dpm={self.saved_gpu_dpm or 'none'} "
@@ -4424,7 +4447,7 @@ class Plugin:
         )
         if signs and not did_hard_reset_for_current_wake:
             logger.warning(
-                f"[DIB WATCHDOG] Periodic check: still capped ({signs}); running the hard reset."
+                f"[NSM WATCHDOG] Periodic check: still capped ({signs}); running the hard reset."
             )
             try:
                 with self.transition_lock:
@@ -4433,15 +4456,15 @@ class Plugin:
                 if done:
                     repairs.extend([f"hard-reset: {d}" for d in done])
             except Exception as e:
-                logger.error(f"[DIB WATCHDOG] Hard reset failed: {e}")
+                logger.error(f"[NSM WATCHDOG] Hard reset failed: {e}")
         elif signs and did_hard_reset_for_current_wake:
             if self.settings.get("debug_logging", True):
                 logger.info(
-                    f"[DIB WATCHDOG] Signs ({signs}) but hard reset ran recently; waiting."
+                    f"[NSM WATCHDOG] Signs ({signs}) but hard reset ran recently; waiting."
                 )
 
         if repairs:
-            logger.warning(f"[DIB WATCHDOG] Repaired drifted throttles: {repairs}")
+            logger.warning(f"[NSM WATCHDOG] Repaired drifted throttles: {repairs}")
         return repairs
 
     def _recheck_after_restore(self) -> List[str]:
@@ -4549,7 +4572,7 @@ class Plugin:
         if self.settings.get("debug_logging", True):
             cpu0 = "/sys/devices/system/cpu/cpu0/cpufreq"
             logger.info(
-                "[DIB RESTORE CHECK] "
+                "[NSM RESTORE CHECK] "
                 f"scaling_max_freq={self._read_attr(cpu0, 'scaling_max_freq') or 'n/a'} "
                 f"cpuinfo_max_freq={self._read_attr(cpu0, 'cpuinfo_max_freq') or 'n/a'} "
                 f"governor={self._read_attr(cpu0, 'scaling_governor') or 'n/a'} "
@@ -4736,7 +4759,7 @@ class Plugin:
                         diff = abs(now - self.rtc_wake_target)
                         if diff <= 180:
                             logger.info(
-                                f"[DIB RTC WAKE] Clock-jump resume at {int(now)}, target was "
+                                f"[NSM RTC WAKE] Clock-jump resume at {int(now)}, target was "
                                 f"{self.rtc_wake_target} (diff {diff:.1f}s) -> entering new suspend mode."
                             )
                             self.rtc_wake_pending = False
@@ -4746,7 +4769,7 @@ class Plugin:
                             asyncio.create_task(self._enter_standby_after_rtc_wake())
                         else:
                             logger.info(
-                                f"[DIB RTC WAKE] Clock-jump resume at {int(now)} is far from the "
+                                f"[NSM RTC WAKE] Clock-jump resume at {int(now)} is far from the "
                                 f"RTC target {self.rtc_wake_target} (diff {diff:.1f}s); "
                                 "treating as a manual wake and clearing the alarm."
                             )
@@ -4780,7 +4803,7 @@ class Plugin:
                         undone = self._recheck_after_restore()
                         if undone:
                             logger.warning(
-                                f"[DIB POST-RESTORE] Something undid the restore; put back: {undone}"
+                                f"[NSM POST-RESTORE] Something undid the restore; put back: {undone}"
                             )
                     else:
                         self.post_restore_until = 0.0
@@ -4844,7 +4867,7 @@ class Plugin:
                         and time.time() >= self.rtc_wake_grace_until
                     ):
                         logger.info(
-                            "[DIB QUIET HOURS] Entered the quiet-hours period while in our mode; "
+                            "[NSM QUIET HOURS] Entered the quiet-hours period while in our mode; "
                             "exiting it and running real SteamOS sleep."
                         )
                         if self.settings.get("wake_at_period_end", False):

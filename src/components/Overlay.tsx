@@ -36,7 +36,7 @@ export const Overlay: FC<OverlayProps> = ({
   if (isBackgroundMode) {
     return (
       <div
-        className="dib-overlay-container dib-overlay-blackout"
+        className="nsm-overlay-container nsm-overlay-blackout"
         tabIndex={-1}
         aria-hidden="true"
       />
@@ -47,11 +47,11 @@ export const Overlay: FC<OverlayProps> = ({
   // dark. Takes the place of the download card when there is no download to report.
   if (showSplash) {
     return (
-      <div className="dib-overlay-container dib-overlay-splash" tabIndex={-1} aria-hidden="true">
-        <div className="dib-splash">
-          <FaDownload className="dib-splash-icon" />
-          <div className="dib-splash-title">New Suspend Mode</div>
-          <div className="dib-splash-subtitle">
+      <div className="nsm-overlay-container nsm-overlay-splash" tabIndex={-1} aria-hidden="true">
+        <div className="nsm-splash">
+          <FaDownload className="nsm-splash-icon" />
+          <div className="nsm-splash-title">New Suspend Mode</div>
+          <div className="nsm-splash-subtitle">
             Press POWER or use a controller to wake
           </div>
         </div>
@@ -89,51 +89,51 @@ export const Overlay: FC<OverlayProps> = ({
   };
 
   return (
-    <div className="dib-overlay-container dib-overlay-hud">
-      <div className="dib-hud-card">
+    <div className="nsm-overlay-container nsm-overlay-hud">
+      <div className="nsm-hud-card">
         {/* Header */}
-        <div className="dib-hud-header">
-          <div className="dib-hud-title-box">
-            <FaDownload className="dib-hud-icon" />
+        <div className="nsm-hud-header">
+          <div className="nsm-hud-title-box">
+            <FaDownload className="nsm-hud-icon" />
             <div>
-              <div className="dib-hud-title">Download in Background</div>
-              <div className="dib-hud-subtitle">
+              <div className="nsm-hud-title">New Suspend Mode</div>
+              <div className="nsm-hud-subtitle">
                 System entering low-power mode to continue downloads
               </div>
             </div>
           </div>
-          <div className="dib-countdown-badge">
+          <div className="nsm-countdown-badge">
             <FaMoon />
             Screen off in {countdown}s
           </div>
         </div>
 
         {/* Game Progress */}
-        <div className="dib-game-info">
-          <div className="dib-game-title">{gameTitle}</div>
-          <div className="dib-progress-container">
+        <div className="nsm-game-info">
+          <div className="nsm-game-title">{gameTitle}</div>
+          <div className="nsm-progress-container">
             <div
-              className="dib-progress-bar"
+              className="nsm-progress-bar"
               style={{ width: `${percent > 0 ? percent : 2}%` }}
             />
           </div>
-          <div className="dib-metrics-row">
-            <div className="dib-metric-item">
+          <div className="nsm-metrics-row">
+            <div className="nsm-metric-item">
               <span>Speed:</span>
-              <span className="dib-metric-value">
+              <span className="nsm-metric-value">
                 {formatSpeed(downloadInfo.bytes_per_second)}
               </span>
             </div>
-            <div className="dib-metric-item">
+            <div className="nsm-metric-item">
               <span>Progress:</span>
-              <span className="dib-metric-value">
+              <span className="nsm-metric-value">
                 {percent.toFixed(1)}% (
                 {formatSize(downloadInfo.completed_bytes)} / {formatSize(downloadInfo.total_bytes)})
               </span>
             </div>
-            <div className="dib-metric-item">
+            <div className="nsm-metric-item">
               <span>Time Left:</span>
-              <span className="dib-metric-value">
+              <span className="nsm-metric-value">
                 {formatTime(downloadInfo.estimated_seconds_remaining)}
               </span>
             </div>
@@ -141,23 +141,23 @@ export const Overlay: FC<OverlayProps> = ({
         </div>
 
         {/* Status Badges */}
-        <div className="dib-status-badges">
-          <div className="dib-badge">
+        <div className="nsm-status-badges">
+          <div className="nsm-badge">
             <FaBatteryThreeQuarters
-              className={`dib-badge-icon ${batteryCapacity <= 20 ? "warning" : ""}`}
+              className={`nsm-badge-icon ${batteryCapacity <= 20 ? "warning" : ""}`}
             />
             <div>
-              <div className="dib-badge-title">Battery Level</div>
-              <div className="dib-badge-val">
+              <div className="nsm-badge-title">Battery Level</div>
+              <div className="nsm-badge-val">
                 {batteryCapacity}% {isCharging ? "(Charging)" : ""}
               </div>
             </div>
           </div>
-          <div className="dib-badge">
-            <FaBolt className="dib-badge-icon" />
+          <div className="nsm-badge">
+            <FaBolt className="nsm-badge-icon" />
             <div>
-              <div className="dib-badge-title">Auto-Suspend Threshold</div>
-              <div className="dib-badge-val">
+              <div className="nsm-badge-title">Auto-Suspend Threshold</div>
+              <div className="nsm-badge-val">
                 At &le; {settings.min_battery_threshold}% or on finish
               </div>
             </div>
@@ -165,22 +165,22 @@ export const Overlay: FC<OverlayProps> = ({
         </div>
 
         {/* Actions */}
-        <div className="dib-hud-actions">
+        <div className="nsm-hud-actions">
           <button
-            className="dib-btn-primary"
+            className="nsm-btn-primary"
             onClick={onEnterBlackout}
           >
             Turn Off Screen Now
           </button>
           <button
-            className="dib-btn-secondary"
+            className="nsm-btn-secondary"
             onClick={onWake}
           >
             <FaTimes style={{ marginRight: 6 }} /> Cancel & Keep Awake
           </button>
         </div>
 
-        <div className="dib-hud-footer">
+        <div className="nsm-hud-footer">
           Screen turns off automatically. Press the POWER button at any time to wake console back to normal.
         </div>
       </div>

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Download in Background - Installation Script for SteamOS / Decky Loader
+# New Suspend Mode - Installation Script for SteamOS / Decky Loader
 set -e
 
-PLUGIN_NAME="DownloadInBackground"
+PLUGIN_NAME="NewSuspendMode"
 DECKY_PLUGIN_DIR="${HOME}/homebrew/plugins/${PLUGIN_NAME}"
 
 echo "=================================================="

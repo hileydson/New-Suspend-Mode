@@ -1,12 +1,12 @@
 {
-  "name": "download-in-background",
-  "version": "1.0.0",
-  "description": "Decky Loader plugin for background downloading with screen off and power savings on SteamOS.",
+  "name": "new-suspend-mode",
+  "version": "2.0.0",
+  "description": "Decky Loader plugin that replaces the SteamOS sleep with a controller-aware standby, with downloads carrying on in the background.",
   "type": "module",
   "scripts": {
     "build": "shx rm -rf dist && rollup -c",
     "watch": "rollup -c -w",
-    "package": "shx rm -rf build DownloadInBackground.zip && shx mkdir -p build/DownloadInBackground && shx cp -r dist plugin.json main.py package.json assets build/DownloadInBackground/ && cd build && zip -r ../DownloadInBackground.zip DownloadInBackground && cd .."
+    "package": "shx rm -rf build NewSuspendMode.zip && shx mkdir -p build/NewSuspendMode && shx cp -r dist plugin.json main.py package.json assets build/NewSuspendMode/ && cd build && zip -r ../NewSuspendMode.zip NewSuspendMode && cd .."
   },
   "dependencies": {
     "@decky/api": "^1.1.3",

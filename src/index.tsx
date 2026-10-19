@@ -171,7 +171,7 @@ const centerSignature = (): string => {
       Math.round(win.innerHeight / 2)
     ) as HTMLElement | null;
     if (!el) return "none";
-    if (typeof el.closest === "function" && el.closest(".dib-overlay-container")) return "ours";
+    if (typeof el.closest === "function" && el.closest(".nsm-overlay-container")) return "ours";
     const parent = el.parentElement;
     return [
       el.tagName,
@@ -215,7 +215,7 @@ let sharedCenterBeforeSleep: string | null = null;
  * Takes the plugin's own black overlay off the screen, without going through React.
  *
  * This is what the console's log finally caught: after waking, the element covering the
- * middle of the screen was `dib-overlay-container dib-overlay-blackout` - the plugin's
+ * middle of the screen was `nsm-overlay-container nsm-overlay-blackout` - the plugin's
  * own blackout, still in the document, at z-index 9999999, while the plugin's state said
  * it had woken up. The state is what React renders from, so if that component does not
  * re-render, the black stays on screen for good. The side menus still worked because
@@ -238,7 +238,7 @@ const forceHideOverlayDom = (): number => {
 
   for (const doc of docs) {
     try {
-      const nodes = doc?.querySelectorAll?.(".dib-overlay-container");
+      const nodes = doc?.querySelectorAll?.(".nsm-overlay-container");
       if (!nodes) continue;
       Array.prototype.forEach.call(nodes, (node: any) => {
         node.style.display = "none";
@@ -248,7 +248,7 @@ const forceHideOverlayDom = (): number => {
     } catch (e) {}
   }
   if (hidden) {
-    console.warn(`[DownloadInBackground] Overlay was still in the DOM on wake; hid ${hidden} node(s).`);
+    console.warn(`[NewSuspendMode] Overlay was still in the DOM on wake; hid ${hidden} node(s).`);
   }
   return hidden;
 };
@@ -264,7 +264,7 @@ const clearOverlayDomOverrides = () => {
   } catch (e) {}
   for (const doc of docs) {
     try {
-      const nodes = doc?.querySelectorAll?.(".dib-overlay-container");
+      const nodes = doc?.querySelectorAll?.(".nsm-overlay-container");
       if (!nodes) continue;
       Array.prototype.forEach.call(nodes, (node: any) => {
         node.style.display = "";
@@ -354,7 +354,7 @@ const takeOverSleepFromMenu = (label: string) => {
   closeSteamSideMenus();
   call("log_debug", { kind: "menu_sleep_intercepted", label }).catch(() => {});
   call("request_standby", "standby_power_menu").catch((e) =>
-    console.error("[DownloadInBackground] request_standby failed:", e)
+    console.error("[NewSuspendMode] request_standby failed:", e)
   );
 };
 
@@ -390,12 +390,12 @@ const installMenuItemGuard = (win: any) => {
         return;
       }
 
-      console.log(`[DownloadInBackground] Power menu "${hit.label}" caught before Steam saw it.`);
+      console.log(`[NewSuspendMode] Power menu "${hit.label}" caught before Steam saw it.`);
       e.stopImmediatePropagation();
       e.preventDefault();
       takeOverSleepFromMenu(hit.label);
     } catch (err) {
-      console.error("[DownloadInBackground] Menu guard failed:", err);
+      console.error("[NewSuspendMode] Menu guard failed:", err);
     }
   };
 
@@ -405,7 +405,7 @@ const installMenuItemGuard = (win: any) => {
     } catch (e) {}
   });
   menuGuardWindow = win;
-  console.log("[DownloadInBackground] Power menu guard installed on the interface window.");
+  console.log("[NewSuspendMode] Power menu guard installed on the interface window.");
 };
 
 const removeMenuItemGuard = () => {
@@ -422,7 +422,7 @@ const removeMenuItemGuard = () => {
 /** How many of the plugin's overlay nodes are in the document right now. */
 const overlayNodesInDom = (): number => {
   try {
-    return uiDocument()?.querySelectorAll?.(".dib-overlay-container")?.length ?? 0;
+    return uiDocument()?.querySelectorAll?.(".nsm-overlay-container")?.length ?? 0;
   } catch (e) {
     return 0;
   }
@@ -506,7 +506,7 @@ const cancelSteamSuspendFlow = (request?: any): string[] => {
   }).catch(() => {});
 
   if (called.length) {
-    console.log(`[DownloadInBackground] Told Steam its suspend was cancelled via: ${called.join(", ")}`);
+    console.log(`[NewSuspendMode] Told Steam its suspend was cancelled via: ${called.join(", ")}`);
   }
   return called;
 };
@@ -543,7 +543,7 @@ const recoverSteamUi = () => {
         return;
       }
       console.warn(
-        `[DownloadInBackground] Screen changed across the sleep (${before} -> ${after}) -> navigating home.`
+        `[NewSuspendMode] Screen changed across the sleep (${before} -> ${after}) -> navigating home.`
       );
       call("log_debug", {
         kind: "ui_recovery", step: "navigate_home", before, after,
@@ -554,7 +554,7 @@ const recoverSteamUi = () => {
         if (typeof nav.NavigateToLibraryTab === "function") nav.NavigateToLibraryTab();
         else nav.Navigate?.("/library/home");
       } catch (e) {
-        console.warn("[DownloadInBackground] Could not navigate home:", e);
+        console.warn("[NewSuspendMode] Could not navigate home:", e);
       }
 
       sharedRecoveryTimers.push(
@@ -574,7 +574,7 @@ const recoverSteamUi = () => {
             return;
           }
           const restart = (window as any).SteamClient?.Browser?.RestartJSContext;
-          console.warn("[DownloadInBackground] Screen STILL empty -> reloading the Steam UI.");
+          console.warn("[NewSuspendMode] Screen STILL empty -> reloading the Steam UI.");
           call("log_debug", {
             kind: "ui_recovery",
             step: "restart_js_context",
@@ -584,14 +584,14 @@ const recoverSteamUi = () => {
           }).catch(() => {});
           if (typeof restart !== "function") return;
           toaster.toast({
-            title: "Download in Background",
+            title: "New Suspend Mode",
             body: "Reloading the Steam interface to finish waking up",
             duration: 3000,
           });
           try {
             restart();
           } catch (e) {
-            console.error("[DownloadInBackground] Could not reload the Steam UI:", e);
+            console.error("[NewSuspendMode] Could not reload the Steam UI:", e);
           }
         }, 2500)
       );
@@ -613,11 +613,11 @@ const restoreUiRoute = () => {
   if (!target) return;
   const now = currentUiRoute();
   if (!now || now === target) return;
-  console.log(`[DownloadInBackground] Steam UI moved to ${now} on sleep; going back to ${target}.`);
+  console.log(`[NewSuspendMode] Steam UI moved to ${now} on sleep; going back to ${target}.`);
   try {
     (Navigation as any).Navigate?.(target);
   } catch (e) {
-    console.warn("[DownloadInBackground] Could not restore the Steam UI route:", e);
+    console.warn("[NewSuspendMode] Could not restore the Steam UI route:", e);
   }
 };
 
@@ -680,7 +680,7 @@ const probeWakeScreen = (reason: string) => {
       samples,
     }).catch(() => {});
   } catch (e) {
-    console.warn("[DownloadInBackground] Wake screen probe failed:", e);
+    console.warn("[NewSuspendMode] Wake screen probe failed:", e);
   }
 };
 
@@ -753,7 +753,7 @@ const finishWakeUi = (reason: string) => {
  */
 const triggerEnterStandby = async (reason: string) => {
   if (Date.now() < sharedWakeCooldownUntil) {
-    console.log("[DownloadInBackground] Wake cooldown active, not entering standby.");
+    console.log("[NewSuspendMode] Wake cooldown active, not entering standby.");
     return;
   }
   if (sharedHudTimer) {
@@ -775,7 +775,7 @@ const triggerEnterStandby = async (reason: string) => {
       notifyStateListeners();
     }
   } catch (e) {
-    console.error("[DownloadInBackground] Error entering standby:", e);
+    console.error("[NewSuspendMode] Error entering standby:", e);
   }
 };
 
@@ -818,17 +818,17 @@ const startStandbySplash = (seconds: number, reason: string = "standby_splash") 
  * 4. Keeps dismissing any menu a stray button press may have opened
  */
 const triggerFullWake = async (reason: string = "wake") => {
-  console.log("[DownloadInBackground] triggerFullWake called! Reason:", reason);
+  console.log("[NewSuspendMode] triggerFullWake called! Reason:", reason);
   finishWakeUi(reason);
 
   try {
     await call("exit_background_mode", reason);
   } catch (e) {
-    console.error("[DownloadInBackground] Error calling exit_background_mode:", e);
+    console.error("[NewSuspendMode] Error calling exit_background_mode:", e);
   }
 
   toaster.toast({
-    title: "Download in Background",
+    title: "New Suspend Mode",
     body: "Console awakened!",
     duration: 2000,
   });
@@ -839,7 +839,7 @@ const triggerFullWake = async (reason: string = "wake") => {
  */
 const triggerEnterBlackout = async (reason: string = "countdown_completed") => {
   if (Date.now() < sharedWakeCooldownUntil) {
-    console.log("[DownloadInBackground] Wake cooldown active, blocking enter blackout.");
+    console.log("[NewSuspendMode] Wake cooldown active, blocking enter blackout.");
     return;
   }
 
@@ -862,7 +862,7 @@ const triggerEnterBlackout = async (reason: string = "countdown_completed") => {
       notifyStateListeners();
     }
   } catch (e) {
-    console.error("[DownloadInBackground] Error entering background mode:", e);
+    console.error("[NewSuspendMode] Error entering background mode:", e);
   }
 };
 
@@ -968,7 +968,7 @@ const clearTakeover = () => {
 const activeTakeover = (): SleepTakeover | null => {
   if (sharedTakeover && Date.now() > sharedTakeover.expires) {
     // A decision that never came back must never swallow sleeps forever.
-    console.warn("[DownloadInBackground] Sleep decision timed out; forgetting it.");
+    console.warn("[NewSuspendMode] Sleep decision timed out; forgetting it.");
     sharedTakeover = null;
   }
   return sharedTakeover;
@@ -985,10 +985,10 @@ const resumeSteamFromPreparedSuspend = () => {
   if (typeof user?.ResumeSuspendedGames !== "function") return false;
   try {
     user.ResumeSuspendedGames();
-    console.log("[DownloadInBackground] Called User.ResumeSuspendedGames() to undo Steam's sleep preparation.");
+    console.log("[NewSuspendMode] Called User.ResumeSuspendedGames() to undo Steam's sleep preparation.");
     return true;
   } catch (e) {
-    console.warn("[DownloadInBackground] ResumeSuspendedGames failed:", e);
+    console.warn("[NewSuspendMode] ResumeSuspendedGames failed:", e);
     return false;
   }
 };
@@ -1034,7 +1034,7 @@ const handleMenuSuspend = (hook: SuspendHook, args: any[]): any => {
   if (sharedIsBackgroundMode) {
     const timeInBg = Date.now() - sharedBackgroundModeEnteredTime;
     if (timeInBg >= 2000) {
-      console.log(`[DownloadInBackground] ${hook.name} while in our mode -> waking up.`);
+      console.log(`[NewSuspendMode] ${hook.name} while in our mode -> waking up.`);
       triggerFullWake("menu_suspend_wake");
     }
     return Promise.resolve();
@@ -1084,11 +1084,11 @@ const handleMenuSuspend = (hook: SuspendHook, args: any[]): any => {
 
   // The backend decides, on state it re-reads right now rather than on the last poll,
   // and starts the standby splash itself when standby is what takes over.
-  console.log(`[DownloadInBackground] Power menu sleep (${hook.name}) -> asking the backend.`);
+  console.log(`[NewSuspendMode] Power menu sleep (${hook.name}) -> asking the backend.`);
   call("trigger_suspend_intercept")
     .then((res: any) => {
       const verdict = String(res?.verdict ?? "");
-      console.log(`[DownloadInBackground] Power menu sleep verdict: ${verdict}`);
+      console.log(`[NewSuspendMode] Power menu sleep verdict: ${verdict}`);
       if (verdict === "allow") {
         releaseHeldSleep();
       } else {
@@ -1105,7 +1105,7 @@ const handleMenuSuspend = (hook: SuspendHook, args: any[]): any => {
       }
     })
     .catch((e) => {
-      console.error("[DownloadInBackground] trigger_suspend_intercept failed:", e);
+      console.error("[NewSuspendMode] trigger_suspend_intercept failed:", e);
       releaseHeldSleep();
     });
   return Promise.resolve();
@@ -1143,23 +1143,23 @@ const installSuspendMethodHooks = (): number => {
         try {
           return handleMenuSuspend(hook, args);
         } catch (e) {
-          console.error("[DownloadInBackground] Suspend hook failed, falling back to SteamOS:", e);
+          console.error("[NewSuspendMode] Suspend hook failed, falling back to SteamOS:", e);
           return callOriginalSuspend(hook, args);
         }
       };
       if (owner[name] === original) {
         // A read-only or proxied property: do not claim it was hooked.
-        console.warn(`[DownloadInBackground] SteamClient.${group}.${name} could not be replaced.`);
+        console.warn(`[NewSuspendMode] SteamClient.${group}.${name} could not be replaced.`);
         continue;
       }
       suspendHooks.push(hook);
       hooked.push(hook.name);
     } catch (e) {
-      console.warn(`[DownloadInBackground] Could not hook SteamClient.${group}.${name}:`, e);
+      console.warn(`[NewSuspendMode] Could not hook SteamClient.${group}.${name}:`, e);
     }
   }
   console.log(
-    `[DownloadInBackground] Suspend entry points hooked: ${hooked.join(", ") || "none"}`
+    `[NewSuspendMode] Suspend entry points hooked: ${hooked.join(", ") || "none"}`
   );
   call("log_debug", {
     kind: "suspend_hooks",
@@ -1304,7 +1304,7 @@ const PluginContent: FC = () => {
 
 export default definePlugin(() => {
   // Register global overlay in SteamOS DOM
-  routerHook.addGlobalComponent("DownloadInBackgroundOverlay", GlobalOverlayContainer);
+  routerHook.addGlobalComponent("NewSuspendModeOverlay", GlobalOverlayContainer);
 
   let pollTimer: NodeJS.Timeout | null = null;
   let pollStopped = false;
@@ -1319,7 +1319,7 @@ export default definePlugin(() => {
   // Listen directly for background mode changes from Python backend
   try {
     modeUnregister = addEventListener("background_mode_changed", (data: any) => {
-      console.log("[DownloadInBackground] background_mode_changed event received:", data);
+      console.log("[NewSuspendMode] background_mode_changed event received:", data);
       const isBg = typeof data === "boolean" ? data : Boolean(data?.is_background_mode);
       if (!isBg) {
         // System awakened from the backend: same cleanup as a wake asked for here.
@@ -1336,13 +1336,13 @@ export default definePlugin(() => {
       }
     });
   } catch (e) {
-    console.warn("[DownloadInBackground] Could not register background_mode_changed listener:", e);
+    console.warn("[NewSuspendMode] Could not register background_mode_changed listener:", e);
   }
 
   // Listen for suspend intercepted events from backend
   try {
     suspendEventUnregister = addEventListener("on_suspend_intercepted", (data: any) => {
-      console.log("[DownloadInBackground] on_suspend_intercepted event received:", data);
+      console.log("[NewSuspendMode] on_suspend_intercepted event received:", data);
       const now = Date.now();
       if (sharedIsBackgroundMode) {
         // If already in background mode, this is a wake action!
@@ -1350,20 +1350,20 @@ export default definePlugin(() => {
         return;
       }
       if (now < sharedWakeCooldownUntil) {
-        console.log("[DownloadInBackground] Ignoring on_suspend_intercepted during wake cooldown.");
+        console.log("[NewSuspendMode] Ignoring on_suspend_intercepted during wake cooldown.");
         return;
       }
       const timeoutSec = data?.hud_timeout ?? sharedSettings.hud_timeout_seconds ?? 5;
       startHudCountdown(timeoutSec);
     });
   } catch (e) {
-    console.warn("[DownloadInBackground] Could not register on_suspend_intercepted listener:", e);
+    console.warn("[NewSuspendMode] Could not register on_suspend_intercepted listener:", e);
   }
 
   // Backend asked for standby: draw the plugin mark first, then go dark
   try {
     standbyRequestUnregister = addEventListener("on_standby_requested", (data: any) => {
-      console.log("[DownloadInBackground] on_standby_requested received:", data);
+      console.log("[NewSuspendMode] on_standby_requested received:", data);
       if (sharedIsBackgroundMode) {
         return;
       }
@@ -1371,7 +1371,7 @@ export default definePlugin(() => {
       startStandbySplash(seconds, String(data?.reason ?? "standby_splash"));
     });
   } catch (e) {
-    console.warn("[DownloadInBackground] Could not register on_standby_requested listener:", e);
+    console.warn("[NewSuspendMode] Could not register on_standby_requested listener:", e);
   }
 
   // Critical battery auto-suspend notification
@@ -1381,7 +1381,7 @@ export default definePlugin(() => {
       sharedRealSuspendUntil = Date.now() + 60000;
       clearTakeover();
       toaster.toast({
-        title: "Download in Background",
+        title: "New Suspend Mode",
         body: `Battery reached ${data?.capacity ?? 15}%. Entering sleep now.`,
         duration: 4000,
         critical: true,
@@ -1396,7 +1396,7 @@ export default definePlugin(() => {
       sharedRealSuspendUntil = Date.now() + 60000;
       clearTakeover();
       toaster.toast({
-        title: "Download in Background",
+        title: "New Suspend Mode",
         body: "All downloads completed! Suspending console.",
         duration: 3500,
       });
@@ -1415,7 +1415,7 @@ export default definePlugin(() => {
       if (status) {
         const backendIsBg = Boolean(status.is_background_mode);
         if (sharedIsBackgroundMode && !backendIsBg) {
-          console.log("[DownloadInBackground] Backend woke up -> Synchronizing frontend!");
+          console.log("[NewSuspendMode] Backend woke up -> Synchronizing frontend!");
           finishWakeUi("status_poll_sync");
         } else {
           sharedIsBackgroundMode = backendIsBg;
@@ -1442,7 +1442,7 @@ export default definePlugin(() => {
         notifyStateListeners();
       }
     } catch (e) {
-      console.error("[DownloadInBackground] Error polling backend status:", e);
+      console.error("[NewSuspendMode] Error polling backend status:", e);
     }
   };
 
@@ -1571,7 +1571,7 @@ export default definePlugin(() => {
       }
     }
   } catch (e) {
-    console.warn("[DownloadInBackground] Could not register for download overview changes:", e);
+    console.warn("[NewSuspendMode] Could not register for download overview changes:", e);
   }
 
   // Take over the power menu's Sleep before Steam starts suspending. SteamClient is not
@@ -1584,7 +1584,7 @@ export default definePlugin(() => {
     try {
       installed = installSuspendMethodHooks();
     } catch (e) {
-      console.warn("[DownloadInBackground] Could not install suspend hooks:", e);
+      console.warn("[NewSuspendMode] Could not install suspend hooks:", e);
     }
     if (installed === 0 && ++suspendHookAttempts < 6) {
       suspendHookTimer = setTimeout(tryInstallSuspendHooks, 3000);
@@ -1596,7 +1596,7 @@ export default definePlugin(() => {
   try {
     if (window.SteamClient?.System?.RegisterForOnSuspendRequest) {
       const reg = window.SteamClient.System.RegisterForOnSuspendRequest(async (request?: any) => {
-        console.log("[DownloadInBackground] SteamClient Suspend Request event received!", request);
+        console.log("[NewSuspendMode] SteamClient Suspend Request event received!", request);
         call("log_debug", {
           kind: "suspend_request_fired",
           in_background: sharedIsBackgroundMode,
@@ -1610,17 +1610,17 @@ export default definePlugin(() => {
         if (sharedIsBackgroundMode) {
           const timeInBg = Date.now() - sharedBackgroundModeEnteredTime;
           if (timeInBg < 2000) {
-            console.log(`[DownloadInBackground] Ignoring suspend request in initial transition grace period (${timeInBg}ms).`);
+            console.log(`[NewSuspendMode] Ignoring suspend request in initial transition grace period (${timeInBg}ms).`);
             return false;
           }
-          console.log("[DownloadInBackground] Power button pressed while in background mode -> WAKING UP!");
+          console.log("[NewSuspendMode] Power button pressed while in background mode -> WAKING UP!");
           await triggerFullWake("power_button_wake");
           return false; // Prevent Steam from suspending
         }
 
         // 2. Cooldown check: ignore suspend request if the system just woke up
         if (now < sharedWakeCooldownUntil) {
-          console.log("[DownloadInBackground] Ignoring suspend request: within wake cooldown period.");
+          console.log("[NewSuspendMode] Ignoring suspend request: within wake cooldown period.");
           return false;
         }
 
@@ -1634,7 +1634,7 @@ export default definePlugin(() => {
         // just the physical button. With standby on, that sleep becomes our mode.
         const looksIdle = !sharedDownloadInfo.is_downloading || sharedDownloadInfo.is_paused;
         if (looksIdle && !sharedSettings.standby_on_power_off) {
-          console.log("[DownloadInBackground] No active download and standby off -> Allowing stock SteamOS suspend.");
+          console.log("[NewSuspendMode] No active download and standby off -> Allowing stock SteamOS suspend.");
           return true;
         }
 
@@ -1646,7 +1646,7 @@ export default definePlugin(() => {
         );
 
         if (!isDownloading && sharedSettings.standby_on_power_off) {
-          console.log("[DownloadInBackground] Sleep requested with standby enabled -> splash, then standby.");
+          console.log("[NewSuspendMode] Sleep requested with standby enabled -> splash, then standby.");
           call("log_debug", {
             kind: "suspend_request",
             source: "RegisterForOnSuspendRequest",
@@ -1663,16 +1663,16 @@ export default definePlugin(() => {
         }
 
         if (isDownloading) {
-          console.log("[DownloadInBackground] Active download running -> Intercepting suspend and showing HUD");
+          console.log("[NewSuspendMode] Active download running -> Intercepting suspend and showing HUD");
           try {
             const res: any = await call("trigger_suspend_intercept");
             if (String(res?.verdict ?? "") === "allow") {
               // The backend re-read the state and found nothing running after all.
-              console.log("[DownloadInBackground] Backend says idle -> allowing stock suspend.");
+              console.log("[NewSuspendMode] Backend says idle -> allowing stock suspend.");
               return true;
             }
           } catch (e) {
-            console.error("[DownloadInBackground] Error calling trigger_suspend_intercept:", e);
+            console.error("[NewSuspendMode] Error calling trigger_suspend_intercept:", e);
           }
           sharedRouteBeforeTakeover = currentUiRoute();
           sharedUiInitiatedSleep = true;
@@ -1682,7 +1682,7 @@ export default definePlugin(() => {
           return false; // Prevent suspend in SteamClient
         }
 
-        console.log("[DownloadInBackground] Download is paused or idle -> Allowing normal Steam suspend without intercepting.");
+        console.log("[NewSuspendMode] Download is paused or idle -> Allowing normal Steam suspend without intercepting.");
         return true; // Allow suspend immediately
       });
       if (reg && typeof reg.unregister === "function") {
@@ -1690,7 +1690,7 @@ export default definePlugin(() => {
       }
     }
   } catch (e) {
-    console.warn("[DownloadInBackground] Could not hook SteamClient.System.RegisterForOnSuspendRequest:", e);
+    console.warn("[NewSuspendMode] Could not hook SteamClient.System.RegisterForOnSuspendRequest:", e);
   }
 
   // Poll the backend on an adaptive schedule instead of a fixed 1.5s interval
@@ -1794,7 +1794,7 @@ export default definePlugin(() => {
     }
 
     if (delta > 15000) {
-      console.log(`[DownloadInBackground] Kernel resume detected (delta=${delta}ms)! Enforcing wake state.`);
+      console.log(`[NewSuspendMode] Kernel resume detected (delta=${delta}ms)! Enforcing wake state.`);
       sharedWakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
       if (sharedHudTimer) {
         clearInterval(sharedHudTimer);
@@ -1808,11 +1808,11 @@ export default definePlugin(() => {
   }, 2000);
 
   return {
-    name: "Download in Background",
+    name: "New Suspend Mode",
     icon: <FaDownload />,
     content: <PluginContent />,
     onDismount() {
-      routerHook.removeGlobalComponent("DownloadInBackgroundOverlay");
+      routerHook.removeGlobalComponent("NewSuspendModeOverlay");
       pollStopped = true;
       if (pollTimer) {
         clearTimeout(pollTimer);

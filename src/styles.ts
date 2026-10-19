@@ -1,7 +1,7 @@
 export const PLUGIN_STYLES = `
-/* Download in Background - Styles */
+/* New Suspend Mode - Styles */
 
-.dib-overlay-container {
+.nsm-overlay-container {
   position: fixed;
   top: 0;
   left: 0;
@@ -18,7 +18,7 @@ export const PLUGIN_STYLES = `
 }
 
 /* Blackout mode: 100% pitch black for OLED and LCD */
-.dib-overlay-blackout {
+.nsm-overlay-blackout {
   background-color: #000000 !important;
   cursor: none;
   pointer-events: all;
@@ -27,12 +27,12 @@ export const PLUGIN_STYLES = `
 
 /* Standby splash: the plugin mark on a black screen, shown while the panel is still lit,
    just before the console goes dark. Takes the place of the download card. */
-.dib-overlay-splash {
+.nsm-overlay-splash {
   background-color: #000000;
   animation: dibFadeIn 0.25s ease-out;
 }
 
-.dib-splash {
+.nsm-splash {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -40,20 +40,20 @@ export const PLUGIN_STYLES = `
   animation: dibSplashIn 0.5s ease-out;
 }
 
-.dib-splash-icon {
+.nsm-splash-icon {
   font-size: 60px;
   color: #4aa3ff;
   filter: drop-shadow(0 0 22px rgba(74, 163, 255, 0.45));
 }
 
-.dib-splash-title {
+.nsm-splash-title {
   font-size: 19px;
   font-weight: 600;
   letter-spacing: 0.3px;
   color: #e8eefc;
 }
 
-.dib-splash-subtitle {
+.nsm-splash-subtitle {
   font-size: 13px;
   color: #93a4c4;
 }
@@ -64,7 +64,7 @@ export const PLUGIN_STYLES = `
 }
 
 /* HUD Mode: Dark glassmorphic overlay */
-.dib-overlay-hud {
+.nsm-overlay-hud {
   background: radial-gradient(circle at center, rgba(16, 24, 40, 0.94) 0%, rgba(10, 14, 23, 0.98) 100%);
   backdrop-filter: blur(16px);
   animation: dibFadeIn 0.3s ease-out;
@@ -81,7 +81,7 @@ export const PLUGIN_STYLES = `
   }
 }
 
-.dib-hud-card {
+.nsm-hud-card {
   width: 600px;
   max-width: 90vw;
   background: rgba(30, 41, 59, 0.85);
@@ -95,38 +95,38 @@ export const PLUGIN_STYLES = `
   position: relative;
 }
 
-.dib-hud-header {
+.nsm-hud-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
 }
 
-.dib-hud-title-box {
+.nsm-hud-title-box {
   display: flex;
   align-items: center;
   gap: 14px;
 }
 
-.dib-hud-icon {
+.nsm-hud-icon {
   font-size: 32px;
   color: #38bdf8;
   filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.5));
 }
 
-.dib-hud-title {
+.nsm-hud-title {
   font-size: 22px;
   font-weight: 700;
   letter-spacing: 0.5px;
   color: #f8fafc;
 }
 
-.dib-hud-subtitle {
+.nsm-hud-subtitle {
   font-size: 13px;
   color: #94a3b8;
   margin-top: 2px;
 }
 
-.dib-countdown-badge {
+.nsm-countdown-badge {
   background: rgba(56, 189, 248, 0.15);
   border: 1px solid rgba(56, 189, 248, 0.4);
   color: #38bdf8;
@@ -139,14 +139,14 @@ export const PLUGIN_STYLES = `
   gap: 6px;
 }
 
-.dib-game-info {
+.nsm-game-info {
   background: rgba(15, 23, 42, 0.6);
   border-radius: 12px;
   padding: 16px 20px;
   border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
-.dib-game-title {
+.nsm-game-title {
   font-size: 18px;
   font-weight: 600;
   color: #ffffff;
@@ -156,7 +156,7 @@ export const PLUGIN_STYLES = `
   text-overflow: ellipsis;
 }
 
-.dib-progress-container {
+.nsm-progress-container {
   width: 100%;
   height: 12px;
   background: rgba(51, 65, 85, 0.6);
@@ -165,7 +165,7 @@ export const PLUGIN_STYLES = `
   position: relative;
 }
 
-.dib-progress-bar {
+.nsm-progress-bar {
   height: 100%;
   background: linear-gradient(90deg, #0284c7 0%, #38bdf8 50%, #818cf8 100%);
   border-radius: 6px;
@@ -173,7 +173,7 @@ export const PLUGIN_STYLES = `
   box-shadow: 0 0 12px rgba(56, 189, 248, 0.6);
 }
 
-.dib-metrics-row {
+.nsm-metrics-row {
   display: flex;
   justify-content: space-between;
   margin-top: 10px;
@@ -181,23 +181,23 @@ export const PLUGIN_STYLES = `
   color: #cbd5e1;
 }
 
-.dib-metric-item {
+.nsm-metric-item {
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
-.dib-metric-value {
+.nsm-metric-value {
   font-weight: 600;
   color: #38bdf8;
 }
 
-.dib-status-badges {
+.nsm-status-badges {
   display: flex;
   gap: 12px;
 }
 
-.dib-badge {
+.nsm-badge {
   flex: 1;
   background: rgba(15, 23, 42, 0.5);
   border: 1px solid rgba(255, 255, 255, 0.06);
@@ -209,35 +209,35 @@ export const PLUGIN_STYLES = `
   font-size: 13px;
 }
 
-.dib-badge-icon {
+.nsm-badge-icon {
   font-size: 18px;
   color: #10b981;
 }
 
-.dib-badge-icon.warning {
+.nsm-badge-icon.warning {
   color: #f59e0b;
 }
 
-.dib-badge-title {
+.nsm-badge-title {
   font-size: 11px;
   color: #94a3b8;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 
-.dib-badge-val {
+.nsm-badge-val {
   font-size: 14px;
   font-weight: 600;
   color: #f1f5f9;
 }
 
-.dib-hud-actions {
+.nsm-hud-actions {
   display: flex;
   gap: 12px;
   margin-top: 4px;
 }
 
-.dib-btn-primary {
+.nsm-btn-primary {
   flex: 1;
   background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
   color: #ffffff;
@@ -251,12 +251,12 @@ export const PLUGIN_STYLES = `
   box-shadow: 0 4px 12px rgba(2, 132, 199, 0.3);
 }
 
-.dib-btn-primary:hover {
+.nsm-btn-primary:hover {
   background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%);
   transform: translateY(-1px);
 }
 
-.dib-btn-secondary {
+.nsm-btn-secondary {
   flex: 1;
   background: rgba(51, 65, 85, 0.6);
   color: #e2e8f0;
@@ -269,12 +269,12 @@ export const PLUGIN_STYLES = `
   transition: all 0.2s;
 }
 
-.dib-btn-secondary:hover {
+.nsm-btn-secondary:hover {
   background: rgba(71, 85, 105, 0.8);
   color: #ffffff;
 }
 
-.dib-hud-footer {
+.nsm-hud-footer {
   text-align: center;
   font-size: 12px;
   color: #64748b;
@@ -282,7 +282,7 @@ export const PLUGIN_STYLES = `
 }
 
 /* QAM Panel Styles */
-.dib-panel-status-card {
+.nsm-panel-status-card {
   background: rgba(30, 41, 59, 0.5);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
@@ -290,7 +290,7 @@ export const PLUGIN_STYLES = `
   margin-bottom: 12px;
 }
 
-.dib-status-tag {
+.nsm-status-tag {
   display: inline-block;
   padding: 4px 8px;
   border-radius: 6px;
@@ -299,25 +299,25 @@ export const PLUGIN_STYLES = `
   text-transform: uppercase;
 }
 
-.dib-status-tag.active {
+.nsm-status-tag.active {
   background: rgba(16, 185, 129, 0.2);
   color: #34d399;
   border: 1px solid rgba(16, 185, 129, 0.4);
 }
 
-.dib-status-tag.downloading {
+.nsm-status-tag.downloading {
   background: rgba(56, 189, 248, 0.2);
   color: #38bdf8;
   border: 1px solid rgba(56, 189, 248, 0.4);
 }
 
-.dib-status-tag.paused {
+.nsm-status-tag.paused {
   background: rgba(245, 158, 11, 0.2);
   color: #fbbf24;
   border: 1px solid rgba(245, 158, 11, 0.4);
 }
 
-.dib-status-tag.idle {
+.nsm-status-tag.idle {
   background: rgba(148, 163, 184, 0.15);
   color: #94a3b8;
   border: 1px solid rgba(148, 163, 184, 0.3);

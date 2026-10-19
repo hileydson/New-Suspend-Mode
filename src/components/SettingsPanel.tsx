@@ -48,7 +48,7 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
     try {
       await call("save_settings", updated);
     } catch (e) {
-      console.error("[DownloadInBackground] Error saving settings:", e);
+      console.error("[NewSuspendMode] Error saving settings:", e);
     }
   };
 
@@ -109,7 +109,7 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
             }
           >
             <span
-              className={`dib-status-tag ${
+              className={`nsm-status-tag ${
                 isDownloading ? "downloading" : isPaused ? "paused" : "idle"
               }`}
             >
@@ -167,7 +167,7 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
             }
           >
             <span
-              className={`dib-status-tag ${
+              className={`nsm-status-tag ${
                 isBackgroundMode ? "active" : "idle"
               }`}
             >
@@ -247,13 +247,13 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
               try {
                 await call("force_restore");
                 toaster.toast({
-                  title: "Download in Background",
+                  title: "New Suspend Mode",
                   body: "Hardware restored: clocks, power limits and speed caps are back to normal.",
                   duration: 4000,
                 });
               } catch (e) {
                 toaster.toast({
-                  title: "Download in Background",
+                  title: "New Suspend Mode",
                   body: "Could not restore the hardware; see the plugin log.",
                   duration: 4000,
                 });

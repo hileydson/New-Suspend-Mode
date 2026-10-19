@@ -1,5 +1,5 @@
 {
-  "name": "Download in Background",
+  "name": "New Suspend Mode",
   "author": "Antigravity",
   "flags": [
     "root"
@@ -9,10 +9,11 @@
     "tags": [
       "utility",
       "power",
-      "system",
+      "suspend",
+      "standby",
       "downloads"
     ],
-    "description": "Prevents suspend during active downloads, turns off the screen, minimizes power consumption, and automatically suspends when downloads finish or battery drops below 15%.",
+    "description": "A full replacement for the SteamOS sleep. Press Sleep (or the power button) and the console blacks out but stays on: downloads keep going, a controller button wakes it, Bluetooth stays reachable. Includes a quiet-hours window that falls back to real sleep overnight and an RTC alarm that returns to the new suspend mode in the morning.",
     "image": "https://raw.githubusercontent.com/SteamDeckHomebrew/decky-plugin-template/main/assets/banner.png"
   }
 }

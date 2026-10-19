@@ -1,5 +1,5 @@
 PNPM := $(shell which pnpm 2>/dev/null || echo "$$HOME/.local/bin/pnpm")
-PLUGIN_NAME := DownloadInBackground
+PLUGIN_NAME := NewSuspendMode
 ZIP_NAME := $(PLUGIN_NAME).zip
 DEST_DIR := $(HOME)/homebrew/plugins/$(PLUGIN_NAME)
 
