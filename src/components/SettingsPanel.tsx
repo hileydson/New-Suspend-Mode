@@ -181,8 +181,8 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
       <PanelSection title="Essentials">
         <PanelSectionRow>
           <ToggleField
-            label="Replace Sleep With Standby"
-            description="The power button AND the Sleep option in the SteamOS power menu both enter the plugin's standby instead of suspending: screen black, downloads carry on, a controller brings it back. Shut Down still powers off for real."
+            label="Replace Sleep With New Suspend Mode"
+            description="The power button AND the Sleep option in the SteamOS power menu both enter the plugin's new suspend mode instead of the stock one: screen black, downloads carry on, a controller brings it back. Shut Down still powers off for real."
             checked={settings.standby_on_power_off}
             onChange={(checked) => updateSetting("standby_on_power_off", checked)}
           />
@@ -222,8 +222,8 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
             </PanelSectionRow>
             <PanelSectionRow>
               <ToggleField
-                label="Wake At End Of Period"
-                description="Programs the system clock to wake the console at the end of the period, then re-enters our standby so a controller can wake it. Uses the RTC alarm, which works on any handheld or PC that exposes it."
+                label="Return To New Suspend Mode At Period End"
+                description="At the end of the period, the RTC wakes the system from the real sleep and the plugin immediately re-enters the new suspend mode, so a controller can wake it. If off, the console stays in the real sleep until you wake it manually."
                 checked={settings.wake_at_period_end === true}
                 onChange={(checked) => updateSetting("wake_at_period_end", checked)}
               />

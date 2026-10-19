@@ -1141,21 +1141,27 @@ class Plugin:
         Called after a resume that was triggered by the RTC alarm the plugin set up at the
         start of a quiet-hours sleep. Short delay so the kernel finishes bringing the
         hardware back, then enters the plugin's standby for a controller to wake later.
+
+        Wake cooldown is cleared explicitly: it exists to stop the power-button press that
+        woke the console from immediately re-sleeping it, but an RTC-triggered wake had no
+        button press, so the cooldown is spurious here and would reject request_standby.
         """
-        await asyncio.sleep(3.0)
+        await asyncio.sleep(5.0)
         if self.is_background_mode:
             return
         if not self.settings.get("standby_on_power_off", False):
             logger.info("[DIB RTC WAKE] Standby option is off; staying awake.")
             return
         if self._inside_quiet_hours():
-            # Still inside the window somehow (user widened it after sleeping): a plain
-            # real sleep is correct again.
             logger.info("[DIB RTC WAKE] Woke inside the quiet-hours window; running real sleep again.")
             await self.trigger_suspend()
             return
+        self.wake_cooldown_until = 0.0
         logger.info("[DIB RTC WAKE] Quiet-hours ended; entering the plugin's standby.")
-        await self.request_standby("quiet_hours_rtc_end")
+        ok = await self.request_standby("quiet_hours_rtc_end")
+        if not ok and not self.is_background_mode:
+            logger.info("[DIB RTC WAKE] request_standby declined; entering background mode directly.")
+            await self.enter_background_mode("quiet_hours_rtc_end")
 
     async def request_standby(self, reason: str = "standby") -> bool:
         """
