@@ -15,6 +15,7 @@ export interface PluginSettings {
   download_cpu_percent: number; // % of one CPU core, default 30
   debug_logging: boolean; // default true
   ui_recovery_on_wake: boolean; // default true
+  auto_hard_reset_after_wake: boolean; // default true
   standby_on_power_off: boolean; // default false
   wake_on_bluetooth_connect: boolean; // default true
   wake_on_controller_button: boolean; // default true

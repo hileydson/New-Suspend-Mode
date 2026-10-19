@@ -51,6 +51,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "download_cpu_percent": 30,
     "debug_logging": True,
     "ui_recovery_on_wake": True,
+    "auto_hard_reset_after_wake": True,
     # Standby: turn the power button into "console off, wakes on a controller"
     "standby_on_power_off": False,
     "wake_on_bluetooth_connect": True,
@@ -75,10 +76,8 @@ DISABLED_LOOP_INTERVAL = 10.0
 WAKE_COOLDOWN_SECONDS = 5.0
 # How long after a restore the plugin keeps checking that it stayed restored.
 POST_RESTORE_WATCH_SECONDS = 25.0
-# The permanent watchdog, in addition to the above: a periodic check that the plugin's
-# own throttles are not stuck in place long after a wake, as a workaround for every
-# unforeseen way a restore could fail. Runs only while NOT in the mode.
-THROTTLE_WATCHDOG_INTERVAL = 20.0
+# The permanent watchdog, in addition to the above: a periodic check for drift that
+# happens later. Interval is on the Plugin class itself (WATCHDOG_PERIODIC_INTERVAL).
 # ryzenadj limits at or below this many milliwatts can only be a leftover of the plugin's
 # own 6 W cap: used by the snapshot (do not save as the originals) and the watchdog (re-apply
 # the real originals when they drift back down). 10 W is well below any sane APU default,
@@ -442,6 +441,12 @@ class Plugin:
         self.watchdog_marks: Dict[str, str] = {}
         self.watchdog_ryzenadj: Dict[str, int] = {}
         self.last_watchdog_check: float = 0.0
+        # The "once per wake, then periodic check" state the user asked for. The post-wake
+        # auto-reset runs 8 s after each exit from the mode. Any later re-run from the
+        # periodic check is suppressed for 2 minutes afterwards, so the hard reset is not
+        # repeated for the same cycle. See _throttle_watchdog.
+        self.last_wake_time: float = 0.0
+        self.last_auto_hard_reset_time: float = 0.0
         self.throttled_interfaces: List[str] = []
         self.runtime_state_file: str = ""
         self.last_telemetry_time: float = 0.0
@@ -989,6 +994,94 @@ class Plugin:
             "intercepted": verdict in ("hud", "standby", "wake"),
             "download_info": self.download_info,
         }
+
+    def _system_still_capped_signs(self) -> List[str]:
+        """
+        Looks for signs that the plugin's own throttle is still in place.
+
+        Only used as a trigger for the automatic hard reset, so it has to be conservative:
+        a false positive would bounce the ACPI profile without reason, and that is a
+        firmware event the user feels. Only values this plugin is known to have set are
+        counted - anything an external tool wrote is left alone.
+        """
+        signs: List[str] = []
+
+        # 1. CPU scaling_max_freq pinned at the plugin's cap. The cap is the min_freq of
+        # the CPU, so a healthy system is ALWAYS above it; a user-chosen lower ceiling
+        # from PowerTools is above it too, because it never equals it exactly.
+        min_target = self._cpu_min_freq_target()
+        for path in self._cpu_freq_files():
+            if self._read_text(path) == min_target:
+                signs.append(f"{os.path.basename(path)}={min_target}")
+                break
+
+        # 2. CPU turbo boost still off AND we had a baseline that said it should be on.
+        boost = self._read_text(self.CPU_BOOST_FILE) if os.path.exists(self.CPU_BOOST_FILE) else ""
+        if boost == "0" and self.watchdog_targets.get(self.CPU_BOOST_FILE) == "1":
+            signs.append("boost=0")
+
+        # 3. ryzenadj limits at or near our cap. 10 W is well below any sane APU default.
+        if shutil.which("ryzenadj"):
+            limits = self._read_ryzenadj_limits()
+            if limits and any(
+                0 < limits.get(k, 999999) <= RYZENADJ_SANE_FLOOR_MW
+                for k in ("stapm-limit", "fast-limit", "slow-limit")
+            ):
+                signs.append(f"ryzenadj={limits}")
+
+        # 4. The ACPI platform profile still at a low-power choice when we had the
+        # baseline saying it should be balanced/performance.
+        if os.path.exists(self.PLATFORM_PROFILE_FILE):
+            now_profile = self._read_text(self.PLATFORM_PROFILE_FILE)
+            baseline = self.watchdog_targets.get(self.PLATFORM_PROFILE_FILE)
+            if now_profile in ("quiet", "low-power") and baseline and baseline != now_profile:
+                signs.append(f"platform_profile={now_profile}")
+
+        return signs
+
+    async def _auto_hard_reset_after_wake(self, delay_seconds: float):
+        """
+        Scheduled 8 s after each wake. The user asked for exactly this: "ao voltar da
+        suspensao, esperar uns 8 segundos e entao chamar o restore hardware".
+
+        Runs unconditionally (does not check for signs first), because the manual button
+        is what the user says works for them on the ROG Ally X - any detection logic that
+        decides against running it when they want it run is wrong by their own report.
+
+        Only one run per wake: the periodic watchdog honours a 2-minute cooldown after
+        this fires, so the hard reset is not repeated for the same cycle. The periodic
+        check is still there to catch a future problem, as asked for.
+        """
+        try:
+            await asyncio.sleep(delay_seconds)
+        except asyncio.CancelledError:
+            return
+
+        if self.is_background_mode or self.transition_in_progress:
+            return
+        if not self.settings.get("auto_hard_reset_after_wake", True):
+            return
+
+        logger.warning("[DIB AUTO-RESET] 8 s post-wake: running the hard reset.")
+        try:
+            done = await self.loop.run_in_executor(None, self._run_transition_locked_safe,
+                                                   self._hard_reset_power_limits)
+            self.last_auto_hard_reset_time = time.time()
+            if done:
+                logger.warning(f"[DIB AUTO-RESET] Repaired: {done}")
+            else:
+                logger.info("[DIB AUTO-RESET] Nothing needed repair.")
+        except Exception as e:
+            logger.error(f"[DIB AUTO-RESET] Failed: {e}")
+
+    def _run_transition_locked_safe(self, func):
+        """Non-throwing wrapper for a hardware repair run from a schedule."""
+        try:
+            with self.transition_lock:
+                return func()
+        except Exception as e:
+            logger.error(f"Auto hardware repair {func.__name__} failed: {e}")
+            return []
 
     def _hard_reset_power_limits(self) -> List[str]:
         """
@@ -1883,6 +1976,22 @@ class Plugin:
     # bluez reports gamepads with one of these icons. Used to make sure a Bluetooth
     # headset or keyboard is never dropped along with the controllers.
     GAMEPAD_BT_ICONS = {"input-gaming", "input-gamepad", "input-joystick"}
+    # Vendor IDs of controller makers whose Bluetooth pads sometimes register with no
+    # icon at all (xpadneo-driven Xbox controllers, 8BitDo, etc.). Used as a backup
+    # identifier: a connected Bluetooth device whose modalias names one of these is
+    # taken as a controller even without the icon.
+    GAMEPAD_BT_VENDORS = {
+        "045E",  # Microsoft (Xbox One / Series)
+        "054C",  # Sony (PlayStation 4 / 5)
+        "057E",  # Nintendo (Switch Pro, Joy-Cons)
+        "28DE",  # Valve (Steam Controller / Deck)
+        "2DC8",  # 8BitDo
+        "20D6",  # PowerA
+        "0738",  # Mad Catz
+        "0F0D",  # HORI
+        "3285",  # Nacon
+        "0C45",  # BigBigWon / Microdia
+    }
     MAC_RE = re.compile(r"^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$")
 
     def _bt_adapters(self) -> List[str]:
@@ -1975,7 +2084,17 @@ class Plugin:
             if not path or self._bt_get_property(path, "Connected") != "true":
                 continue
             icon = (self._bt_get_property(path, "Icon") or "").lower()
-            if icon in self.GAMEPAD_BT_ICONS:
+            is_gamepad = icon in self.GAMEPAD_BT_ICONS
+            if not is_gamepad:
+                # Fallback: a Bluetooth device from a known controller vendor with no icon
+                # (or with the wrong one - xpadneo-driven Xbox controllers sometimes do
+                # this). The modalias is in `usb:vXXXXpYYYYdZZZZ` format; the four hex
+                # digits after `v` are the vendor id.
+                modalias = (self._bt_get_property(path, "Modalias") or "").lower()
+                m = re.match(r"usb:v([0-9a-f]{4})p", modalias)
+                if m and m.group(1).upper() in self.GAMEPAD_BT_VENDORS:
+                    is_gamepad = True
+            if is_gamepad:
                 found[address] = self._bt_get_property(path, "Alias") or address
         return found
 
@@ -2094,6 +2213,11 @@ class Plugin:
         # first pass and wake the console immediately.
         pads = self._find_external_gamepads()
         self.standby_known_gamepads = {p["input_dir"] for p in pads}
+        # Also seed the bluez baseline so a pad already connected (but, for example, not
+        # yet enumerated with a js* node) does not look "newly connected" on the first
+        # pass and wake the console at once.
+        for address in self._bluez_connected_gamepads().keys():
+            self.standby_known_gamepads.add(f"bt:{address}")
         logger.info(
             f"Standby: {len(pads)} external controller(s) present: "
             f"{[(p['name'], 'bluetooth' if p['bustype'] == BUS_BLUETOOTH else 'usb') for p in pads] or 'none'}"
@@ -2259,13 +2383,33 @@ class Plugin:
             asyncio.run_coroutine_threadsafe(self.exit_background_mode(reason), self.loop)
 
     def _newly_connected_bluetooth_gamepads(self) -> List[str]:
-        """Bluetooth controllers that appeared since standby began."""
-        names = []
+        """
+        Bluetooth controllers that have connected since standby began.
+
+        Checked two ways, because they catch different cases:
+
+          * The input layer: a new /sys/class/input/input* directory with a `js*`
+            symlink. Fast and exact for anything the kernel has finished enumerating.
+          * Bluez over D-Bus: finds a paired controller the moment the bluez stack marks
+            it as connected, even if the kernel's joystick layer has not published a
+            `js*` node yet. This is the only path that catches the Sony DualSense (PS5
+            controller), which the hid-playstation driver registers in a way that the
+            `js*` node sometimes appears a few seconds AFTER bluez reports the connection
+            and the user has already given up.
+        """
+        names: List[str] = []
         for pad in self._find_external_gamepads():
             if pad["bustype"] != BUS_BLUETOOTH or pad["input_dir"] in self.standby_known_gamepads:
                 continue
             self.standby_known_gamepads.add(pad["input_dir"])
             names.append(pad["name"] or pad["input_dir"])
+        for address, name in self._bluez_connected_gamepads().items():
+            key = f"bt:{address}"
+            if key in self.standby_known_gamepads:
+                continue
+            self.standby_known_gamepads.add(key)
+            if name not in names:
+                names.append(f"{name} (bluez)")
         return names
 
     def _refresh_standby_wake_sources(self) -> int:
@@ -3807,35 +3951,44 @@ class Plugin:
                 self.watchdog_ryzenadj = dict(self.saved_ryzenadj)
         self._save_runtime_state()
 
+    # The periodic watchdog runs at this cadence (seconds). Set long on purpose: the
+    # primary path is the 8 s post-wake auto-reset, this is only the backstop for
+    # drift that happens later. The user asked for both: "esperar uns 8 segundos e
+    # entao chamar o restore hardware" + "de tempos em tempos tem que ter essa
+    # checkagem, para corrigir possiveis problemas futuros".
+    WATCHDOG_PERIODIC_INTERVAL = 90.0
+    # After a hard reset the periodic watchdog waits this many seconds before it is
+    # allowed to run another one, so one wake does not get the hard reset over and over.
+    WATCHDOG_HARD_RESET_COOLDOWN = 120.0
+
     def _throttle_watchdog(self) -> List[str]:
         """
-        Periodic safety net: a check that this plugin's own throttles are not stuck in
-        place long after a wake.
+        Periodic safety net for drift that happens LATER - between wakes, or hours after
+        a wake - not for the moment just after a wake, which the post-wake auto-reset
+        already covers.
 
-        Only acts on values that match EXACTLY what the apply would have written, so a
-        value a different tool chose (PowerTools, HHD TDP control, the user themselves)
-        is never fought. Only runs while the plugin is NOT in the mode, past the wake
-        cooldown. Logged every time it corrects anything.
+        One hard reset per wake, no more. If this watchdog finds signs of capping and
+        the 8 s post-wake auto-reset already fired for the current wake, it skips the
+        hard reset (the user asked for exactly this: do not keep calling it once it has
+        been executed). It still runs the cheap, baseline-based repairs though - those
+        are tiny and cannot step on anything.
 
-        This is a workaround on purpose: the apply, the restore and the convergence are
-        the real paths. The watchdog is here for the cases none of them handles - a
-        kernel driver re-asserting its limits an hour later, a firmware event, another
-        tool crashing with the plugin's cap still in place. The user asked for exactly
-        this: "seria legal ficar checkando de tempos em tempos, porque caso aconteca
-        alguma falha ao voltar, esse check faz voltar ao normal".
+        Only acts on values that match EXACTLY what the plugin wrote, so another tool
+        (PowerTools, HHD, you) is never fought.
         """
         if self.is_background_mode or self.transition_in_progress:
             return []
         now = time.time()
         if now < self.wake_cooldown_until + 3.0:
             return []
-        if now - self.last_watchdog_check < THROTTLE_WATCHDOG_INTERVAL:
+        if now - self.last_watchdog_check < self.WATCHDOG_PERIODIC_INTERVAL:
             return []
         self.last_watchdog_check = now
 
         repairs: List[str] = []
 
-        # sysfs: a value that matches our cap AND has a recorded target to put back.
+        # 1. The cheap baseline-based repairs always run: each one is one sysfs write
+        # and only if the value matches our cap exactly. Independent of the hard reset.
         for path, want in self.watchdog_targets.items():
             if not os.path.exists(path):
                 continue
@@ -3852,26 +4005,31 @@ class Plugin:
             if self._write_sysfs(path, want):
                 repairs.append(f"{os.path.basename(path)}: {have}->{want}")
 
-        # ryzenadj: the APU limits can drift back down from firmware events the sysfs
-        # paths above do not catch. Re-apply the real originals if any of them has
-        # dropped at or below the plugin's own cap.
-        if self.watchdog_ryzenadj and shutil.which("ryzenadj"):
-            current = self._read_ryzenadj_limits()
-            if current:
-                too_low = any(
-                    0 < current.get(k, 999999) <= RYZENADJ_SANE_FLOOR_MW
-                    for k in ("stapm-limit", "fast-limit", "slow-limit")
+        # 2. The hard reset only runs here when NONE of the cheaper options help, and
+        # NOT if the post-wake auto-reset already fired for the current wake. One run
+        # per wake was explicit in the user's own words.
+        signs = self._system_still_capped_signs()
+        did_hard_reset_for_current_wake = (
+            self.last_auto_hard_reset_time > self.last_wake_time
+            and now - self.last_auto_hard_reset_time < self.WATCHDOG_HARD_RESET_COOLDOWN
+        )
+        if signs and not did_hard_reset_for_current_wake:
+            logger.warning(
+                f"[DIB WATCHDOG] Periodic check: still capped ({signs}); running the hard reset."
+            )
+            try:
+                with self.transition_lock:
+                    done = self._hard_reset_power_limits()
+                self.last_auto_hard_reset_time = now
+                if done:
+                    repairs.extend([f"hard-reset: {d}" for d in done])
+            except Exception as e:
+                logger.error(f"[DIB WATCHDOG] Hard reset failed: {e}")
+        elif signs and did_hard_reset_for_current_wake:
+            if self.settings.get("debug_logging", True):
+                logger.info(
+                    f"[DIB WATCHDOG] Signs ({signs}) but hard reset ran recently; waiting."
                 )
-                if too_low:
-                    args = [f"--{opt}={val}" for opt, val in sorted(self.watchdog_ryzenadj.items())]
-                    try:
-                        subprocess.run(
-                            ["ryzenadj"] + args, check=False,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8.0,
-                        )
-                        repairs.append(f"ryzenadj {current} -> {self.watchdog_ryzenadj}")
-                    except Exception as e:
-                        logger.warning(f"Watchdog ryzenadj re-apply failed: {e}")
 
         if repairs:
             logger.warning(f"[DIB WATCHDOG] Repaired drifted throttles: {repairs}")
@@ -4060,6 +4218,15 @@ class Plugin:
         self._update_inhibitor_state()
 
         await decky.emit("background_mode_changed", {"is_background_mode": False, "reason": reason})
+
+        # Record this wake, so the periodic watchdog can tell "already handled this
+        # wake" from "a new wake happened, do it again".
+        self.last_wake_time = time.time()
+        # Scheduled 8 s after the wake: run the hard reset unconditionally, as the user
+        # asked. The periodic watchdog honours a cooldown after this so one wake does
+        # not get the hard reset over and over.
+        if self.loop and self.loop.is_running():
+            self.loop.create_task(self._auto_hard_reset_after_wake(8.0))
         return True
 
     def _run_transition_locked(self, func):

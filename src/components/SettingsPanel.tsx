@@ -373,6 +373,15 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
 
         <PanelSectionRow>
           <ToggleField
+            label="Auto Restore Hardware After Wake"
+            description="Ten seconds after waking, if anything still looks capped at the plugin's own values (frequency, turbo, ryzenadj, platform profile), runs the same hard reset the button below does. Turn off if another tool manages your TDP and you prefer the button."
+            checked={settings.auto_hard_reset_after_wake !== false}
+            onChange={(checked) => updateSetting("auto_hard_reset_after_wake", checked)}
+          />
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <ToggleField
             label="Write Diagnostic Logs"
             description="Records the full input and thermal picture to the plugin log on every screen-off. Leave on while tuning."
             checked={settings.debug_logging}

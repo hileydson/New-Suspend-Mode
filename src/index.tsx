@@ -44,6 +44,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
   download_cpu_percent: 30,
   debug_logging: true,
   ui_recovery_on_wake: true,
+  auto_hard_reset_after_wake: true,
   standby_on_power_off: false,
   wake_on_bluetooth_connect: true,
   wake_on_controller_button: true,
