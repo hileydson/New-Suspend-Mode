@@ -198,7 +198,7 @@ const SettingsPanel = ({ settings, setSettings, downloadInfo, isBackgroundMode, 
                                         duration: 4000,
                                     });
                                 }
-                            }, children: "Restore Hardware Now" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "When to use it", description: "Puts every clock, power limit and speed cap back without rebooting, even ones left behind by a crash. Safe to press at any time.", bottomSeparator: "none" }) })] })] }));
+                            }, children: "Restore Hardware Now" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Field, { label: "When to use it", description: "Puts every clock, power limit and speed cap back without rebooting, even ones left behind by a crash. It also re-enables turbo boost, makes the firmware re-apply the current power profile, and raises any CPU ceiling still below what the chip reports \u2014 so it will overrule another tool's TDP settings while it runs.", bottomSeparator: "none" }) })] })] }));
 };
 
 const PLUGIN_STYLES = `

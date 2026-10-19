@@ -973,6 +973,60 @@ class Plugin:
             "download_info": self.download_info,
         }
 
+    def _hard_reset_power_limits(self) -> List[str]:
+        """
+        The heavy-handed repair, run only from the "Restore Hardware Now" button.
+
+        Switching the ACPI profile makes the firmware rewrite its power limits, but
+        switching it back does not reliably make it rewrite them again: the console ends
+        up reporting the balanced profile while still running on the low-power PPT
+        values. Bouncing the profile through another choice and back forces the firmware
+        to apply the current one properly.
+
+        The frequency ceiling is then raised to whatever the hardware says it can do,
+        which also clears a ceiling the kernel left behind while turbo boost was off.
+        This is the one place that overrules another tool's TDP settings, which is why it
+        only ever happens when the user presses the button.
+        """
+        done: List[str] = []
+
+        # 1. Turbo boost first: with it off, the kernel clamps the ceiling right back.
+        boost_file = self.CPU_BOOST_FILE
+        if os.path.exists(boost_file) and self._read_text(boost_file) == "0":
+            if self._write_sysfs(boost_file, "1"):
+                done.append("turbo boost re-enabled")
+        for pb in glob.glob("/sys/devices/system/cpu/cpufreq/policy*/boost"):
+            if self._read_text(pb) == "0":
+                self._write_sysfs(pb, "1")
+
+        # 2. Make the firmware re-apply the power limits of the current profile.
+        current = self._read_text(self.PLATFORM_PROFILE_FILE)
+        choices = self._read_text("/sys/firmware/acpi/platform_profile_choices").split()
+        other = next((c for c in choices if c != current), "")
+        if current and other:
+            self._write_sysfs(self.PLATFORM_PROFILE_FILE, other)
+            time.sleep(0.5)
+            self._write_sysfs(self.PLATFORM_PROFILE_FILE, current)
+            time.sleep(0.5)
+            done.append(f"platform profile bounced through '{other}' back to '{current}'")
+
+        # 3. Raise any ceiling still below what the hardware reports.
+        raised = 0
+        ceilings: Set[str] = set()
+        for path in self._cpu_freq_files():
+            ceiling = self._read_attr(os.path.dirname(path), "cpuinfo_max_freq")
+            now_at = self._read_text(path)
+            if ceiling.isdigit() and now_at.isdigit() and int(now_at) < int(ceiling):
+                if self._write_sysfs(path, ceiling):
+                    raised += 1
+                    ceilings.add(f"{now_at}->{ceiling}")
+        if raised:
+            done.append(f"raised the frequency ceiling on {raised} node(s): {sorted(ceilings)}")
+
+        if done:
+            logger.warning(f"[DIB HARD RESET] {done}")
+        return done
+
     async def force_restore(self) -> Dict[str, Any]:
         """
         Puts the hardware back right now, whether or not the plugin thinks it is in the
@@ -994,6 +1048,7 @@ class Plugin:
             )
         finally:
             self.transition_in_progress = False
+        hard = await self.loop.run_in_executor(None, self._hard_reset_power_limits)
         self._clear_stale_sleep_masks()
         self._update_inhibitor_state()
         if was_bg:
@@ -1001,7 +1056,7 @@ class Plugin:
                 "is_background_mode": False,
                 "reason": "force_restore",
             })
-        return {"ok": True, "was_background_mode": was_bg}
+        return {"ok": True, "was_background_mode": was_bg, "hard_reset": hard}
 
     def _logind_watcher_worker(self):
         """Watches systemd-logind journal logs to intercept UI suspend clicks."""
@@ -1381,6 +1436,138 @@ class Plugin:
             except Exception:
                 pass
         return "deck"
+
+    ASUS_PPT_FILES = (
+        "/sys/devices/platform/asus-nb-wmi/ppt_pl1_spl",
+        "/sys/devices/platform/asus-nb-wmi/ppt_pl2_sppt",
+        "/sys/devices/platform/asus-nb-wmi/ppt_fppt",
+        "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl1_spl/current_value",
+        "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl2_sppt/current_value",
+        "/sys/class/firmware-attributes/asus-armoury/attributes/ppt_fppt/current_value",
+    )
+    ASUS_THERMAL_FILES = (
+        "/sys/devices/platform/asus-nb-wmi/throttle_thermal_policy",
+        "/sys/devices/platform/asus_wmi/throttle_thermal_policy",
+    )
+    PLATFORM_PROFILE_FILE = "/sys/firmware/acpi/platform_profile"
+    CPU_BOOST_FILE = "/sys/devices/system/cpu/cpufreq/boost"
+
+    def _read_text(self, path: str) -> str:
+        try:
+            with open(path, "r") as f:
+                return f.read().strip()
+        except Exception:
+            return ""
+
+    def _platform_profile_target(self) -> str:
+        choices = self._read_text("/sys/firmware/acpi/platform_profile_choices")
+        return "quiet" if "quiet" in choices else ("low-power" if "low-power" in choices else "balanced")
+
+    def _cpu_min_freq_target(self) -> str:
+        min_freq = "800000"
+        for min_file in ("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq",
+                         "/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq"):
+            val = self._read_text(min_file)
+            if val.isdigit() and int(val) > 0:
+                return str(max(600000, int(val)))
+        return min_freq
+
+    def _cpu_freq_files(self) -> Set[str]:
+        return set(
+            glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq")
+            + glob.glob("/sys/devices/system/cpu/cpufreq/policy*/scaling_max_freq")
+        )
+
+    def _snapshot_power_originals(self):
+        """
+        Reads every value the low-power pass is about to change, BEFORE changing any of
+        them.
+
+        This is the difference between waking up to a 5.1 GHz, 30 W console and waking up
+        to a 3.3 GHz, 5 W one. Several of these settings move each other:
+
+          - turning turbo boost off makes the kernel drop scaling_max_freq to the
+            non-boost nominal (5134889 -> 3301000 on this APU);
+          - switching the ACPI profile to low-power makes the firmware rewrite every PPT
+            limit (30 W -> 5 W).
+
+        Reading each value immediately before overwriting it therefore captured a number
+        this plugin had itself just caused, and "restoring" wrote the throttled values
+        back in for good - a console that came back slow with every check reporting
+        success, because every value really was back to what had been recorded.
+
+        Everything is read up front here. The saves further down keep the first value
+        recorded for a path, so they become no-ops.
+        """
+        if self.settings.get("throttle_cpu", True):
+            profile = self._read_text(self.PLATFORM_PROFILE_FILE)
+            if profile:
+                self._save_original_scalar(
+                    "saved_platform_profile", profile,
+                    self._platform_profile_target(), self.PLATFORM_PROFILE_FILE,
+                )
+            for path in self.ASUS_THERMAL_FILES:
+                if os.path.exists(path):
+                    current = self._read_text(path)
+                    if current:
+                        self._save_original_scalar("saved_asus_thermal", current, "2", path)
+            for path in glob.glob("/sys/devices/platform/asus*/fan_boost_mode"):
+                current = self._read_text(path)
+                if current:
+                    self._save_original(self.saved_fan_boost, path, current, "2")
+            for path in self.ASUS_PPT_FILES:
+                if os.path.exists(path):
+                    current = self._read_text(path)
+                    if current:
+                        self._save_original(self.saved_asus_ppt, path, current, "6")
+
+            boost_file = self.CPU_BOOST_FILE
+            if os.path.exists(boost_file):
+                current = self._read_text(boost_file)
+                if current:
+                    self._save_original_scalar("saved_cpu_boost", current, "0", boost_file)
+            for path in glob.glob("/sys/devices/system/cpu/cpufreq/policy*/boost"):
+                current = self._read_text(path)
+                if current:
+                    self._save_original(self.saved_policy_boost, path, current, "0")
+
+            min_freq = self._cpu_min_freq_target()
+            for path in self._cpu_freq_files():
+                current = self._read_text(path)
+                if current:
+                    self._save_original(self.saved_cpu_freqs, path, current, min_freq)
+            for path in set(
+                glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor")
+                + glob.glob("/sys/devices/system/cpu/cpufreq/policy*/scaling_governor")
+            ):
+                current = self._read_text(path)
+                if current:
+                    self._save_original(self.saved_cpu_governors, path, current, "powersave")
+            for path in set(
+                glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference")
+                + glob.glob("/sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference")
+            ):
+                current = self._read_text(path)
+                if current:
+                    self._save_original(self.saved_cpu_epp, path, current, "power")
+
+        if self.settings.get("throttle_gpu", True):
+            for path in glob.glob("/sys/class/drm/card*/device/power_dpm_force_performance_level"):
+                current = self._read_text(path)
+                if current:
+                    self._save_original(self.saved_gpu_dpm, path, current, "low")
+
+        if self.settings.get("debug_logging", True):
+            logger.info(
+                "[DIB SNAPSHOT] Recorded originals before touching anything: "
+                f"platform_profile={self.saved_platform_profile} asus_thermal={self.saved_asus_thermal} "
+                f"boost={self.saved_cpu_boost} ppt={self.saved_asus_ppt or 'none'} "
+                f"fan_boost={self.saved_fan_boost or 'none'} "
+                f"cpu_freqs={sorted(set(self.saved_cpu_freqs.values())) or 'none'} "
+                f"governors={sorted(set(self.saved_cpu_governors.values())) or 'none'} "
+                f"epp={sorted(set(self.saved_cpu_epp.values())) or 'none'} "
+                f"gpu_dpm={sorted(set(self.saved_gpu_dpm.values())) or 'none'}"
+            )
 
     def _save_original(self, store: Dict[str, str], key: str, current: str, target: str) -> bool:
         """
@@ -2849,6 +3036,11 @@ class Plugin:
 
         logger.info("Applying smart suspend power saving and screen off...")
 
+        # 0. Record what everything looks like BEFORE anything is changed. Several of
+        # these settings move each other, so reading each one just before overwriting it
+        # captures a value this plugin itself caused. See _snapshot_power_originals.
+        self._snapshot_power_originals()
+
         # 1. Turn off backlight: prioritize amdgpu_bl* on ROG Ally / Steam Deck
         if self.settings.get("turn_off_backlight", True):
             self.display_slept_by_us = True
@@ -2906,16 +3098,11 @@ class Plugin:
         if self.settings.get("throttle_cpu", True):
             # A. ACPI platform profile (direct kernel sysfs)
             profile_file = "/sys/firmware/acpi/platform_profile"
-            choices_file = "/sys/firmware/acpi/platform_profile_choices"
             if os.path.exists(profile_file):
                 try:
                     with open(profile_file, "r") as f:
                         curr_profile = f.read().strip()
-                    choices = ""
-                    if os.path.exists(choices_file):
-                        with open(choices_file, "r") as cf:
-                            choices = cf.read().strip()
-                    target_choice = "quiet" if "quiet" in choices else ("low-power" if "low-power" in choices else "balanced")
+                    target_choice = self._platform_profile_target()
                     self._save_original_scalar("saved_platform_profile", curr_profile, target_choice, profile_file)
                     self._write_sysfs(profile_file, target_choice)
                     logger.info(f"Set ACPI platform_profile to {target_choice} (was {curr_profile}).")
@@ -3005,7 +3192,7 @@ class Plugin:
                     pass
 
             # F. Disable CPU Turbo Boost completely (AMD cpufreq boost -> 0)
-            boost_file = "/sys/devices/system/cpu/cpufreq/boost"
+            boost_file = self.CPU_BOOST_FILE
             if os.path.exists(boost_file):
                 try:
                     with open(boost_file, "r") as f:
@@ -3026,17 +3213,7 @@ class Plugin:
                     pass
 
             # G. Throttle CPU Frequency to Minimum across ALL cores & policies
-            min_freq = "800000"
-            for min_file in ["/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq", "/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq"]:
-                if os.path.exists(min_file):
-                    try:
-                        with open(min_file, "r") as mf:
-                            val = mf.read().strip()
-                            if val.isdigit() and int(val) > 0:
-                                min_freq = str(max(600000, int(val)))
-                                break
-                    except Exception:
-                        pass
+            min_freq = self._cpu_min_freq_target()
 
             freq_files = glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq") + glob.glob("/sys/devices/system/cpu/cpufreq/policy*/scaling_max_freq")
             for freq_file in set(freq_files):
@@ -3211,7 +3388,7 @@ class Plugin:
         ):
             targets.update(store)
         if self.saved_cpu_boost is not None:
-            targets["/sys/devices/system/cpu/cpufreq/boost"] = self.saved_cpu_boost
+            targets[self.CPU_BOOST_FILE] = self.saved_cpu_boost
         if self.saved_platform_profile:
             targets["/sys/firmware/acpi/platform_profile"] = self.saved_platform_profile
         if self.saved_asus_thermal:
@@ -3354,7 +3531,7 @@ class Plugin:
         # Restore CPU turbo boost, frequency ceilings, governors and EPP
         # A. Restore CPU Turbo Boost
         if self.saved_cpu_boost is not None:
-            self._write_sysfs("/sys/devices/system/cpu/cpufreq/boost", self.saved_cpu_boost)
+            self._write_sysfs(self.CPU_BOOST_FILE, self.saved_cpu_boost)
             logger.info(f"Restored global CPU turbo boost to {self.saved_cpu_boost}.")
             self.saved_cpu_boost = None
 

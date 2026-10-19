@@ -406,7 +406,7 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
         <PanelSectionRow>
           <Field
             label="When to use it"
-            description="Puts every clock, power limit and speed cap back without rebooting, even ones left behind by a crash. Safe to press at any time."
+            description="Puts every clock, power limit and speed cap back without rebooting, even ones left behind by a crash. It also re-enables turbo boost, makes the firmware re-apply the current power profile, and raises any CPU ceiling still below what the chip reports — so it will overrule another tool's TDP settings while it runs."
             bottomSeparator="none"
           />
         </PanelSectionRow>
