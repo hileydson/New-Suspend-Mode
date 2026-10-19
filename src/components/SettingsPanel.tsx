@@ -305,6 +305,53 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
                 description={`Standby keeps the console powered, so it does use battery. It drops to a real suspend at ${settings.min_battery_threshold}% to protect it.`}
               />
             </PanelSectionRow>
+
+            <PanelSectionRow>
+              <ToggleField
+                label="Real Sleep During A Time Period"
+                description="Inside the period below, with no download running, a Sleep from the power menu or the power button triggers the REAL SteamOS sleep instead of our standby. The period wraps across midnight (e.g. 23 - 07 means 23:00 through 06:59)."
+                checked={settings.enter_real_sleep_after_time === true}
+                onChange={(checked) => updateSetting("enter_real_sleep_after_time", checked)}
+              />
+            </PanelSectionRow>
+
+            {settings.enter_real_sleep_after_time && (
+              <>
+                <PanelSectionRow>
+                  <SliderField
+                    label="Period Start Hour"
+                    description={`Period: ${String(settings.real_sleep_start_hour ?? 0).padStart(2, "0")}:00 - ${String(settings.real_sleep_end_hour ?? 7).padStart(2, "0")}:00. Inside the window, real sleep. Outside, our standby as usual.`}
+                    value={settings.real_sleep_start_hour ?? 0}
+                    min={0}
+                    max={23}
+                    step={1}
+                    showValue
+                    valueSuffix="h"
+                    onChange={(val) => updateSetting("real_sleep_start_hour", val)}
+                  />
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <SliderField
+                    label="Period End Hour"
+                    value={settings.real_sleep_end_hour ?? 7}
+                    min={0}
+                    max={23}
+                    step={1}
+                    showValue
+                    valueSuffix="h"
+                    onChange={(val) => updateSetting("real_sleep_end_hour", val)}
+                  />
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <ToggleField
+                    label="Wake At End Of Period"
+                    description="Programs the system clock to wake the console at the end hour, then re-enters our standby so a controller can wake it. Uses the RTC alarm, which works on any handheld or PC that exposes it."
+                    checked={settings.wake_at_period_end === true}
+                    onChange={(checked) => updateSetting("wake_at_period_end", checked)}
+                  />
+                </PanelSectionRow>
+              </>
+            )}
           </>
         )}
       </PanelSection>

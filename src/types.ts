@@ -16,6 +16,10 @@ export interface PluginSettings {
   debug_logging: boolean; // default true
   ui_recovery_on_wake: boolean; // default true
   auto_hard_reset_after_wake: boolean; // default true
+  enter_real_sleep_after_time: boolean; // default false
+  real_sleep_start_hour: number; // 0-23, default 0
+  real_sleep_end_hour: number; // 0-23, default 7
+  wake_at_period_end: boolean; // default false, uses the RTC
   standby_on_power_off: boolean; // default false
   wake_on_bluetooth_connect: boolean; // default true
   wake_on_controller_button: boolean; // default true

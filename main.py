@@ -7,6 +7,7 @@ import struct
 import select
 import fcntl
 import re
+import datetime
 import asyncio
 import logging
 import threading
@@ -52,6 +53,17 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "debug_logging": True,
     "ui_recovery_on_wake": True,
     "auto_hard_reset_after_wake": True,
+    # Quiet-hours option: during the period [start_hour, end_hour), replace the plugin's
+    # standby with the real SteamOS sleep, as long as no download is active. The watchdog
+    # takes care of restoring the hardware on the next wake. The period wraps across
+    # midnight when end_hour < start_hour (so 23 - 07 means 23:00 through 06:59).
+    "enter_real_sleep_after_time": False,
+    "real_sleep_start_hour": 0,
+    "real_sleep_end_hour": 7,
+    # Programs the RTC to wake the console at end_hour, then re-enters the plugin's own
+    # standby so a controller can wake it as usual. Pure Linux kernel feature, works on
+    # any handheld or PC that exposes /sys/class/rtc/rtc0/wakealarm.
+    "wake_at_period_end": False,
     # Standby: turn the power button into "console off, wakes on a controller"
     "standby_on_power_off": False,
     "wake_on_bluetooth_connect": True,
@@ -447,6 +459,10 @@ class Plugin:
         # repeated for the same cycle. See _throttle_watchdog.
         self.last_wake_time: float = 0.0
         self.last_auto_hard_reset_time: float = 0.0
+        # RTC-based wake-at-end-of-quiet-hours. Persisted across plugin reloads so the
+        # resume handler still fires if the plugin was reloaded during the sleep.
+        self.rtc_wake_pending: bool = False
+        self.rtc_wake_target: int = 0
         self.throttled_interfaces: List[str] = []
         self.runtime_state_file: str = ""
         self.last_telemetry_time: float = 0.0
@@ -945,6 +961,137 @@ class Plugin:
             )
         return "hud"
 
+    RTC_WAKEALARM = "/sys/class/rtc/rtc0/wakealarm"
+
+    def _quiet_hours_bounds(self) -> Optional[Tuple[int, int]]:
+        """(start_hour, end_hour) when the option is on and the hours are valid."""
+        if not self.settings.get("enter_real_sleep_after_time", False):
+            return None
+        try:
+            start = max(0, min(23, int(self.settings.get("real_sleep_start_hour", 0))))
+            end = max(0, min(23, int(self.settings.get("real_sleep_end_hour", 7))))
+        except (TypeError, ValueError):
+            return None
+        if start == end:
+            return None  # Empty period
+        return (start, end)
+
+    def _inside_quiet_hours(self) -> bool:
+        """
+        True when the clock is inside the user's quiet-hours period.
+
+        Period is [start, end): the start hour counts, the end hour does not. Natural
+        wrap-around for a period that crosses midnight: 23 - 07 means 23:00 through
+        06:59, so 02:00 is inside and 07:00 is outside.
+        """
+        bounds = self._quiet_hours_bounds()
+        if not bounds:
+            return False
+        start, end = bounds
+        current = datetime.datetime.now().hour
+        if start < end:
+            return start <= current < end
+        # Wraps midnight
+        return current >= start or current < end
+
+    def _next_quiet_hours_end(self) -> Optional[int]:
+        """Unix epoch of the next time the quiet-hours period ends."""
+        bounds = self._quiet_hours_bounds()
+        if not bounds:
+            return None
+        _start, end = bounds
+        now = datetime.datetime.now()
+        target = now.replace(hour=end, minute=0, second=0, microsecond=0)
+        if target <= now:
+            target += datetime.timedelta(days=1)
+        return int(target.timestamp())
+
+    def _schedule_rtc_wake(self, epoch_time: int) -> bool:
+        """
+        Programs the real-time clock to wake the console at the given Unix time.
+
+        Standard kernel interface, works on any handheld or desktop that exposes it.
+        Writing "0" first is required: the kernel refuses a new alarm while one is still
+        armed, so clearing before setting is the only reliable way.
+        """
+        if not os.path.exists(self.RTC_WAKEALARM):
+            logger.info("RTC wakealarm not available; cannot schedule a wake.")
+            return False
+        if epoch_time <= time.time() + 30:
+            logger.info(f"RTC wake refused: {epoch_time} is too close to now.")
+            return False
+        if not self._write_sysfs(self.RTC_WAKEALARM, "0"):
+            return False
+        time.sleep(0.1)
+        if not self._write_sysfs(self.RTC_WAKEALARM, str(int(epoch_time))):
+            return False
+        logger.info(
+            f"RTC wake armed for {datetime.datetime.fromtimestamp(epoch_time).isoformat()} "
+            f"(in {int(epoch_time - time.time())} s)."
+        )
+        return True
+
+    def _clear_rtc_wake(self):
+        """Disarms the RTC alarm. Safe to call even if nothing was armed."""
+        if os.path.exists(self.RTC_WAKEALARM):
+            try:
+                self._write_sysfs(self.RTC_WAKEALARM, "0")
+            except Exception:
+                pass
+        self.rtc_wake_pending = False
+        self.rtc_wake_target = 0
+
+    async def _maybe_real_sleep_instead(self, reason: str) -> bool:
+        """
+        Inside the quiet-hours period with nothing downloading, runs the real SteamOS
+        sleep instead of entering the plugin's own mode. If the wake-at-end option is on,
+        also programs the RTC to wake the console at the end of the period, where the
+        resume handler will put it back into the plugin's standby. Returns True when it
+        took the sleep over.
+        """
+        if not self._inside_quiet_hours():
+            return False
+        if self._is_active_download():
+            logger.info(
+                "[DIB QUIET HOURS] Inside the period, but a download is active; "
+                "entering the plugin's own mode as usual."
+            )
+            return False
+        bounds = self._quiet_hours_bounds()
+        logger.info(
+            f"[DIB QUIET HOURS] Inside the period ({bounds[0]:02d}:00 - {bounds[1]:02d}:00) "
+            f"and nothing is downloading (reason: {reason}) -> real SteamOS sleep."
+        )
+        if self.settings.get("wake_at_period_end", False):
+            end_epoch = self._next_quiet_hours_end()
+            if end_epoch and self._schedule_rtc_wake(end_epoch):
+                self.rtc_wake_pending = True
+                self.rtc_wake_target = end_epoch
+                self._save_runtime_state()
+        await self.trigger_suspend()
+        return True
+
+    async def _enter_standby_after_rtc_wake(self):
+        """
+        Called after a resume that was triggered by the RTC alarm the plugin set up at the
+        start of a quiet-hours sleep. Short delay so the kernel finishes bringing the
+        hardware back, then enters the plugin's standby for a controller to wake later.
+        """
+        await asyncio.sleep(3.0)
+        if self.is_background_mode:
+            return
+        if not self.settings.get("standby_on_power_off", False):
+            logger.info("[DIB RTC WAKE] Standby option is off; staying awake.")
+            return
+        if self._inside_quiet_hours():
+            # Still inside the window somehow (user widened it after sleeping): a plain
+            # real sleep is correct again.
+            logger.info("[DIB RTC WAKE] Woke inside the quiet-hours window; running real sleep again.")
+            await self.trigger_suspend()
+            return
+        logger.info("[DIB RTC WAKE] Quiet-hours ended; entering the plugin's standby.")
+        await self.request_standby("quiet_hours_rtc_end")
+
     async def request_standby(self, reason: str = "standby") -> bool:
         """
         Shows the standby splash first, then enters the mode.
@@ -957,6 +1104,11 @@ class Plugin:
             return False
         if time.time() < self.wake_cooldown_until:
             logger.info("Standby request ignored: the console just woke up.")
+            return False
+
+        # Quiet-hours short-circuit: before entering our mode, run the real SteamOS
+        # sleep if the configured hour has passed and no download is active.
+        if await self._maybe_real_sleep_instead(reason):
             return False
 
         self.standby_request_pending = True
@@ -1314,6 +1466,32 @@ class Plugin:
                     ):
                         logger.info("Logind reported system resume from sleep -> Enforcing wake cooldown.")
                         self.wake_cooldown_until = now + WAKE_COOLDOWN_SECONDS
+
+                        # Quiet-hours RTC wake handling: a resume near the time we armed
+                        # the RTC for is almost certainly our RTC alarm firing. Re-enter
+                        # the plugin's standby so a controller can wake it as usual.
+                        if self.rtc_wake_pending:
+                            diff = abs(now - self.rtc_wake_target)
+                            if diff <= 120:
+                                logger.info(
+                                    f"[DIB RTC WAKE] Resume at {int(now)}, target was "
+                                    f"{self.rtc_wake_target} (diff {diff:.1f}s) -> entering standby."
+                                )
+                                self.rtc_wake_pending = False
+                                self.rtc_wake_target = 0
+                                if self.loop and self.loop.is_running():
+                                    asyncio.run_coroutine_threadsafe(
+                                        self._enter_standby_after_rtc_wake(), self.loop
+                                    )
+                                continue
+                            else:
+                                logger.info(
+                                    f"[DIB RTC WAKE] Resume at {int(now)} is far from the "
+                                    f"RTC target {self.rtc_wake_target} (diff {diff:.1f}s); "
+                                    "treating as a manual wake and clearing the alarm."
+                                )
+                                self._clear_rtc_wake()
+
                         if self.is_background_mode and time_in_bg > LOGIND_GRACE_SECONDS:
                             if self.loop and self.loop.is_running():
                                 asyncio.run_coroutine_threadsafe(
@@ -3312,6 +3490,11 @@ class Plugin:
             "watchdog_targets": dict(self.watchdog_targets),
             "watchdog_marks": dict(self.watchdog_marks),
             "watchdog_ryzenadj": dict(self.watchdog_ryzenadj) if self.watchdog_ryzenadj else None,
+            # Pending RTC-wake handoff: if the plugin is reloaded while the console is
+            # suspended for quiet hours, the resume handler still fires because the state
+            # survives the reload.
+            "rtc_wake_pending": bool(self.rtc_wake_pending),
+            "rtc_wake_target": int(self.rtc_wake_target) if self.rtc_wake_target else 0,
         }
 
     def _load_runtime_state(self, state: Dict[str, Any]):
@@ -3347,6 +3530,12 @@ class Plugin:
         self.watchdog_marks = {str(k): str(v) for k, v in (state.get("watchdog_marks") or {}).items()}
         wr = state.get("watchdog_ryzenadj")
         self.watchdog_ryzenadj = {str(k): int(v) for k, v in wr.items()} if isinstance(wr, dict) else {}
+        # Quiet-hours RTC pending handoff
+        self.rtc_wake_pending = bool(state.get("rtc_wake_pending"))
+        try:
+            self.rtc_wake_target = int(state.get("rtc_wake_target") or 0)
+        except (TypeError, ValueError):
+            self.rtc_wake_target = 0
 
     def _save_runtime_state(self):
         """
@@ -4540,6 +4729,26 @@ class Plugin:
                             logger.info(f"Bluetooth controller connected in standby ({', '.join(connected)}) -> waking.")
                             await self.exit_background_mode("bluetooth_controller_connected")
                             continue
+
+                    # Quiet hours while already in the mode: a session that began at
+                    # 22:50 reaches 23:00 while sitting here, and the user chose the
+                    # real sleep for that case too. The exit comes first so the mode's
+                    # restore runs cleanly; the real suspend follows.
+                    if self.standby_mode and self._inside_quiet_hours() and not self._is_active_download():
+                        logger.info(
+                            "[DIB QUIET HOURS] Entered the quiet-hours period while in our mode; "
+                            "exiting it and running real SteamOS sleep."
+                        )
+                        if self.settings.get("wake_at_period_end", False):
+                            end_epoch = self._next_quiet_hours_end()
+                            if end_epoch and self._schedule_rtc_wake(end_epoch):
+                                self.rtc_wake_pending = True
+                                self.rtc_wake_target = end_epoch
+                                self._save_runtime_state()
+                        await self.exit_background_mode("quiet_hours_real_sleep")
+                        await asyncio.sleep(0.5)
+                        await self.trigger_suspend()
+                        continue
 
                     if now - self.last_telemetry_time >= TELEMETRY_INTERVAL:
                         self.last_telemetry_time = now
