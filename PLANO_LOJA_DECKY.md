@@ -1,0 +1,382 @@
+# Plano: aprovar o New Suspend Mode na loja do Decky
+
+> **Branch de trabalho:** `rework-fix-decky-loader`
+> **Data da análise:** 19/10/2026
+> **PR anterior:** [#1156](https://github.com/SteamDeckHomebrew/decky-plugin-database/pull/1156) (fechado sem merge)
+
+---
+
+## Sumário
+
+1. [Situação atual](#1-situação-atual)
+2. [As três críticas, medidas](#2-as-três-críticas-medidas)
+3. [Descobertas da análise](#3-descobertas-da-análise)
+4. [Plano em fases](#4-plano-em-fases)
+5. [Matriz de testes](#5-matriz-de-testes)
+6. [Roteiro do novo PR](#6-roteiro-do-novo-pr)
+7. [A caixa de IA](#7-a-caixa-de-ia)
+8. [Riscos e mitigação](#8-riscos-e-mitigação)
+9. [Regras de trabalho combinadas](#9-regras-de-trabalho-combinadas)
+10. [Referências](#10-referências)
+
+---
+
+## 1. Situação atual
+
+O PR #1156 foi fechado em **19/10/2026 às 22:12** por **AAGaming00**, um dos mantenedores principais do Decky Loader. O review foi marcado como `CHANGES_REQUESTED`:
+
+> It's a cool idea, but theres way too much incomprehensible DOM nonsense going on (we don't do that here, learn proper patching) in your way too long index js, and you pushed the dist folder by accident. Closing for now until this can be properly developed.
+
+**Não foi banimento.** A frase *"Closing for now until this can be properly developed"* deixa a porta aberta para enviar de novo. Ele não citou a declaração de uso de IA. A recusa foi só técnica.
+
+---
+
+## 2. As três críticas, medidas
+
+As três críticas estão corretas.
+
+| Crítica | Medição | Situação |
+|---|---|---|
+| "learn proper patching" | Usos de `afterPatch`, `beforePatch`, `replacePatch`, `findModuleChild` e `findInReactTree`: **0 cada**. Contra cerca de 38 acessos diretos ao DOM | Procede |
+| "way too long index js" | [src/index.tsx](src/index.tsx) tem **1874 linhas**, de um frontend de 2958 | Procede |
+| "pushed the dist folder" | Estão no git: `dist/index.js`, `dist/index.js.map`, `NewSuspendMode.zip` e `DownloadInBackground.zip`. O [.gitignore](.gitignore) não lista `dist/` nem `*.zip`, e o [template oficial](https://github.com/SteamDeckHomebrew/decky-plugin-template/blob/main/.gitignore) lista `dist/` | Procede |
+
+---
+
+## 3. Descobertas da análise
+
+Baixei o código da interface da Steam do repositório **SteamTracking**, que extrai e versiona o JS do cliente (snapshot de 19/10/2026), e li o fluxo real do Sleep. O que segue vem desse código, não de suposição.
+
+### 3.1 A causa raiz da tela preta das rodadas R1 a R5 era nossa
+
+A Steam tem uma store global de suspensão, criada no próprio `sp.js` com `window.SuspendResumeStore = I`. O fluxo do Sleep é este:
+
+```
+Menu "Sleep" ─► SuspendResumeStore.RequestSleep()
+                 └─► serviço nativo (SleepManager)
+                      └─► OnRequestSuspend()
+                           └─► this.InitiateSleep()
+                                └─► OnSuspendRequest()
+                                     ├─ m_bSuspending = true        ◄── a tela de "suspendendo" aparece aqui
+                                     ├─ U = await PrepareForSystemSuspend()
+                                     ├─ if (U.result != OK) ...
+                                     └─ SuspendPC()
+```
+
+Nosso hook em `SteamClient.User.PrepareForSystemSuspend` devolvia `Promise.resolve()`, ou seja, um resultado vazio. A Steam então lê `U.result` desse resultado vazio, o que dá **TypeError**. Com isso, `m_bSuspending` **fica `true` para sempre**.
+
+Enquanto `m_bSuspending` está `true`, a Steam mantém montado o componente `SuspendDialogInner`, que fica numa camada de overlay acima de tudo. Os menus laterais continuam desenhando por cima dele. Era **exatamente** o sintoma que perseguimos: tela preta com menus funcionando.
+
+Toda a recuperação que construímos depois tratava um sintoma que nós mesmos causávamos:
+
+- comparar a "assinatura" do centro da tela;
+- voltar a rota anterior;
+- esconder nós do DOM;
+- recarregar a UI da Steam com `RestartJSContext`.
+
+### 3.2 O jeito certo é um patch só
+
+`InitiateSleep` é o ponto por onde passam os caminhos de sono:
+
+| Origem | Caminho até `InitiateSleep` | Status |
+|---|---|---|
+| Item "Sleep" do menu de energia | `RequestSleep()` → nativo → `OnRequestSuspend` → `this.InitiateSleep()` | Visto no código |
+| Botão "Sleep" do modal da Valve | `SuspendResumeStore.InitiateSleep()` direto | Visto no código |
+| Tela "jogando em outro lugar" (60 s) | `SuspendResumeStore.InitiateSleep()` direto | Visto no código |
+| Botão de energia físico / sono por inatividade | Nativo → `NotifyRequestSuspend` → `OnRequestSuspend` → `this.InitiateSleep()` | **Provável. Confirmar na Fase 0/2** |
+
+**Por que é seguro trocar essa função:** os membros que a Steam registra como *actions* MobX são `OnSuspendRequest`, `OnSystemResumedFromSuspend` etc. **`InitiateSleep` não está nessa lista**, é um método comum do protótipo. Então o `replacePatch` do Decky pode substituí-lo na instância sem esbarrar nas proteções do MobX. `OnSuspendRequest` é `action.bound` e **não deve** ser patchado.
+
+```ts
+import { replacePatch, callOriginal, findModuleExport } from "@decky/ui";
+
+const store =
+  (window as any).SuspendResumeStore ??
+  findModuleExport(
+    (e: any) => typeof e?.InitiateSleep === "function" && typeof e?.OnSuspendRequest === "function"
+  );
+
+const patch = replacePatch(store, "InitiateSleep", (args) => {
+  if (!shouldTakeOver()) return callOriginal; // SteamOS dorme exatamente como sem o plugin
+  enterNewSuspendMode();
+  return undefined; // a Steam nunca entra em "suspendendo", então não sobra nada para recuperar
+});
+
+// onDismount:
+patch.unpatch();
+
+// Sono real que o próprio plugin quer (horário configurado, bateria crítica, downloads concluídos):
+patch.original.call(store);
+```
+
+**Se falhar:** se uma atualização da Steam remover ou renomear a store, o patch não é instalado. O plugin registra um aviso e o SteamOS dorme normalmente. Hoje, quando a abordagem por DOM falha, a tela fica travada.
+
+### 3.3 O recurso nativo da Valve só existe no Steam Deck
+
+A Steam tem a opção **"Finish Downloads Before Sleep"**, com este texto:
+
+> *"If your device enters sleep mode, your games will continue downloading in a low-power, display-off state."*
+
+Ela vem com um modal "Continue Downloading?" e manda o aparelho dormir quando a bateria cai abaixo de 20%.
+
+**Mas ela é restrita ao Steam Deck.** O código da tela de configurações só mostra a opção quando o serviço nativo de sono informa `is_low_power_download_supported`:
+
+```js
+function P() {
+  const R = p((te) => te.is_low_power_download_supported ?? !1);
+  return R.isSuccess && R.data;
+}
+// a opção "system_enable_low_power_downloads" só é renderizada se P() for true
+```
+
+Esse sinal vem do lado nativo, não da interface. O código confirma que é uma checagem de capacidade da plataforma. Que ela só é verdadeira no Deck é o que você relatou: a Valve construiu o recurso em cima do hardware do Deck. A imprensa diz o mesmo. Por isso a opção não aparece no ROG Ally X nem no desktop.
+
+**O que isso significa para o PR:**
+
+- **Ajuda no argumento de "plugin único".** O plugin leva para outros aparelhos com SteamOS o que a Valve fez só para o Deck. E ainda faz coisas que a Valve não faz: acordar pelo controle, sono real em horário configurado com retorno pelo RTC, TV sem sinal, substituir o Sleep mesmo sem download, limitar a velocidade do download.
+- **Exige atenção à convivência no Deck.** A maior parte de quem usa a loja do Decky tem Steam Deck. No Deck, com download ativo e a opção nativa ligada, a Steam mostra o próprio modal antes de chegar ao `InitiateSleep`. Precisamos definir o comportamento ali. Proposta: deixar o modal da Valve agir. Se o usuário escolher "Sleep" no modal, o nosso patch decide como em qualquer outro Sleep.
+- **Não temos Steam Deck para testar.** Esse cenário precisa de um testador externo (Fase 7).
+
+### 3.4 Problemas que o revisor viu mas não citou
+
+| Problema | Onde | Por que pesa |
+|---|---|---|
+| `"author": "Antigravity"` | [plugin.json:3](plugin.json#L3) | Antigravity é uma IDE de IA do Google. Contradiz a caixa "I am the original author" |
+| Imagem da loja é o banner do template | [plugin.json](plugin.json) | Parece placeholder |
+| Chama métodos desconhecidos da Steam escolhidos por regex | [src/index.tsx:456-513](src/index.tsx#L456-L513) | Para um revisor, parece código perigoso |
+| Despeja toda a API do SteamClient no log | [src/index.tsx:1734-1781](src/index.tsx#L1734-L1781) | Código de depuração enviado na versão final |
+| `RegisterForOnSuspendRequest` | [src/index.tsx:1596-1695](src/index.tsx#L1596-L1695) | Não aparece em lugar nenhum do código atual da Steam. Provavelmente nunca dispara |
+| 6× `sudo sh -c "echo ... > path"` e 1× `sudo tee` | [main.py](main.py) (2160, 3840, 3852, 4034, 4065, 4380, 4400) | O plugin já roda como root. Shell montado com f-string é mal visto |
+| `main.py` com **5019 linhas** num arquivo só | [main.py](main.py) | Provavelmente recebe a mesma crítica do `index.tsx` |
+
+### 3.5 Quanto sai do `index.tsx`
+
+Com o patch da seção 3.2, estes blocos deixam de ter motivo para existir:
+
+| Bloco | Linhas |
+|---|---|
+| Medição de tela e janela da UI (contorno do SharedJSContext) | [145-213](src/index.tsx#L145-L213) |
+| Esconder o overlay via DOM | [215-276](src/index.tsx#L215-L276) |
+| Guarda do menu (texto "Sleep" em 30 idiomas) | [278-421](src/index.tsx#L278-L421) |
+| Amostragem do centro da tela | [423-442](src/index.tsx#L423-L442) |
+| Cancelar a suspensão por regex | [444-513](src/index.tsx#L444-L513) |
+| Recuperação da UI, `RestartJSContext` e restauração de rota | [515-623](src/index.tsx#L515-L623) |
+| Sondagem de tela no wake | [625-686](src/index.tsx#L625-L686) |
+| Monkeypatch do SteamClient e máquina de estados de "takeover" | [910-1182](src/index.tsx#L910-L1182) |
+| Bloqueio de input via `window` | [1209-1231](src/index.tsx#L1209-L1231) |
+| Callback de `RegisterForOnSuspendRequest` | [1596-1695](src/index.tsx#L1596-L1695) |
+| Dump da API e heartbeat de salto de relógio | [1725-1809](src/index.tsx#L1725-L1809) |
+
+**Total: cerca de 1000 linhas.** O trabalho no frontend é principalmente apagar código, o que é bem menos arriscado do que eu tinha estimado antes de ler o código da Steam.
+
+---
+
+## 4. Plano em fases
+
+Ordem recomendada: **0 → 1 → 2 → teste → 3 + 4 → teste → 5 → matriz completa → 7**
+
+### Fase 0: Verificação no hardware (você, sem mudar código)
+
+**Objetivo:** confirmar que o código analisado é o mesmo que roda nos seus aparelhos.
+
+**Como abrir o console:**
+
+1. No aparelho: Decky → Configurações → Desenvolvedor → ligar **"Allow Remote CEF Debugging"**.
+2. Em outro PC, no Chrome: `chrome://inspect/#devices` → *Configure...* → adicionar `<IP do aparelho>:8081`.
+3. Clicar em *inspect* no alvo **SharedJSContext** e abrir a aba *Console*.
+
+Se o console der trabalho demais, eu coloco uma linha de log temporária no plugin que faz a mesma checagem.
+
+**Tarefas:**
+
+- [ ] Ally X: `typeof SuspendResumeStore?.InitiateSleep` → esperado `"function"`
+- [ ] Desktop: mesma checagem
+- [ ] Ally X e desktop: confirmar que **"Finish Downloads Before Sleep" não aparece** em Configurações → Energia
+- [ ] Anotar a versão do SteamOS e o canal (Stable/Beta/Preview) de cada aparelho
+
+**Risco:** nenhum.
+
+### Fase 1: Higiene do repositório
+
+**Objetivo:** resolver a crítica 3 e os sinais de alerta do manifesto.
+
+- [ ] Adicionar `dist/`, `*.zip` e `build/` ao `.gitignore`. O zip continua sendo gerado localmente, só deixa de ir para o git.
+- [ ] `git rm --cached dist/index.js dist/index.js.map NewSuspendMode.zip DownloadInBackground.zip`. **Precisa da sua aprovação**, ou você roda.
+- [ ] `plugin.json`: `author` → `hileydson`
+- [ ] `plugin.json`: `image` → imagem própria do plugin
+- [ ] `package.json`: versão `2.0.0` → `2.1.0`
+
+**Risco:** nenhum no comportamento.
+
+### Fase 2: Núcleo (trocar a interceptação)
+
+**Objetivo:** resolver a crítica 1 eliminando a causa, não o sintoma.
+
+- [ ] Criar `src/steam/sleepPatch.ts` com o patch da seção 3.2
+- [ ] Decidir de forma síncrona pelo estado local. O backend confirma com `trigger_suspend_intercept`. Se responder `allow`, chamar `patch.original.call(store, ...args)`
+- [ ] Com o plugin já no nosso modo, `InitiateSleep` (botão de energia) significa **acordar**
+- [ ] Sonos reais pedidos pelo plugin passam pelo `InitiateSleep` original, que faz a Steam suspender os jogos corretamente. Se o teste mostrar problema, manter o caminho atual do backend
+- [ ] Trocar o heartbeat por `SteamClient.System.RegisterForOnResumeFromSuspend`
+- [ ] Apagar os blocos da seção 3.5
+- [ ] `onDismount` → `patch.unpatch()`
+- [ ] Manter o vigia do botão de energia no backend como reserva até a Fase 0/2 confirmar o caminho do botão
+
+**Risco:** médio, porque muda o caminho principal. É validado pelos itens 1 a 8 da matriz.
+**Pronto quando:** itens 1 a 8 da matriz passarem no Ally X e no desktop.
+
+### Fase 3: Estado e overlay sem DOM
+
+- [ ] Trocar as variáveis globais `let shared*` com lista de listeners por uma store única com `useSyncExternalStore`, a API oficial do React para isso
+- [ ] Overlay controlado só por estado: renderiza `null` quando inativo
+- [ ] Remover `forceHideOverlayDom`, o `probeRef`/`ownerDocument.defaultView` e os listeners de input em `window`. O bloqueio de input real já é feito pelo backend (`deep_input_lockout`)
+
+**Risco:** o antigo bug do "overlay preso depois do wake". **Não sei a causa com certeza.** Se ele voltar, investigamos a causa em vez de esconder o nó.
+
+### Fase 4: Frontend em módulos
+
+**Objetivo:** resolver a crítica 2.
+
+```
+src/
+├── index.tsx                 # só o definePlugin e a ligação das peças (< 100 linhas)
+├── state/store.ts            # estado único + useSyncExternalStore
+├── steam/sleepPatch.ts       # patch do InitiateSleep
+├── steam/downloads.ts        # leitura do SteamClient.Downloads
+├── backend/events.ts         # eventos vindos do Python
+├── flows/standby.ts          # splash, HUD, entrar e acordar
+├── components/
+│   ├── GlobalOverlay.tsx
+│   ├── Overlay.tsx
+│   └── SettingsPanel.tsx
+├── styles.ts
+└── types.ts
+```
+
+**Meta:** nenhum arquivo acima de cerca de 300 linhas.
+
+### Fase 5: Backend (preventivo)
+
+- [ ] Trocar os 6 `sudo sh -c` e o `sudo tee` por escrita direta no arquivo, já que o processo é root
+- [ ] Dividir o `main.py` em `py_modules/nsm/` (power, display, network, input, rtc, watchdog), usando mixins para não mudar o comportamento. O Decky Loader adiciona `py_modules` ao `sys.path` (verificado no código do loader)
+- [ ] Atualizar o script `package` para incluir `py_modules`
+- [ ] Remover os tipos de `log_debug` que o frontend não envia mais
+
+**Risco:** baixo por mudança, mas o volume é grande. É uma movimentação mecânica, sem mudar a lógica.
+
+### Fase 6: Matriz completa (você)
+
+Ver a [seção 5](#5-matriz-de-testes). Os testes valem nos canais **Stable e Beta**, porque o checkbox do PR afirma isso.
+
+### Fase 7: Comunidade e novo PR
+
+- [ ] Entrar no Discord do Decky e pedir testadores, **de preferência alguém com Steam Deck**
+- [ ] Testar e comentar em 2 PRs de outros plugins. O template pede isso e o README diz que pode priorizar o seu PR
+- [ ] Atualizar o submódulo no fork `hileydson/decky-plugin-database` para o commit novo
+- [ ] Abrir um PR novo usando **exatamente** o template `plugin_addition` (roteiro na [seção 6](#6-roteiro-do-novo-pr))
+
+---
+
+## 5. Matriz de testes
+
+| # | Cenário | Ally X | Desktop/TV | Deck (terceiro) |
+|---|---|:-:|:-:|:-:|
+| 1 | Sleep do menu, sem download → nosso modo | ☐ | ☐ | ☐ |
+| 2 | Sleep do menu, com download → HUD → nosso modo | ☐ | ☐ | ☐ |
+| 3 | Botão de energia → nosso modo | ☐ | ☐ | ☐ |
+| 4 | Acordar pelo controle (Bluetooth) | ☐ | ☐ | ☐ |
+| 5 | Acordar pelo botão de energia | ☐ | ☐ | ☐ |
+| 6 | Depois de acordar: UI normal, sem tela preta e sem menu lateral aberto | ☐ | ☐ | ☐ |
+| 7 | Plugin desligado → Sleep idêntico ao SteamOS normal | ☐ | ☐ | ☐ |
+| 8 | Recarregar ou desinstalar o plugin → Sleep normal funcionando | ☐ | ☐ | ☐ |
+| 9 | Sono real no horário configurado + retorno pelo RTC ao nosso modo | ☐ | ☐ | ☐ |
+| 10 | TV sem sinal (force connector off) e volta do vídeo | — | ☐ | — |
+| 11 | "Enable Plugin When Plugged In" | ☐ | ☐ | ☐ |
+| 12 | Bateria crítica → sono real | ☐ | — | ☐ |
+| 13 | Downloads concluídos → sono real | ☐ | ☐ | ☐ |
+| 14 | Modal nativo "Continue Downloading?" convivendo com o plugin | — | — | ☐ |
+| 15 | Canal Stable | ☐ | ☐ | ☐ |
+| 16 | Canal Beta | ☐ | ☐ | ☐ |
+
+---
+
+## 6. Roteiro do novo PR
+
+**Título:** `Add New Suspend Mode to Plugin Store`
+
+**Seção "Changes since #1156"**, respondendo ponto a ponto:
+
+1. **DOM → patching:** o Sleep agora é interceptado com `replacePatch` em `SuspendResumeStore.InitiateSleep`. Nenhuma manipulação de DOM. Se a store não existir, o plugin não intercepta nada e o SteamOS dorme normalmente.
+2. **index.tsx:** de 1874 para menos de 100 linhas. O código foi dividido em módulos.
+3. **dist/ e zips:** removidos do repositório e adicionados ao `.gitignore`.
+
+**Seção de unicidade:**
+
+- O "Finish Downloads Before Sleep" da Valve é exclusivo do Steam Deck (só aparece quando o aparelho informa `is_low_power_download_supported`).
+- O plugin leva esse comportamento a outros aparelhos com SteamOS e acrescenta: acordar pelo controle, sono real em horário configurado com retorno pelo RTC, TV sem sinal, substituir o Sleep sem download, limite de velocidade de download.
+- No Deck: explicar como o plugin convive com o modal nativo.
+
+**Declaração de IA:** manter, com a mesma honestidade da primeira vez (ver [seção 7](#7-a-caixa-de-ia)).
+
+**Testes:** links para os relatórios dos testadores e os comentários nos 2 PRs testados.
+
+---
+
+## 7. A caixa de IA
+
+O template de adição tem a caixa:
+
+> *"Generative AI was NOT used to write a majority of the code I am submitting."*
+
+E o template geral avisa: *"NOT FOLLOWING A TEMPLATE MAY RESULT IN YOUR PR BEING DENIED FOR SUSPECTED AI USAGE!"*
+
+**A situação real:** o rework vai ser escrito em boa parte pelo Claude de novo, e as 5019 linhas do backend já foram. Então **essa caixa continua desmarcada**, como você fez no #1156. Ela não deve ser marcada se não for verdade.
+
+**O que de fato reduz o risco:** você entender o patch novo o bastante para responder perguntas do revisor com suas palavras. O "learn proper patching" foi dirigido a quem envia o PR. Na Fase 2, cada parte do patch é explicada antes de seguirmos.
+
+---
+
+## 8. Riscos e mitigação
+
+| Risco | Probabilidade | Mitigação |
+|---|---|---|
+| Atualização da Steam remove ou renomeia `SuspendResumeStore` | Baixa a média | Busca reserva com `findModuleExport` pela forma da store. Se nada for encontrado, o plugin não faz nada e o sono continua normal |
+| O botão de energia não passa por `InitiateSleep` | Média | Verificação na Fase 0/2. O vigia do botão no backend fica como reserva |
+| Overlay preso depois do wake volta | Média | Investigar a causa (Fase 3), não esconder o nó |
+| Regressão ao dividir o `main.py` | Baixa | Movimentação mecânica, sem mudar a lógica, e testes depois de cada módulo |
+| Convivência com o modal nativo no Deck não testada | Alta, sem Deck próprio | Testador externo com Deck (Fase 7) |
+| O mantenedor recusar por uso de IA | Desconhecida | Não dá para resolver com engenharia. Declarar com honestidade e dominar o código |
+| Os números de linha do `sp.js` mudam a cada atualização da Steam | Certa | Usar os nomes (`SuspendResumeStore`, `InitiateSleep`), não os números de linha |
+
+---
+
+## 9. Regras de trabalho combinadas
+
+- Git: **só `git add`** nos arquivos alterados. Sem commit, branch, push, reset ou stash.
+- Avisar **antes** de remover qualquer coisa no git.
+- Gerar o `NewSuspendMode.zip` de novo depois de cada ajuste.
+- **Não quebrar nada que já funciona.** Cada fase termina com teste no hardware antes da próxima.
+
+---
+
+## 10. Referências
+
+**Código da Steam** (snapshot de 19/10/2026, `ClientExtracted/steamui/sp.js`):
+
+- Store de suspensão: classe com `InitiateSleep`, `OnSuspendRequest` e `window.SuspendResumeStore = I`
+- Menu de energia: `tr = () => { m.Ze.RequestSleep(); }`
+- Restrição do recurso nativo: `is_low_power_download_supported`
+- Overlay de suspensão: componente `SuspendDialogInner`, montado enquanto `m_bSuspending` é `true`
+
+**Decky:**
+
+- Patcher: `node_modules/@decky/ui/dist/utils/patcher.js` (`replacePatch`, `callOriginal`, `unpatch`)
+- `sys.path` do loader: [sandboxed_plugin.py](https://github.com/SteamDeckHomebrew/decky-loader/blob/main/backend/decky_loader/plugin/sandboxed_plugin.py) (acrescenta `py_modules`)
+- [Template oficial de plugin](https://github.com/SteamDeckHomebrew/decky-plugin-template)
+- [Templates de PR da loja](https://github.com/SteamDeckHomebrew/decky-plugin-database/tree/main/.github/PULL_REQUEST_TEMPLATE)
+- [SteamDatabase/SteamTracking](https://github.com/SteamDatabase/SteamTracking)
+
+**Recurso nativo da Valve:**
+
+- [AlternativeTo: Valve adds a new low-power mode to SteamOS](https://alternativeto.net/news/2025/11/valve-adds-a-new-low-power-mode-to-steamos-for-downloading-games-with-the-screen-off)
+- [TechRadar: Valve just made Steam Deck downloads much easier](https://www.techradar.com/gaming/steam-deck/valve-just-made-steam-deck-downloads-much-easier-and-i-hope-this-feature-comes-to-all-steamos-handhelds)
+- [Notebookcheck: Upcoming Steam Deck update enables background downloads](https://www.notebookcheck.net/Upcoming-Steam-Deck-update-enables-background-downloads-via-a-new-low-power-mode.1155525.0.html)
