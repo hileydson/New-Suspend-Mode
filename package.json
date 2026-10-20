@@ -1,6 +1,6 @@
 {
   "name": "new-suspend-mode",
-  "version": "2.1.0",
+  "version": "3.6.0",
   "description": "Decky Loader plugin that replaces the SteamOS sleep with a controller-aware standby, with downloads carrying on in the background.",
   "type": "module",
   "scripts": {
