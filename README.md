@@ -24,6 +24,10 @@ Both the power menu's Sleep and the hardware power button are redirected to a ne
 
 Shut Down from the power menu still powers off for real; this is only the Sleep replacement.
 
+#### Steam Deck and Valve's "Finish Downloads Before Sleep"
+
+SteamOS has its own display-off download mode, but Steam only offers it on devices whose system reports support for it, which is the Steam Deck. On a ROG Ally, a Legion Go or a desktop the option does not appear at all; this plugin brings that behaviour, and the rest of what is listed here, to them. On a Steam Deck, whenever the plugin takes a sleep over its mode replaces Valve's prompt; when it leaves a sleep alone (plugin off, or nothing downloading with Replace Sleep off), Valve's behaviour is unchanged.
+
 ### Quiet-hours real sleep + RTC return
 
 Inside a user-configured period (sliders in 10-minute steps, wraps across midnight), with no download running, Sleep enters the **real** SteamOS suspend instead of the plugin's standby — same battery drain as the stock sleep.
@@ -75,17 +79,19 @@ The panel opens with a short **Essentials** section. Everything else is hidden b
 - **Power Saving & Screen Options** — backlight off, OLED pitch black, CPU/GPU throttle, mute audio.
 - **Standby Wake Sources** — wake on Bluetooth connect, wake on controller button, battery note.
 - **Download Pace** — speed cap in MB/s, CPU budget as % of one core.
-- **Troubleshooting** — hidraw unbind escalation, UI recovery on wake, auto hard reset after wake, diagnostic logs.
+- **Troubleshooting** — hidraw unbind escalation, auto hard reset after wake, diagnostic logs.
 
 ---
 
 ## How things are detected
 
+- **Sleep from the power menu, and Steam's own sleep requests**: the Steam client runs every sleep through its suspend store (`SuspendResumeStore`). The plugin patches `RequestSleep` (the power menu's Sleep) and `InitiateSleep` (every other request) with Decky's `replacePatch`, before Steam starts its suspend sequence, so Steam's interface is never touched. When the plugin has nothing to do with a sleep, the original method runs and SteamOS sleeps as usual. If a Steam update moves the store, nothing is patched and Sleep simply stays stock.
+- **Hardware power button**: grabbed by the backend (evdev `EVIOCGRAB`) while the plugin is active, so neither logind nor Steam sees the press.
 - **Steam downloads**: SteamClient libraries overview from the frontend, network RX as a fallback when the overview is stale.
 - **Hardware wake**: logind journal (`operation 'sleep' finished`, `system is resuming`) plus a kernel-clock-jump detector in the monitor loop, so a resume is caught even if the journal path misses it.
 - **RTC wake**: `/sys/class/rtc/rtc0/wakealarm`. Standard Linux kernel feature, works on every tested handheld and PC. A 10-minute grace period after an RTC wake prevents the quiet-hours check from re-sleeping the console at the boundary minute.
 - **Bluetooth controllers**: BlueZ D-Bus (`busctl`) by icon (`input-gaming`, `input-gamepad`, `input-joystick`) and by Modalias vendor id, so PS5 DualSense, Xbox over `xpadneo`, 8BitDo, Nintendo, Razer, etc. all count as wake sources.
-- **TV standby**: `gamescopectl drm_sleep_internal_screen` and `drm_sleep_external_screen` first, then DRM DPMS via `/sys/class/drm/card*-*/dpms` as a fallback for desktops.
+- **TV / external screen**: a black frame is still a valid HDMI signal, so the TV stays lit. With **Force TV Off** the plugin sets the DRM connector's `status` to `off`, the output stops and the TV sees a real no-signal; the connector is set back to `detect` on wake, and also after a crash, from the plugin's saved state.
 
 ---
 
@@ -96,7 +102,7 @@ The plugin is written to be generic. All of these paths are tried as available a
 - **Steam Deck LCD / OLED**: ryzenadj (STAPM / fast / slow limits in mW), AMD platform profile.
 - **ROG Ally / Ally X**: ryzenadj + ASUS WMI (`ppt_pl1_spl`, `ppt_pl2_sppt`, `ppt_fppt`, `throttle_thermal_policy`, `fan_boost_mode`).
 - **Legion Go**: ACPI platform profile.
-- **Desktop PC with SteamOS**: `scaling_governor`, `cpufreq/boost`, `energy_performance_preference`, GPU DPM levels, DRM DPMS for the external screen.
+- **Desktop PC with SteamOS**: `scaling_governor`, `cpufreq/boost`, `energy_performance_preference`, GPU DPM levels, DRM connector status for the external screen.
 - **Everything**: cgroup v2 `cpu.max` quota, `tc` ingress policer, systemd-inhibitor, systemd-logind watcher.
 
 ---
@@ -139,16 +145,22 @@ pnpm run build        # frontend
 pnpm run package      # NewSuspendMode.zip
 ```
 
-Python backend is a single file (`main.py`), no dependencies to install.
+The Python backend needs no dependencies: `main.py` plus its own modules in `py_modules/`, which Decky puts on the import path.
 
 ---
 
 ## Files
 
-- `main.py` — backend. State machine, download detection, hardware control, logind watcher, RTC alarm, watchdog, hard reset.
-- `src/` — frontend. React/TSX, Decky UI. Entry point `src/index.tsx`.
-  - `src/components/SettingsPanel.tsx` — the settings panel.
-  - `src/components/Overlay.tsx` — the HUD and the black overlay.
+- `main.py` — backend entry point: the `Plugin` class Decky instantiates, its lifecycle hooks, settings and status endpoints.
+- `py_modules/new_suspend_mode/` — the rest of the backend, one mixin per concern: sleep policy and quiet hours, power key, power saving and restore, download pacing, standby wake sources, watchdog, monitor loop.
+- `src/` — frontend. React/TSX, Decky UI.
+  - `src/index.tsx` — wires the pieces together.
+  - `src/steam/sleepPatch.ts` — the patch on Steam's suspend store.
+  - `src/steam/downloads.ts` — Steam download state.
+  - `src/backend.ts` — backend events and status polling.
+  - `src/flows.ts` — splash, HUD countdown, entering and leaving the mode.
+  - `src/state.ts` — shared state (`useSyncExternalStore`).
+  - `src/components/` — the settings panel, the overlay and the HUD.
 - `plugin.json` — Decky manifest.
 - `install.sh`, `Makefile` — install helpers.
 

@@ -31,6 +31,7 @@ echo "Copying plugin files..."
 cp -rf dist "${DECKY_PLUGIN_DIR}/"
 cp -f plugin.json "${DECKY_PLUGIN_DIR}/"
 cp -f main.py "${DECKY_PLUGIN_DIR}/"
+cp -rf py_modules "${DECKY_PLUGIN_DIR}/"
 cp -f package.json "${DECKY_PLUGIN_DIR}/"
 
 if [ -d "assets" ]; then

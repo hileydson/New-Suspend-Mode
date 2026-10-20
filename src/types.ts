@@ -16,7 +16,6 @@ export interface PluginSettings {
   download_speed_limit_mbps: number; // MB/s, default 6
   download_cpu_percent: number; // % of one CPU core, default 30
   debug_logging: boolean; // default true
-  ui_recovery_on_wake: boolean; // default true
   auto_hard_reset_after_wake: boolean; // default true
   enter_real_sleep_after_time: boolean; // default true
   real_sleep_start_minutes: number; // minutes-of-day, 0..1430 step 10, default 0 (00:00)

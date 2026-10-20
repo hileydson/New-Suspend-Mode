@@ -1,12 +1,12 @@
 {
   "name": "new-suspend-mode",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Decky Loader plugin that replaces the SteamOS sleep with a controller-aware standby, with downloads carrying on in the background.",
   "type": "module",
   "scripts": {
     "build": "shx rm -rf dist && rollup -c",
     "watch": "rollup -c -w",
-    "package": "shx rm -rf build NewSuspendMode.zip && shx mkdir -p build/NewSuspendMode && shx cp -r dist plugin.json main.py package.json assets build/NewSuspendMode/ && cd build && zip -r ../NewSuspendMode.zip NewSuspendMode && cd .."
+    "package": "shx rm -rf build NewSuspendMode.zip && shx mkdir -p build/NewSuspendMode && shx cp -r dist py_modules plugin.json main.py package.json LICENSE assets build/NewSuspendMode/ && cd build && zip -r ../NewSuspendMode.zip NewSuspendMode -x '*__pycache__*' && cd .."
   },
   "dependencies": {
     "@decky/api": "^1.1.3",

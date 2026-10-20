@@ -4,6 +4,9 @@ node_modules/
 
 # Build artifacts
 build/
+dist/
+out/
+*.zip
 
 # Python cache
 __pycache__/

@@ -19,6 +19,7 @@ install: build
 	@cp -rf dist $(DEST_DIR)/
 	@cp -f plugin.json $(DEST_DIR)/
 	@cp -f main.py $(DEST_DIR)/
+	@cp -rf py_modules $(DEST_DIR)/
 	@cp -f package.json $(DEST_DIR)/
 	@if [ -d "assets" ]; then cp -rf assets $(DEST_DIR)/; fi
 	@echo "Installed successfully!"

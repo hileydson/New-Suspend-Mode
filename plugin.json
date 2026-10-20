@@ -1,6 +1,6 @@
 {
   "name": "New Suspend Mode",
-  "author": "Antigravity",
+  "author": "hileydson",
   "flags": [
     "root"
   ],
@@ -14,6 +14,6 @@
       "downloads"
     ],
     "description": "A full replacement for the SteamOS sleep. Press Sleep (or the power button) and the console blacks out but stays on: downloads keep going, a controller button wakes it, Bluetooth stays reachable. Includes a quiet-hours window that falls back to real sleep overnight and an RTC alarm that returns to the new suspend mode in the morning.",
-    "image": "https://raw.githubusercontent.com/SteamDeckHomebrew/decky-plugin-template/main/assets/banner.png"
+    "image": "https://raw.githubusercontent.com/hileydson/New-Suspend-Mode/main/assets/icon.png"
   }
 }
