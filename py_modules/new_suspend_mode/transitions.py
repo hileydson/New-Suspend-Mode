@@ -64,6 +64,10 @@ class TransitionsMixin:
         logger.info(f"Exiting Background Download Mode (reason: {reason}).")
         self.wake_cooldown_until = time.time() + WAKE_COOLDOWN_SECONDS
         self.is_background_mode = False
+        # Tell the interface first, while the panel is still dark: the restore below
+        # turns the backlight on before its slower stages, and the black overlay must be
+        # gone by then rather than waiting for the frontend's next status poll.
+        await decky.emit("background_mode_changed", {"is_background_mode": False, "reason": reason})
         t0 = time.time()
         self.transition_in_progress = True
         try:
