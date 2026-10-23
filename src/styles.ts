@@ -29,6 +29,9 @@ export const PLUGIN_STYLES = `
    just before the console goes dark. Takes the place of the download card. */
 .nsm-overlay-splash {
   background-color: #000000;
+  cursor: none;
+  pointer-events: all;
+  touch-action: none;
   animation: dibFadeIn 0.25s ease-out;
 }
 

@@ -155,8 +155,12 @@ class MonitorLoopMixin:
                 # Safety net: input must never stay blocked outside background mode.
                 # A dead console is the worst failure this plugin could cause, so it is
                 # checked every pass rather than trusted to the exit path alone.
-                if not self.is_background_mode and not self.transition_in_progress and (
-                    self.inhibited_inputs or self.grabbed_gamepad_fds
+                if (
+                    not self.is_background_mode
+                    and not self.transition_in_progress
+                    and not self.standby_request_pending
+                    and not self.wake_presentation_active
+                    and (self.inhibited_inputs or self.grabbed_gamepad_fds)
                 ):
                     logger.warning("Input was still blocked outside background mode; releasing it now.")
                     self._uninhibit_all_inputs()

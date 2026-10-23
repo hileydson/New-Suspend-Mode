@@ -68,6 +68,8 @@ class RestoreMixin:
         # sleep, unload and emergency recovery still give it back immediately.
         if not self.wake_presentation_active:
             run_stage("input", self._release_all_gamepad_inputs)
+        else:
+            run_stage("splash input lock", self._lock_inputs_for_splash)
 
         try:
             stubborn = run_stage("verify saved values", lambda: self._converge_restore(targets)) or []
@@ -81,8 +83,10 @@ class RestoreMixin:
         logger.info(f"[NSM WAKE TIMING] interactive restore={time.monotonic() - started:.3f}s")
         # These are still restored on every path, including real sleep and recovery,
         # but an unavailable audio server or a diagnostic scan cannot delay input or
-        # leave an otherwise ready game paused.
-        run_stage("audio", self._restore_audio)
+        # leave an otherwise ready game paused. During the wake presentation, audio stays
+        # muted until the splash finishes so button presses cannot make UI sounds.
+        if not self.wake_presentation_active:
+            run_stage("audio", self._restore_audio)
         run_stage("leds", self._restore_leds)
         if self.input_diagnostics_pending and not self.wake_presentation_active:
             self.input_diagnostics_pending = False

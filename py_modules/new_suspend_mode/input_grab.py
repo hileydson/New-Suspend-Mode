@@ -62,6 +62,10 @@ class InputGrabMixin:
             time.sleep(0.4)  # Short settle; the disconnect already waits for the nodes
 
         if self.standby_mode:
+            # Clear any splash-phase kernel inhibit first so wake sources we grab
+            # exclusively are not left inhibited underneath us.
+            if self.inhibited_inputs:
+                self._uninhibit_all_inputs()
             # In standby the external controllers are the way back in, so they are never
             # detached here, and they are opened as wake sources before the inhibit runs.
             if self.settings.get("wake_on_bluetooth_connect", True):
@@ -80,6 +84,29 @@ class InputGrabMixin:
         self._grab_new_inputs(verbose=True)
         self._inhibit_all_inputs(verbose=True)
         self._log_input_diagnostics("after lockout")
+
+    def _lock_inputs_for_splash(self):
+        """
+        Locks out every non-power input and mutes audio while the entry or wake splash
+        screen is shown, so controller buttons cannot act on Steam during the splash.
+        """
+        if self.settings.get("mute_audio", True) and not self.audio_muted_by_us:
+            self._set_audio_mute(True)
+            self.audio_muted_by_us = True
+
+        self._teardown_standby_wake_sources()
+        if bool(self.settings.get("deep_input_lockout", True)):
+            self._pause_controller_daemons()
+        self._power_key_candidates()
+        self._grab_new_inputs(verbose=False)
+        self._inhibit_all_inputs(verbose=False)
+
+    def _release_splash_lockout_if_aborted(self):
+        """Undoes _lock_inputs_for_splash when standby entry did not proceed."""
+        if self.is_background_mode or self.transition_in_progress or self.wake_presentation_active:
+            return
+        self._release_all_gamepad_inputs()
+        self._restore_audio()
 
     def _grab_new_inputs(self, verbose: bool = False):
         """

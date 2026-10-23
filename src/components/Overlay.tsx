@@ -1,6 +1,30 @@
-import React, { FC } from "react";
+import React, { FC, useEffect } from "react";
 import { FaDownload, FaMoon, FaBatteryThreeQuarters, FaTimes, FaBolt } from "react-icons/fa";
 import { DownloadInfo, PluginSettings, WakePhase } from "../types";
+
+const BLOCKED_SPLASH_EVENTS = [
+  "vgp_onbuttondown",
+  "vgp_onbuttonup",
+  "vgp_ondirection",
+  "vgp_onok",
+  "vgp_oncancel",
+  "vgp_onmenubutton",
+  "vgp_onsecondaryaction",
+  "vgp_onoptions",
+  "keydown",
+  "keyup",
+  "keypress",
+  "mousedown",
+  "mouseup",
+  "click",
+  "dblclick",
+  "contextmenu",
+  "pointerdown",
+  "pointerup",
+  "touchstart",
+  "touchend",
+  "wheel",
+];
 
 export interface OverlayProps {
   isBackgroundMode: boolean;
@@ -29,6 +53,25 @@ export const Overlay: FC<OverlayProps> = ({
   onWake,
   onEnterBlackout,
 }) => {
+  const blockAllInputs = Boolean(isBackgroundMode || showSplash || wakePhase);
+
+  useEffect(() => {
+    if (!blockAllInputs) return;
+    const swallow = (e: Event) => {
+      e.stopPropagation();
+      e.stopImmediatePropagation?.();
+      e.preventDefault();
+    };
+    for (const evt of BLOCKED_SPLASH_EVENTS) {
+      window.addEventListener(evt, swallow, true);
+    }
+    return () => {
+      for (const evt of BLOCKED_SPLASH_EVENTS) {
+        window.removeEventListener(evt, swallow, true);
+      }
+    };
+  }, [blockAllInputs]);
+
   // If nothing is active, do not render anything
   if (!showHud && !isBackgroundMode && !showSplash && !wakePhase) {
     return null;

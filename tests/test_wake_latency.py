@@ -264,6 +264,8 @@ class WakeConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         p._arm_watchdog_from_targets = Mock()
         p._update_inhibitor_state = Mock()
         p._hard_reset_power_limits = Mock(side_effect=lambda: events.append("hard_reset") or ["ok"])
+        p._lock_inputs_for_splash = Mock(side_effect=lambda: events.append("lock_splash_inputs"))
+        p._restore_audio = Mock(side_effect=lambda: events.append("restore_audio"))
         p._release_all_gamepad_inputs = Mock(side_effect=lambda: events.append("release_input"))
         p._resume_running_games = Mock(side_effect=lambda: events.append("resume_games"))
 
@@ -279,9 +281,12 @@ class WakeConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             events,
             [
                 "phase:restoring",
+                "lock_splash_inputs",
+                "lock_splash_inputs",
                 "hard_reset",
                 "phase:fading",
                 "release_input",
+                "restore_audio",
                 "resume_games",
                 "phase:",
             ],

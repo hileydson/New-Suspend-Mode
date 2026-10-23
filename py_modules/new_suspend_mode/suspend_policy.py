@@ -262,6 +262,10 @@ class SuspendPolicyMixin:
         self.standby_request_pending = True
         try:
             splash_seconds = max(0, int(self.settings.get("hud_timeout_seconds", 5)))
+            if splash_seconds > 0:
+                await self.loop.run_in_executor(
+                    None, self._run_transition_locked_safe, self._lock_inputs_for_splash
+                )
             await decky.emit("on_standby_requested", {
                 "splash_seconds": splash_seconds,
                 "reason": reason,
@@ -279,6 +283,10 @@ class SuspendPolicyMixin:
             return True
         finally:
             self.standby_request_pending = False
+            if not self.is_background_mode and not self.transition_in_progress:
+                await self.loop.run_in_executor(
+                    None, self._run_transition_locked_safe, self._release_splash_lockout_if_aborted
+                )
 
     async def trigger_suspend_intercept(self) -> Dict[str, Any]:
         """

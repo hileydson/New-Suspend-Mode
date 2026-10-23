@@ -102,6 +102,9 @@ class TransitionsMixin:
                 # Count from the wake request, not from the end of restoration. The
                 # extra hardware reset also finishes beneath the presentation.
                 await asyncio.sleep(max(0.0, WAKE_PRESENTATION_SECONDS - (time.monotonic() - t0)))
+                await self.loop.run_in_executor(
+                    None, self._run_transition_locked_safe, self._lock_inputs_for_splash
+                )
                 await self._auto_hard_reset_after_wake(0.0, during_wake=True)
                 self.wake_phase = "fading"
                 await self._announce_wake(reason)
@@ -139,8 +142,11 @@ class TransitionsMixin:
         try:
             self._release_all_gamepad_inputs()
         finally:
-            if not self.games_waiting_for_resume:
-                self._resume_running_games()
+            try:
+                self._restore_audio()
+            finally:
+                if not self.games_waiting_for_resume:
+                    self._resume_running_games()
 
     def _run_transition_locked(self, func):
         """Serializes enter/exit hardware transitions so restore never races a half-finished apply."""
