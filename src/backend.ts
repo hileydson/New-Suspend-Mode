@@ -80,6 +80,12 @@ export const listenToBackend = (): (() => void) => {
     });
   });
 
+  listen("real_suspend_requested", () => {
+    runtime.realSuspendUntil = Date.now() + 60000;
+    clearStandbySplash();
+    cancelHudCountdown();
+  });
+
   listen("downloads_completed_suspend", () => {
     // Also a real suspend: let Steam suspend its games properly on the way down.
     runtime.realSuspendUntil = Date.now() + 60000;

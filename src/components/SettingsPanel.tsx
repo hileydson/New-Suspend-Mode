@@ -87,7 +87,7 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
         <PanelSectionRow>
           <ToggleField
             label="Enable Plugin When Plugged In"
-            description="Force-enables the plugin whenever the device is on AC power, regardless of the toggle above. Handy for a desktop PC that is always plugged in, or a handheld where you only want the plugin active while charging."
+            description="Force-enables the plugin on AC power. With Enable Plugin off, unplugging during New Suspend Mode enters normal SteamOS sleep. With Enable Plugin on, the mode can continue on battery."
             checked={settings.enable_plugin_when_plugged_in === true}
             onChange={(checked) => updateSetting("enable_plugin_when_plugged_in", checked)}
           />

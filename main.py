@@ -35,6 +35,7 @@ from new_suspend_mode.restore import RestoreMixin
 from new_suspend_mode.watchdog import ThrottleWatchdogMixin
 from new_suspend_mode.transitions import TransitionsMixin
 from new_suspend_mode.monitor_loop import MonitorLoopMixin
+from new_suspend_mode.game_pause import GamePauseMixin
 
 
 class Plugin(
@@ -57,6 +58,7 @@ class Plugin(
     ThrottleWatchdogMixin,
     TransitionsMixin,
     MonitorLoopMixin,
+    GamePauseMixin,
 ):
     def __init__(self):
         self.settings: Dict[str, Any] = DEFAULT_SETTINGS.copy()
@@ -125,6 +127,10 @@ class Plugin(
         self.rtc_wake_target: int = 0
         self.throttled_interfaces: List[str] = []
         self.runtime_state_file: str = ""
+        self.runtime_state_lock = threading.RLock()
+        self.paused_game_processes: Dict[int, Dict[str, Any]] = {}
+        self.games_waiting_for_resume: bool = False
+        self.game_resume_fallback_at: float = 0.0
         self.last_telemetry_time: float = 0.0
 
         # Only undo what we actually changed, so toggling a setting mid-session can
@@ -267,12 +273,14 @@ class Plugin(
         if self.monitor_task and not self.monitor_task.done():
             self.monitor_task.cancel()
 
-        if self.is_background_mode:
+        self.games_waiting_for_resume = False
+        if self.is_background_mode or self.transition_in_progress or self.paused_game_processes:
             self.is_background_mode = False
-            self._restore_system_power_and_display()
+            await self.loop.run_in_executor(None, self._run_transition_locked, self._restore_system_power_and_display)
         else:
             # Never leave a device grabbed or a daemon frozen behind.
             self._release_all_gamepad_inputs()
+            self._resume_running_games()
 
         self._release_sleep_inhibitor()
         self._clear_stale_sleep_masks()
@@ -373,15 +381,26 @@ class Plugin(
         is_charging = False
         is_plugged = False
 
-        ac_paths = glob.glob("/sys/class/power_supply/AC*") + glob.glob("/sys/class/power_supply/ucsi-source-psy*")
+        power_known = False
+        # Names vary by device (ACAD, ADP1, AC0, ucsi-source-psy-...). Read
+        # the supply interface rather than assuming an AC-prefixed name.
+        ac_paths = glob.glob("/sys/class/power_supply/*")
         for p in ac_paths:
+            try:
+                with open(os.path.join(p, "type"), "r") as f:
+                    if f.read().strip().lower() == "battery":
+                        continue
+            except OSError:
+                if os.path.basename(p).startswith("BAT"):
+                    continue
             online_file = os.path.join(p, "online")
             if os.path.exists(online_file):
                 try:
                     with open(online_file, "r") as f:
-                        if f.read().strip() == "1":
-                            is_plugged = True
-                            break
+                        online = f.read().strip()
+                        if online in ("0", "1"):
+                            power_known = True
+                            is_plugged = is_plugged or online == "1"
                 except Exception:
                     pass
 
@@ -399,8 +418,12 @@ class Plugin(
                 try:
                     with open(stat_file, "r") as f:
                         status = f.read().strip().lower()
-                        if "charging" in status or "full" in status:
-                            is_charging = True
+                        # 'discharging' contains 'charging': substring matching hid
+                        # charger removal and disabled the low-battery protection.
+                        is_charging = status == "charging"
+                        if not power_known and status in ("charging", "discharging", "full"):
+                            is_plugged = status in ("charging", "full")
+                            power_known = True
                 except Exception:
                     pass
             break
@@ -408,7 +431,8 @@ class Plugin(
         self.last_battery_info = {
             "capacity": capacity,
             "is_charging": is_charging,
-            "is_plugged": is_plugged or is_charging,
+            "is_plugged": is_plugged,
+            "power_known": power_known,
         }
         self.last_battery_time = now
         return self.last_battery_info

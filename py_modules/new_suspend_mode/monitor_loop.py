@@ -21,6 +21,21 @@ class MonitorLoopMixin:
     # ==========================================
     # Periodic Background Loop (Download & Battery)
     # ==========================================
+    async def _suspend_if_ac_only_unplugged(self) -> bool:
+        """Handle loss of AC before the disabled-plugin shortcut stops monitoring."""
+        if (not self.is_background_mode or self.transition_in_progress or self.suspend_in_progress
+                or self.settings.get("enabled", True)
+                or not self.settings.get("enable_plugin_when_plugged_in", False)):
+            return False
+        bat = self._get_battery_info(max_age=0.0)
+        # An unreadable power supply is not evidence of an unplug.
+        if not bat.get("power_known") or bat["is_plugged"]:
+            return False
+        logger.info("AC-only background mode lost external power -> real SteamOS sleep.")
+        self._clear_rtc_wake()
+        await self.trigger_suspend("ac_disconnected")
+        return True
+
     async def _background_monitor_loop(self):
         logger.info("Starting background monitor loop...")
         self.last_loop_timestamp = time.time()
@@ -37,9 +52,11 @@ class MonitorLoopMixin:
 
                 # Poll fast only when there is something to watch over. Idle means the
                 # plugin stays out of the way and barely touches the disk.
-                if not enabled:
+                if self.is_background_mode or self.games_waiting_for_resume:
+                    interval = ACTIVE_LOOP_INTERVAL
+                elif not enabled:
                     interval = DISABLED_LOOP_INTERVAL
-                elif self.is_background_mode or self._is_active_download():
+                elif self._is_active_download():
                     interval = ACTIVE_LOOP_INTERVAL
                 else:
                     interval = IDLE_LOOP_INTERVAL
@@ -53,6 +70,8 @@ class MonitorLoopMixin:
                         "Enforcing wake cooldown and exiting background mode."
                     )
                     self.wake_cooldown_until = now + WAKE_COOLDOWN_SECONDS
+                    if not self.suspend_in_progress:
+                        await self._resume_games_after_system_sleep()
                     if self.is_background_mode:
                         self.is_background_mode = False
                         self.transition_in_progress = True
@@ -92,7 +111,24 @@ class MonitorLoopMixin:
                             )
                             self._clear_rtc_wake()
 
-                if not enabled:
+                # A successful systemctl call only queues suspend. The journal/clock
+                # detectors resume games on wake; this timeout also recovers a rejected
+                # or very short sleep if neither detector reported it.
+                if (self.games_waiting_for_resume and not self.suspend_in_progress
+                        and now >= self.game_resume_fallback_at):
+                    await self._resume_games_after_system_sleep()
+
+                if (self.paused_game_processes and not self.games_waiting_for_resume
+                        and not self.is_background_mode and not self.transition_in_progress):
+                    await self.loop.run_in_executor(
+                        None, self._run_transition_locked, self._resume_running_games
+                    )
+
+                if await self._suspend_if_ac_only_unplugged():
+                    continue
+
+                if not enabled and not self.is_background_mode:
+                    self._update_inhibitor_state()
                     continue
 
                 # 1. Native Download & Network Detection
@@ -208,9 +244,7 @@ class MonitorLoopMixin:
                                 self.rtc_wake_pending = True
                                 self.rtc_wake_target = end_epoch
                                 self._save_runtime_state()
-                        await self.exit_background_mode("quiet_hours_real_sleep")
-                        await asyncio.sleep(0.5)
-                        await self.trigger_suspend()
+                        await self.trigger_suspend("quiet_hours_real_sleep")
                         continue
 
                     if now - self.last_telemetry_time >= TELEMETRY_INTERVAL:
@@ -230,8 +264,7 @@ class MonitorLoopMixin:
                             "capacity": bat["capacity"],
                             "threshold": min_thresh,
                         })
-                        await self.exit_background_mode("low_battery")
-                        await self.trigger_suspend()
+                        await self.trigger_suspend("low_battery")
                         continue
 
                     # Condition B: Downloads finished or paused auto-suspend.
@@ -249,8 +282,7 @@ class MonitorLoopMixin:
                             await decky.emit("downloads_completed_suspend", {
                                 "elapsed_seconds": elapsed_since_dl,
                             })
-                            await self.exit_background_mode("downloads_completed")
-                            await self.trigger_suspend()
+                            await self.trigger_suspend("downloads_completed")
                             continue
 
             except asyncio.CancelledError:

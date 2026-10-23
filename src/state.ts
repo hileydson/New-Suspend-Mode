@@ -8,6 +8,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   min_battery_threshold: 15,
   hud_timeout_seconds: 5,
   auto_suspend_delay_seconds: 120,
+  pause_running_games: true,
   throttle_cpu: true,
   throttle_gpu: true,
   mute_audio: true,

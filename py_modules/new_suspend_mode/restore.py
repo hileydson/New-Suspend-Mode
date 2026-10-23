@@ -54,8 +54,14 @@ class RestoreMixin:
                 failed.append(label)
                 logger.error(f"Restore stage '{label}' FAILED: {e}")
 
-        stubborn = self._converge_restore(targets)
-        forced = self._verify_and_force_restore()
+        try:
+            stubborn = self._converge_restore(targets)
+            forced = self._verify_and_force_restore()
+        finally:
+            # Keep games paused across a handoff into real sleep. On a normal wake,
+            # clocks, display and input have already been restored before this point.
+            if not self.games_waiting_for_resume:
+                self._resume_running_games()
 
         # Keep watching for a short while: see _recheck_after_restore.
         self.post_restore_targets = dict(targets)

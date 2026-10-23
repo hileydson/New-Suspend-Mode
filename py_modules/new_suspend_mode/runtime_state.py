@@ -1,6 +1,7 @@
 """Crash-safe record of every reversible change, so a restart can still undo it."""
 import os
 import json
+import tempfile
 from typing import Dict, Any
 
 from .constants import logger
@@ -15,6 +16,7 @@ class RuntimeStateMixin:
     def _runtime_state_snapshot(self) -> Dict[str, Any]:
         """Everything needed to undo a session, in a form that survives a restart."""
         return {
+            "paused_game_processes": list(self.paused_game_processes.values()),
             "cpu_quota": list(self.saved_cpu_quota) if self.saved_cpu_quota else None,
             "throttled_interfaces": list(self.throttled_interfaces),
             "brightness": dict(self.saved_brightness),
@@ -51,6 +53,12 @@ class RuntimeStateMixin:
 
     def _load_runtime_state(self, state: Dict[str, Any]):
         """Rebuilds the saved_* values from disk so the normal restore path can run."""
+        self.paused_game_processes = {}
+        for entry in state.get("paused_game_processes") or []:
+            if (isinstance(entry, dict) and isinstance(entry.get("pid"), int)
+                    and entry["pid"] > 1 and isinstance(entry.get("boot_id"), str)
+                    and str(entry.get("start_time", "")).isdigit()):
+                self.paused_game_processes[entry["pid"]] = entry
         quota = state.get("cpu_quota")
         self.saved_cpu_quota = (quota[0], quota[1]) if isinstance(quota, list) and len(quota) == 2 else None
         self.throttled_interfaces = list(state.get("throttled_interfaces") or [])
@@ -99,15 +107,31 @@ class RuntimeStateMixin:
         permanently slow console, which is the one failure this plugin must never cause.
         """
         if not self.runtime_state_file:
-            return
-        try:
-            os.makedirs(os.path.dirname(self.runtime_state_file), exist_ok=True)
-            with open(self.runtime_state_file, "w", encoding="utf-8") as f:
-                json.dump(self._runtime_state_snapshot(), f, indent=2)
-        except Exception as e:
-            logger.error(f"Could not write runtime state: {e}")
+            return False
+        with self.runtime_state_lock:
+            temp_path = None
+            try:
+                directory = os.path.dirname(self.runtime_state_file)
+                os.makedirs(directory, exist_ok=True)
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
+                                                 delete=False) as f:
+                    temp_path = f.name
+                    json.dump(self._runtime_state_snapshot(), f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temp_path, self.runtime_state_file)
+                return True
+            except Exception as e:
+                logger.error(f"Could not write runtime state: {e}")
+                return False
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
 
     def _clear_runtime_state(self):
+        if self.paused_game_processes:
+            self._save_runtime_state()
+            return
         try:
             if self.runtime_state_file and os.path.exists(self.runtime_state_file):
                 os.remove(self.runtime_state_file)

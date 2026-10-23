@@ -20,6 +20,7 @@ Both the power menu's Sleep and the hardware power button are redirected to a ne
 - CPU/GPU parked at power-saving limits, platform profile set to quiet.
 - All inputs blocked except the sources that are supposed to wake the console.
 - Steam downloads carry on, with a configurable speed cap and CPU share.
+- Games launched through Steam are paused before the power-saving limits apply and resumed after display, performance and controls are restored (enabled by default; switch off under Advanced → Behavior for compatibility).
 - A Bluetooth controller pairing, a USB/dongle controller button press (Guide / Home / Select / Start), or the power button wakes it back up.
 
 Shut Down from the power menu still powers off for real; this is only the Sleep replacement.
@@ -52,6 +53,14 @@ The reset is also exposed as a button in the settings panel.
 
 Separate toggle: when on, the plugin force-enables itself whenever the device is on AC power — regardless of the main Enable Plugin toggle. Meant for a desktop PC that is always plugged in, or a handheld you only want the plugin active for while charging.
 
+With **Enable Plugin off** and **Enable Plugin When Plugged In on**, removing external power during New Suspend Mode restores the hardware and requests normal SteamOS sleep. With the main switch on, New Suspend Mode continues on battery with the normal battery protection. Connecting a charger while the device is in real sleep does not automatically enter New Suspend Mode.
+
+### Pausing games
+
+The backend identifies Steam-launched processes using `SteamGameId` / `SteamAppId` (including tagged Proton helpers), stops them before reducing clocks, and resumes only the processes it stopped. It does not pause Steam or the compositor. Games launched outside Steam or processes without those identifiers cannot be reliably identified by this feature. This is a process pause, not the game's pause menu; online sessions can time out and compatibility needs testing per game.
+
+Pause records are written atomically before stopping a process and include its boot ID and process start time. A plugin reload recovers the recorded processes without signalling a reused PID. Already-stopped processes are left alone. If pausing fails, entry into New Suspend Mode is cancelled and the changes are restored. During a transition from New Suspend Mode to real sleep, games stay paused until the system resumes; a failed sleep request releases them again.
+
 ---
 
 ## Settings
@@ -75,7 +84,7 @@ The panel opens with a short **Essentials** section. Everything else is hidden b
 
 ### Advanced
 
-- **Behavior** — battery threshold, HUD countdown, completion-suspend delay, input lockout toggle.
+- **Behavior** — pause running games, battery threshold, HUD countdown, completion-suspend delay, input lockout toggle.
 - **Power Saving & Screen Options** — backlight off, OLED pitch black, CPU/GPU throttle, mute audio.
 - **Standby Wake Sources** — wake on Bluetooth connect, wake on controller button, battery note.
 - **Download Pace** — speed cap in MB/s, CPU budget as % of one core.

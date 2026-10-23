@@ -13,6 +13,14 @@ export const AdvancedSettings: FC<AdvancedSettingsProps> = ({ settings, updateSe
       {/* Behavior (advanced) */}
       <PanelSection title="Behavior">
         <PanelSectionRow>
+          <ToggleField
+            label="Pause Running Games"
+            description="Pauses games launched through Steam before entering New Suspend Mode and resumes them after hardware and controls are restored. Online sessions may disconnect. Turn off if a game has trouble resuming."
+            checked={settings.pause_running_games !== false}
+            onChange={(checked) => updateSetting("pause_running_games", checked)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
           <SliderField
             label="Auto-Suspend Battery Threshold"
             description="Console suspends automatically if battery drops below this limit during download."

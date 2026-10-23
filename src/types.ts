@@ -4,6 +4,7 @@ export interface PluginSettings {
   min_battery_threshold: number; // default 15
   hud_timeout_seconds: number; // default 5
   auto_suspend_delay_seconds: number; // default 120
+  pause_running_games: boolean; // default true
   throttle_cpu: boolean; // default true
   throttle_gpu: boolean; // default true
   mute_audio: boolean; // default true

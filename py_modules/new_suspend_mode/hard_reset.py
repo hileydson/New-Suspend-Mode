@@ -284,6 +284,7 @@ class HardResetMixin:
         is a reboot, and a reboot also destroys the evidence.
         """
         logger.warning("Force restore requested from the plugin menu.")
+        self.games_waiting_for_resume = False
         was_bg = self.is_background_mode
         self.is_background_mode = False
         self.standby_mode = False

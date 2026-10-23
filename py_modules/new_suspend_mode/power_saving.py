@@ -56,6 +56,10 @@ class PowerSavingMixin:
 
         logger.info("Applying smart suspend power saving and screen off...")
 
+        # Pause games before changing displays/clocks. Steam and its downloads stay
+        # alive. A failed pause aborts entry instead of throttling a running game.
+        self._pause_running_games()
+
         # 0. Record what everything looks like BEFORE anything is changed. Several of
         # these settings move each other, so reading each one just before overwriting it
         # captures a value this plugin itself caused. See _snapshot_power_originals.

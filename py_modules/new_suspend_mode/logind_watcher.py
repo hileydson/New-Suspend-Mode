@@ -41,6 +41,10 @@ class LogindWatcherMixin:
                     ):
                         logger.info("Logind reported system resume from sleep -> Enforcing wake cooldown.")
                         self.wake_cooldown_until = now + WAKE_COOLDOWN_SECONDS
+                        if self.loop and self.loop.is_running():
+                            asyncio.run_coroutine_threadsafe(
+                                self._resume_games_after_system_sleep(), self.loop
+                            )
 
                         # Quiet-hours RTC wake handling: a resume near the time we armed
                         # the RTC for is almost certainly our RTC alarm firing. Re-enter

@@ -239,7 +239,8 @@ class SuspendPolicyMixin:
         and drawing after put the logo on a screen whose backlight was already at zero,
         which is why nothing appeared to show up at all.
         """
-        if self.is_background_mode or self.standby_request_pending:
+        if (not self._effective_enabled() or self.is_background_mode
+                or self.standby_request_pending or self.suspend_in_progress):
             return False
         if time.time() < self.wake_cooldown_until:
             logger.info("Standby request ignored: the console just woke up.")

@@ -32,6 +32,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "min_battery_threshold": 15,
     "hud_timeout_seconds": 5,
     "auto_suspend_delay_seconds": 120,
+    "pause_running_games": True,
     "throttle_cpu": True,
     "throttle_gpu": True,
     "mute_audio": True,
