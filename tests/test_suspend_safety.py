@@ -67,6 +67,25 @@ class BatteryTests(unittest.TestCase):
         self.assertFalse(self.read_battery("Discharging")["is_plugged"])
         self.assertFalse(self.read_battery("Unknown")["power_known"])
 
+    def test_desktop_without_system_battery_counts_as_plugged_in(self):
+        usbc = self.root / "ucsi-source-psy-USBC000:001"
+        usbc.mkdir()
+        (usbc / "type").write_text("USB")
+        (usbc / "online").write_text("0")
+        mouse = self.root / "hidpp_battery_0"
+        mouse.mkdir()
+        (mouse / "type").write_text("Battery")
+        (mouse / "scope").write_text("Device")
+        (mouse / "status").write_text("Discharging")
+        def desktop_paths(pattern):
+            return [] if pattern.endswith("BAT*") else [str(usbc), str(mouse)]
+        with patch("main.glob.glob", side_effect=desktop_paths):
+            info = self.plugin._get_battery_info(max_age=0)
+        self.assertTrue(info["is_plugged"])
+        self.assertTrue(info["power_known"])
+        self.assertFalse(info["is_charging"])
+        self.assertEqual(info["capacity"], 100)
+
 
 @unittest.skipUnless(hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"), "Linux pidfd required")
 class GameProcessTests(unittest.TestCase):

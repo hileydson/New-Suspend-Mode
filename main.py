@@ -450,7 +450,18 @@ class Plugin(
                 except Exception:
                     pass
 
-        bat_paths = glob.glob("/sys/class/power_supply/BAT*")
+        bat_paths = []
+        for p in glob.glob("/sys/class/power_supply/BAT*"):
+            scope_file = os.path.join(p, "scope")
+            try:
+                if os.path.exists(scope_file):
+                    with open(scope_file, "r") as sf:
+                        if sf.read().strip().lower() == "device":
+                            continue
+            except Exception:
+                pass
+            bat_paths.append(p)
+
         for p in bat_paths:
             cap_file = os.path.join(p, "capacity")
             stat_file = os.path.join(p, "status")
@@ -473,6 +484,12 @@ class Plugin(
                 except Exception:
                     pass
             break
+
+        if not bat_paths:
+            # Desktop PC / mini-PC with no system battery: can only run on AC power,
+            # even if motherboard/GPU USB-C ports report online=0.
+            is_plugged = True
+            power_known = True
 
         self.last_battery_info = {
             "capacity": capacity,
