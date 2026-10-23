@@ -18,13 +18,18 @@ class DisplayAudioMixin:
         amixer_arg = "mute" if mute else "unmute"
         # 1. ALSA hardware master mute (works directly at hardware level)
         try:
-            subprocess.run(["amixer", "-q", "set", "Master", amixer_arg], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["amixer", "-q", "set", "Master", amixer_arg], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=2.0, stdin=subprocess.DEVNULL)
         except Exception:
             pass
 
         # 2. PipeWire & PulseAudio per-user session sockets
         for uid_dir in glob.glob("/run/user/*"):
             if os.path.basename(uid_dir).isdigit():
+                if not (os.path.exists(os.path.join(uid_dir, "pipewire-0"))
+                        or os.path.exists(os.path.join(uid_dir, "pulse/native"))):
+                    continue
                 env = os.environ.copy()
                 env["XDG_RUNTIME_DIR"] = uid_dir
                 try:
@@ -34,13 +39,20 @@ class DisplayAudioMixin:
                         check=False,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
+                        timeout=2.0,
+                        stdin=subprocess.DEVNULL,
                     )
+                except Exception:
+                    pass
+                try:
                     subprocess.run(
                         ["pactl", "set-sink-mute", "@DEFAULT_SINK@", val],
                         env=env,
                         check=False,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
+                        timeout=2.0,
+                        stdin=subprocess.DEVNULL,
                     )
                 except Exception:
                     pass
@@ -91,21 +103,27 @@ class DisplayAudioMixin:
                     if not p.endswith(".lock")
                 ] or ["gamescope-0"]
                 for socket in sockets:
+                    if not os.path.exists(os.path.join(uid_dir, socket)):
+                        continue
                     env = os.environ.copy()
                     env["XDG_RUNTIME_DIR"] = uid_dir
                     env["GAMESCOPE_WAYLAND_DISPLAY"] = socket
                     for subcommand in ("drm_sleep_internal_screen", "drm_sleep_external_screen"):
-                        for cmd in (
+                        commands = (
                             [gamescopectl, subcommand, arg],
-                            ["sudo", "-u", user, "env",
+                            ["sudo", "-n", "-u", user, "env",
                              f"XDG_RUNTIME_DIR={uid_dir}",
                              f"GAMESCOPE_WAYLAND_DISPLAY={socket}",
                              gamescopectl, subcommand, arg],
-                        ):
+                        )
+                        key = (uid_dir, socket, subcommand)
+                        preferred = self.gamescope_command_routes.get(key, 0)
+                        for route in (preferred, 1 - preferred):
+                            cmd = commands[route]
                             try:
                                 res = subprocess.run(
                                     cmd, env=env, check=False, capture_output=True,
-                                    text=True, timeout=2.0,
+                                    text=True, timeout=2.0, stdin=subprocess.DEVNULL,
                                 )
                                 detail = (res.stderr or res.stdout or "").strip()
                                 logger.info(
@@ -113,6 +131,11 @@ class DisplayAudioMixin:
                                     f"[{uid_dir}:{socket}] rc={res.returncode}"
                                     + (f" :: {detail[:200]}" if detail else "")
                                 )
+                                # gamescopectl may return 0 for a rejected property;
+                                # stderr must also be empty before trusting a route.
+                                if res.returncode == 0 and not (res.stderr or "").strip():
+                                    self.gamescope_command_routes[key] = route
+                                    break
                             except Exception as e:
                                 logger.debug(f"gamescopectl {subcommand} failed: {e}")
 

@@ -282,7 +282,7 @@ class PowerKeyMixin:
             self.wake_cooldown_until = now + WAKE_COOLDOWN_SECONDS
             if self.loop and self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(
-                    self.exit_background_mode("power_button_wake"),
+                    self.exit_background_mode("power_button_wake", time.monotonic()),
                     self.loop
                 )
             return

@@ -21,6 +21,22 @@ class MonitorLoopMixin:
     # ==========================================
     # Periodic Background Loop (Download & Battery)
     # ==========================================
+    async def _check_bluetooth_wake(self, time_in_bg: float) -> bool:
+        if not self.standby_mode or not self.settings.get("wake_on_bluetooth_connect", True):
+            return False
+        entered_at = self.background_mode_entered_time
+        # D-Bus can take seconds when an adapter is busy. Never block the event
+        # loop that is also receiving Power and USB/controller wake requests.
+        connected = await self.loop.run_in_executor(None, self._newly_connected_bluetooth_gamepads)
+        if (not self.is_background_mode or not self.standby_mode or self.transition_in_progress
+                or self.background_mode_entered_time != entered_at):
+            return False
+        if connected and time_in_bg > BT_CONNECT_GRACE_SECONDS:
+            logger.info(f"Bluetooth controller connected in standby ({', '.join(connected)}) -> waking.")
+            await self.exit_background_mode("bluetooth_controller_connected")
+            return True
+        return False
+
     async def _suspend_if_ac_only_unplugged(self) -> bool:
         """Handle loss of AC before the disabled-plugin shortcut stops monitoring."""
         if (not self.is_background_mode or self.transition_in_progress or self.suspend_in_progress
@@ -216,12 +232,10 @@ class MonitorLoopMixin:
 
                     # A Bluetooth controller connecting is itself the wake signal: there is
                     # no button to press, the pairing is the request for the console back.
-                    if self.standby_mode and self.settings.get("wake_on_bluetooth_connect", True):
-                        connected = self._newly_connected_bluetooth_gamepads()
-                        if connected and time_in_bg > BT_CONNECT_GRACE_SECONDS:
-                            logger.info(f"Bluetooth controller connected in standby ({', '.join(connected)}) -> waking.")
-                            await self.exit_background_mode("bluetooth_controller_connected")
-                            continue
+                    if await self._check_bluetooth_wake(time_in_bg):
+                        continue
+                    if not self.is_background_mode or self.transition_in_progress:
+                        continue
 
                     # Quiet hours while already in the mode: a session that began at
                     # 22:50 reaches 23:00 while sitting here, and the user chose the

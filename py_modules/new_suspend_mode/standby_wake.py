@@ -210,7 +210,7 @@ class StandbyWakeMixin:
         """Leaves standby from a worker thread."""
         self.wake_cooldown_until = time.time() + WAKE_COOLDOWN_SECONDS
         if self.loop and self.loop.is_running():
-            asyncio.run_coroutine_threadsafe(self.exit_background_mode(reason), self.loop)
+            asyncio.run_coroutine_threadsafe(self.exit_background_mode(reason, time.monotonic()), self.loop)
 
     def _newly_connected_bluetooth_gamepads(self) -> List[str]:
         """
@@ -228,16 +228,19 @@ class StandbyWakeMixin:
             and the user has already given up.
         """
         names: List[str] = []
+        # Keep the original session's set: an in-flight Bluetooth query may finish
+        # after teardown or after another entry created a new baseline.
+        known = self.standby_known_gamepads
         for pad in self._find_external_gamepads():
-            if pad["bustype"] != BUS_BLUETOOTH or pad["input_dir"] in self.standby_known_gamepads:
+            if pad["bustype"] != BUS_BLUETOOTH or pad["input_dir"] in known:
                 continue
-            self.standby_known_gamepads.add(pad["input_dir"])
+            known.add(pad["input_dir"])
             names.append(pad["name"] or pad["input_dir"])
         for address, name in self._bluez_connected_gamepads().items():
             key = f"bt:{address}"
-            if key in self.standby_known_gamepads:
+            if key in known:
                 continue
-            self.standby_known_gamepads.add(key)
+            known.add(key)
             if name not in names:
                 names.append(f"{name} (bluez)")
         return names

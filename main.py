@@ -84,6 +84,9 @@ class Plugin(
         self.frozen_daemons: List[str] = []
         self.inhibited_inputs: List[str] = []
         self.lockout_event_counts: Dict[str, int] = {}
+        self.input_diagnostics_pending: bool = False
+        # Successful Gamescope command routes, learned on entry and reused on wake.
+        self.gamescope_command_routes: Dict[Tuple[str, str, str], int] = {}
 
         # Standby mode: the console is "off" but awake, waiting for a controller.
         self.standby_mode: bool = False

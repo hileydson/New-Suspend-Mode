@@ -476,7 +476,7 @@ class OrderingTests(unittest.TestCase):
     def test_game_resume_follows_hardware_and_input_restore(self):
         p = Plugin()
         order = []
-        for name in ("_restore_backlight", "_restore_download_pacing", "_heal_steam_scheduling",
+        for name in ("_restore_cpu_quota", "_restore_backlight", "_restore_download_pacing", "_heal_steam_scheduling",
                      "_restore_platform_profile", "_restore_apu_power_limits", "_restore_cpu_settings",
                      "_restore_gpu_settings", "_restore_audio", "_restore_leds", "_release_all_gamepad_inputs",
                      "_resume_running_games"):
@@ -485,8 +485,15 @@ class OrderingTests(unittest.TestCase):
         p._converge_restore = Mock(return_value=[])
         p._verify_and_force_restore = Mock(return_value=[])
         p._arm_watchdog_from_targets = Mock()
+        p.input_diagnostics_pending = True
+        p._log_input_diagnostics = Mock(side_effect=lambda phase: order.append("diagnostics"))
         RestoreMixin._restore_system_power_and_display(p)
-        self.assertEqual(order[-1], "_resume_running_games")
+        self.assertEqual(order[0], "_restore_cpu_quota")
+        for stage in ("_restore_backlight", "_restore_cpu_settings", "_restore_gpu_settings", "_release_all_gamepad_inputs"):
+            self.assertLess(order.index(stage), order.index("_resume_running_games"))
+        self.assertLess(order.index("_restore_platform_profile"), order.index("_restore_cpu_settings"))
+        self.assertLess(order.index("_resume_running_games"), order.index("_restore_audio"))
+        self.assertLess(order.index("_resume_running_games"), order.index("diagnostics"))
         p.games_waiting_for_resume = True
         p._resume_running_games.reset_mock()
         RestoreMixin._restore_system_power_and_display(p)

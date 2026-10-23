@@ -28,12 +28,30 @@ class RestoreMixin:
         # What every path must read back as, captured before the stages start emptying
         # the saved values, so the result can be checked instead of assumed.
         targets = self._restore_targets_snapshot()
+        started = time.monotonic()
+        timings: Dict[str, float] = {}
+        failed: List[str] = []
+
+        def run_stage(label, stage):
+            before = time.monotonic()
+            try:
+                return stage()
+            except Exception as e:
+                failed.append(label)
+                logger.error(f"Restore stage '{label}' FAILED: {e}")
+            finally:
+                timings[label] = time.monotonic() - before
+                if self.settings.get("debug_logging", True):
+                    logger.info(f"[NSM WAKE TIMING] {label}={timings[label]:.3f}s")
 
         # The platform profile and the power limits go back BEFORE the clocks. Changing
         # the ACPI profile or the ASUS thermal policy makes the firmware re-apply its own
         # clock and power ceilings, which silently overwrote the frequencies restored a
         # moment earlier - the console then sat at its low-power clocks until a reboot.
         stages = (
+            # Let Steam draw the wake immediately, rather than making display and
+            # IPC commands compete with a quota of a fraction of one CPU core.
+            ("steam cpu budget", self._restore_cpu_quota),
             ("backlight", self._restore_backlight),
             ("download pacing", self._restore_download_pacing),
             ("steam scheduling", self._heal_steam_scheduling),
@@ -41,27 +59,30 @@ class RestoreMixin:
             ("apu power limits", self._restore_apu_power_limits),
             ("cpu", self._restore_cpu_settings),
             ("gpu", self._restore_gpu_settings),
-            ("audio", self._restore_audio),
-            ("leds", self._restore_leds),
             ("input", self._release_all_gamepad_inputs),
         )
 
-        failed: List[str] = []
         for label, stage in stages:
-            try:
-                stage()
-            except Exception as e:
-                failed.append(label)
-                logger.error(f"Restore stage '{label}' FAILED: {e}")
+            run_stage(label, stage)
 
         try:
-            stubborn = self._converge_restore(targets)
-            forced = self._verify_and_force_restore()
+            stubborn = run_stage("verify saved values", lambda: self._converge_restore(targets)) or []
+            forced = run_stage("verify fallback values", self._verify_and_force_restore) or []
         finally:
             # Keep games paused across a handoff into real sleep. On a normal wake,
             # clocks, display and input have already been restored before this point.
             if not self.games_waiting_for_resume:
-                self._resume_running_games()
+                run_stage("resume games", self._resume_running_games)
+
+        logger.info(f"[NSM WAKE TIMING] interactive restore={time.monotonic() - started:.3f}s")
+        # These are still restored on every path, including real sleep and recovery,
+        # but an unavailable audio server or a diagnostic scan cannot delay input or
+        # leave an otherwise ready game paused.
+        run_stage("audio", self._restore_audio)
+        run_stage("leds", self._restore_leds)
+        if self.input_diagnostics_pending:
+            self.input_diagnostics_pending = False
+            run_stage("input diagnostics", lambda: self._log_input_diagnostics("after restore"))
 
         # Keep watching for a short while: see _recheck_after_restore.
         self.post_restore_targets = dict(targets)

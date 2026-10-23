@@ -67,25 +67,32 @@ class TransitionsMixin:
         })
         return True
 
-    async def exit_background_mode(self, reason: str = "manual") -> bool:
+    async def exit_background_mode(self, reason: str = "manual", requested_at: float = 0.0) -> bool:
         if not self.is_background_mode:
             logger.info(f"[DBG] exit_background_mode({reason}) ignored: not in background mode.")
             return False
 
         logger.info(f"Exiting Background Download Mode (reason: {reason}).")
+        if requested_at:
+            logger.info(f"[NSM WAKE TIMING] request queue={time.monotonic() - requested_at:.3f}s via={reason}")
         self.wake_cooldown_until = time.time() + WAKE_COOLDOWN_SECONDS
         self.is_background_mode = False
-        # Tell the interface first, while the panel is still dark: the restore below
-        # turns the backlight on before its slower stages, and the black overlay must be
-        # gone by then rather than waiting for the frontend's next status poll.
-        await decky.emit("background_mode_changed", {"is_background_mode": False, "reason": reason})
-        t0 = time.time()
         self.transition_in_progress = True
+        # Start the hardware restore immediately. A slow frontend must not keep the
+        # CPU capped and the display off while the wake event is being delivered.
+        t0 = time.monotonic()
+        restore = self.loop.run_in_executor(None, self._run_transition_locked, self._restore_system_power_and_display)
+        # Announce the wake alongside the restore so the black overlay can disappear
+        # without waiting for the frontend's next status poll.
         try:
-            await self.loop.run_in_executor(None, self._run_transition_locked, self._restore_system_power_and_display)
+            try:
+                await decky.emit("background_mode_changed", {"is_background_mode": False, "reason": reason})
+            except Exception as e:
+                logger.warning(f"Could not announce wake before restore: {e}")
+            await restore
         finally:
             self.transition_in_progress = False
-        logger.info(f"[DBG] System restored in {time.time() - t0:.2f}s")
+        logger.info(f"[DBG] System restored in {time.monotonic() - t0:.2f}s")
         self._update_inhibitor_state()
 
         await decky.emit("background_mode_changed", {"is_background_mode": False, "reason": reason})

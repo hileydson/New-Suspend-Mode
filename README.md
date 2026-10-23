@@ -49,6 +49,14 @@ Nine signals cover everything the plugin itself can touch — `scaling_max_freq`
 
 The reset is also exposed as a button in the settings panel.
 
+### Wake response and timing
+
+Wake starts hardware restoration while notifying the interface, clears Steam's CPU quota before display commands, and reuses the Gamescope command route that succeeded on entry. A failed cached route still tries the other route. Bluetooth queries run outside the event loop so a busy adapter cannot block Power or USB-controller wake requests.
+
+Games resume after performance, display, input and the existing verification passes. Audio, LEDs and the detailed input diagnostic scan finish afterwards; they no longer hold input or a ready game paused. Controller services thaw independently in parallel, keeping the existing input-drain delay, and direct process resume is attempted even if a service command fails.
+
+Logs marked `[NSM WAKE TIMING]` show request queue time (Power/USB), each restoration stage and the time to the interactive restore. Use these with hardware tests to distinguish wake detection, display, controls and restoration delays; local tests do not establish a wake time for a particular handheld or PC.
+
 ### Activation modes
 
 The two activation switches are mutually exclusive. **Enable Plugin** keeps the plugin active on battery and AC power. **Enable Plugin When Plugged In** activates it only on external power and is the default. Turning either switch on automatically turns the other off. Both off disables the plugin. Both modes respect the configured real-sleep period.

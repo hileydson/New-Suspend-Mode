@@ -3,6 +3,7 @@ import os
 import glob
 import subprocess
 import signal
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple
 
 from .constants import logger, SCHED_BATCH, SCHED_IDLE, STEAM_UI_COMMS
@@ -111,17 +112,25 @@ class SystemControlMixin:
         unbound is what keeps a press made with the screen off from opening the Quick
         Access Menu on wake.
         """
-        for daemon in ["inputplumber", "hhd"]:
+        def resume(daemon):
             try:
                 subprocess.run(
                     ["systemctl", "thaw", f"{daemon}.service"],
                     check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5.0,
                 )
+            except Exception as e:
+                logger.warning(f"Thawing service {daemon} failed: {e}")
+            # SIGSTOP and systemd's cgroup freeze are separate mechanisms. A failed
+            # service lookup/thaw must never skip releasing our direct SIGSTOP.
+            try:
                 pids = self._signal_daemon(daemon, signal.SIGCONT)
                 if pids and not quiet:
                     logger.info(f"Resumed controller daemon {daemon} (pids={pids}).")
             except Exception as e:
                 logger.warning(f"Resuming daemon {daemon} failed: {e}")
+        # Independent services; wait for both before the existing input-drain delay.
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(resume, ("inputplumber", "hhd")))
         self.frozen_daemons = []
 
     def _iter_process_scheduling(self) -> List[Tuple[int, str, int, int]]:

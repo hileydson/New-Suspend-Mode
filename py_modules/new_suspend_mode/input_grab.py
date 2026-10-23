@@ -212,7 +212,14 @@ class InputGrabMixin:
             self.grabbed_gamepad_fds or self.unbound_hid_devices or was_frozen or self.inhibited_inputs
         )
         if had_lockout:
-            self._log_input_diagnostics("before release")
+            # A /proc/*/fd scan is diagnostic work, not part of handing input back.
+            # Keep a cheap snapshot now; the full scan runs after games can resume.
+            self.input_diagnostics_pending = True
+            logger.info(
+                f"Input release: grabs={len(self.grabbed_gamepad_fds)} "
+                f"inhibited={len(self.inhibited_inputs)} frozen={self.frozen_daemons} "
+                f"unbound={len(self.unbound_hid_devices)}"
+            )
 
         # Standby's wake sources go first: the controller that just woke the console has
         # to answer to Steam again, not to us.
