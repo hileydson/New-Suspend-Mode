@@ -11,6 +11,7 @@ import glob
 import time
 import asyncio
 import threading
+import tempfile
 import subprocess
 from typing import Dict, Any, Optional, List, Set, Tuple
 
@@ -302,6 +303,13 @@ class Plugin(
                 with open(self.settings_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.settings.update(data)
+                    # Preserve the activation mode in older files that only stored
+                    # one switch, rather than filling in the new AC-only default.
+                    if "enabled" in data or "enable_plugin_when_plugged_in" in data:
+                        self.settings["enabled"] = bool(data.get("enabled", False))
+                        self.settings["enable_plugin_when_plugged_in"] = bool(
+                            data.get("enable_plugin_when_plugged_in", False)
+                        )
                 self._migrate_legacy_settings()
             else:
                 self._save_settings_sync()
@@ -311,6 +319,10 @@ class Plugin(
     def _migrate_legacy_settings(self):
         """One-shot upgrades for keys whose names or units changed between versions."""
         changed = False
+        # Older versions allowed both on. Honour the explicit AC-only choice.
+        if self.settings.get("enabled") and self.settings.get("enable_plugin_when_plugged_in"):
+            self.settings["enabled"] = False
+            changed = True
         # real_sleep_{start,end}_hour (0..23) -> real_sleep_{start,end}_minutes (0..1430)
         if "real_sleep_start_hour" in self.settings:
             try:
@@ -336,27 +348,53 @@ class Plugin(
             except Exception:
                 pass
 
-    def _save_settings_sync(self):
+    def _save_settings_sync(self) -> bool:
+        temp_path = None
         try:
-            os.makedirs(os.path.dirname(self.settings_file), exist_ok=True)
-            with open(self.settings_file, "w", encoding="utf-8") as f:
+            directory = os.path.dirname(self.settings_file)
+            os.makedirs(directory, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory, delete=False) as f:
+                temp_path = f.name
                 json.dump(self.settings, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, self.settings_file)
+            return True
         except Exception as e:
             logger.error(f"Failed to save settings: {e}")
+            return False
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
 
     async def get_settings(self) -> Dict[str, Any]:
         return self.settings
 
     async def save_settings(self, new_settings: Dict[str, Any]) -> Dict[str, Any]:
-        self.settings.update(new_settings)
-        self._save_settings_sync()
+        updated = {**self.settings, **new_settings}
+        if new_settings.get("enable_plugin_when_plugged_in") is True:
+            updated["enabled"] = False
+        elif new_settings.get("enabled") is True:
+            updated["enable_plugin_when_plugged_in"] = False
+        return await self._apply_settings(updated)
+
+    async def reset_defaults(self) -> Dict[str, Any]:
+        """Restore every option, including hidden advanced settings."""
+        return await self._apply_settings(DEFAULT_SETTINGS.copy())
+
+    async def _apply_settings(self, updated: Dict[str, Any]) -> Dict[str, Any]:
+        previous = self.settings
+        self.settings = updated
+        if not self._save_settings_sync():
+            self.settings = previous
+            raise RuntimeError("Could not save plugin settings")
         logger.info(f"Updated settings: {self.settings}")
 
         if not self._effective_enabled() and self.is_background_mode:
             await self.exit_background_mode("disabled_in_settings")
 
         self._update_inhibitor_state()
-        return self.settings
+        return self.settings.copy()
 
     async def log_debug(self, payload: Dict[str, Any]) -> bool:
         """

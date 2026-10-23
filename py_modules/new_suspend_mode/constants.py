@@ -24,11 +24,9 @@ logging.basicConfig(level=logging.INFO)
 logger = decky.logger
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
-    "enabled": True,
-    # When True, the plugin force-enables itself whenever the device is plugged into AC.
-    # Useful on a PC that is always on mains, or on a handheld the user only wants the
-    # plugin active for while charging. Overrides a False "enabled" only on AC.
-    "enable_plugin_when_plugged_in": False,
+    # Mutually exclusive activation modes; both off disables the plugin.
+    "enabled": False,
+    "enable_plugin_when_plugged_in": True,
     "min_battery_threshold": 15,
     "hud_timeout_seconds": 5,
     "auto_suspend_delay_seconds": 120,

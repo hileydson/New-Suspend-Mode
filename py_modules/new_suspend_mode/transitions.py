@@ -13,7 +13,7 @@ class TransitionsMixin:
     # Background Mode Transitions
     # ==========================================
     async def enter_background_mode(self, reason: str = "manual") -> bool:
-        if self.transition_in_progress or self.suspend_in_progress or not self._effective_enabled():
+        if self.transition_in_progress or self.suspend_in_progress or not self._effective_enabled(max_age=0.0):
             return False
         if self.is_background_mode:
             return True

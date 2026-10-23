@@ -49,11 +49,13 @@ Nine signals cover everything the plugin itself can touch — `scaling_max_freq`
 
 The reset is also exposed as a button in the settings panel.
 
-### Enable When Plugged In
+### Activation modes
 
-Separate toggle: when on, the plugin force-enables itself whenever the device is on AC power — regardless of the main Enable Plugin toggle. Meant for a desktop PC that is always plugged in, or a handheld you only want the plugin active for while charging.
+The two activation switches are mutually exclusive. **Enable Plugin** keeps the plugin active on battery and AC power. **Enable Plugin When Plugged In** activates it only on external power and is the default. Turning either switch on automatically turns the other off. Both off disables the plugin. Both modes respect the configured real-sleep period.
 
-With **Enable Plugin off** and **Enable Plugin When Plugged In on**, removing external power during New Suspend Mode restores the hardware and requests normal SteamOS sleep. With the main switch on, New Suspend Mode continues on battery with the normal battery protection. Connecting a charger while the device is in real sleep does not automatically enter New Suspend Mode.
+In AC-only mode, connecting power while the device is awake makes the next Sleep request eligible for New Suspend Mode; the power state is checked again at that request. Removing external power during New Suspend Mode restores the hardware and requests normal SteamOS sleep. In always-on mode, New Suspend Mode continues on battery with the normal battery protection. Connecting a charger while the device is in real sleep does not wake it or automatically enter New Suspend Mode. A scheduled RTC wake also respects the selected activation mode.
+
+Existing activation preferences are kept on upgrade. Older settings with both switches on are migrated to AC-only mode.
 
 ### Pausing games
 
@@ -69,8 +71,8 @@ The panel opens with a short **Essentials** section. Everything else is hidden b
 
 ### Always visible
 
-- **Enable Plugin** — master switch.
-- **Enable Plugin When Plugged In** — force-enable on AC regardless of the above.
+- **Enable Plugin** _(default off)_ — always-on mode, on battery and AC.
+- **Enable Plugin When Plugged In** _(default on)_ — AC-only mode, exclusive with the above.
 
 ### Essentials
 
@@ -89,6 +91,8 @@ The panel opens with a short **Essentials** section. Everything else is hidden b
 - **Standby Wake Sources** — wake on Bluetooth connect, wake on controller button, battery note.
 - **Download Pace** — speed cap in MB/s, CPU budget as % of one core.
 - **Troubleshooting** — hidraw unbind escalation, auto hard reset after wake, diagnostic logs.
+
+**Reset Defaults** is always at the bottom of the panel, after the advanced sections when expanded. It restores and saves every option, including hidden advanced settings, sliders and the sleep schedule. It selects AC-only mode and enables Replace Sleep, Real Sleep During A Time Period, Return To New Suspend Mode At Period End and Slow Down Download.
 
 ---
 

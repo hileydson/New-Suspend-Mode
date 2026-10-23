@@ -1,6 +1,6 @@
 import { call } from "@decky/api";
 import { Patch, callOriginal, findModuleExport, replacePatch } from "@decky/ui";
-import { debugLog, getState, isPluginEnabled, runtime } from "../state";
+import { debugLog, getState, runtime } from "../state";
 import { closeSteamSideMenus, startHudCountdown, wakeIfSettled } from "../flows";
 
 /**
@@ -61,10 +61,13 @@ const pluginWantsSleep = (): boolean =>
  * Returns undefined when the request still has to be decided on.
  */
 const preflight = (via: string): "original" | "handled" | undefined => {
-  if (Date.now() < runtime.realSuspendUntil || !isPluginEnabled()) {
+  const s = getState();
+  // AC may have changed since the last status poll. Let the backend decide
+  // AC-only requests using a fresh power reading, even if the cached state is off.
+  if (Date.now() < runtime.realSuspendUntil ||
+      (!s.settings.enabled && !s.settings.enable_plugin_when_plugged_in)) {
     return "original";
   }
-  const s = getState();
   if (s.isBackgroundMode) {
     wakeIfSettled(`${via}_wake`);
     return "handled";
@@ -89,18 +92,40 @@ const preflight = (via: string): "original" | "handled" | undefined => {
  * Sleep chosen in the power menu: does exactly what the physical power button does,
  * through the same backend call.
  */
-const onRequestSleep = (): any => {
+const runOriginalSleep = (store: any, method: string, args: any[]) => {
+  try {
+    const original = patches.find((p) => p.property === method)?.original ?? store[method];
+    original.apply(store, args);
+  } catch (e) {
+    console.error("[NewSuspendMode] Could not hand the sleep back to Steam:", e);
+  }
+};
+
+const onRequestSleep = (store: any, args: any[]): any => {
   const pre = preflight("menu_suspend");
   debugLog({ kind: "sleep_request", via: "RequestSleep", decision: pre ?? "takeover" });
   if (pre === "original") return callOriginal;
   if (pre === "handled") return undefined;
 
-  lastTakeover = Date.now();
-  console.log("[NewSuspendMode] Power menu Sleep -> new suspend mode.");
+  decidingUntil = Date.now() + 15000;
   closeSteamSideMenus();
-  call("request_standby", "standby_power_menu").catch((e) =>
-    console.error("[NewSuspendMode] request_standby failed:", e)
-  );
+  call("request_menu_sleep")
+    .then((res: any) => {
+      decidingUntil = 0;
+      if (res?.verdict === "allow") {
+        runOriginalSleep(store, "RequestSleep", args);
+        return;
+      }
+      lastTakeover = Date.now();
+      if (res?.verdict === "hud") {
+        startHudCountdown(getState().settings.hud_timeout_seconds ?? 5);
+      }
+    })
+    .catch((e) => {
+      decidingUntil = 0;
+      console.error("[NewSuspendMode] request_menu_sleep failed:", e);
+      runOriginalSleep(store, "RequestSleep", args);
+    });
   return undefined;
 };
 
@@ -121,14 +146,7 @@ const onInitiateSleep = (store: any, args: any[]): any => {
 
   // The patch's original when it is still in place; the store's own method once the
   // plugin has been unloaded and the patch taken off.
-  const runOriginal = () => {
-    try {
-      const original = patches.find((p) => p.property === "InitiateSleep")?.original ?? store.InitiateSleep;
-      original.apply(store, args);
-    } catch (e) {
-      console.error("[NewSuspendMode] Could not hand the sleep back to Steam:", e);
-    }
-  };
+  const runOriginal = () => runOriginalSleep(store, "InitiateSleep", args);
 
   decidingUntil = Date.now() + 15000;
   closeSteamSideMenus();
@@ -169,7 +187,7 @@ const tryInstall = (): boolean => {
   };
 
   patches = [
-    replacePatch(store, "RequestSleep", guarded(() => onRequestSleep())),
+    replacePatch(store, "RequestSleep", guarded((args) => onRequestSleep(store, args))),
     replacePatch(store, "InitiateSleep", guarded((args) => onInitiateSleep(store, args))),
   ];
   console.log("[NewSuspendMode] Sleep patched on the Steam suspend store.");

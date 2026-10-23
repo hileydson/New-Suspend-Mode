@@ -263,7 +263,7 @@ class PowerKeyMixin:
                 logger.info("Released power key device(s); SteamOS handles the power button again.")
 
     def _on_hardware_power_key(self):
-        if not self._effective_enabled():
+        if not self._effective_enabled(max_age=0.0):
             return
 
         now = time.time()

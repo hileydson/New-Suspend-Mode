@@ -136,25 +136,21 @@ class SleepInhibitorMixin:
                 )
         return is_dl
 
-    def _effective_enabled(self) -> bool:
+    def _effective_enabled(self, max_age: float = 2.0) -> bool:
         """
         True iff the plugin should behave as enabled right now.
 
-        The user-facing 'Enable Plugin' toggle is the baseline. 'Enable Plugin When
-        Plugged In' is an overriding opt-in that force-enables the plugin while on AC,
-        even if the baseline toggle is off — meant for a desktop PC permanently plugged
-        in, or a handheld the user only wants the plugin active for while charging.
+        AC-only and always-on are exclusive modes. AC-only takes precedence even
+        for stale/legacy settings containing both switches. Sleep requests bypass
+        the battery cache so plugging in immediately before Sleep works too.
         """
-        if self.settings.get("enabled", True):
-            return True
         if self.settings.get("enable_plugin_when_plugged_in", False):
             try:
-                bat = self._get_battery_info()
-                if bat and bat.get("is_plugged"):
-                    return True
+                bat = self._get_battery_info(max_age=max_age)
+                return bool(bat and bat.get("is_plugged"))
             except Exception:
-                pass
-        return False
+                return False
+        return bool(self.settings.get("enabled", False))
 
     def _plugin_should_act(self) -> bool:
         """

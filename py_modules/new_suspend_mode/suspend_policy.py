@@ -39,6 +39,10 @@ class SuspendPolicyMixin:
                 )
             return "wake"
 
+        if not self._effective_enabled(max_age=0.0):
+            self._update_inhibitor_state()
+            return "allow"
+
         # Cooldown: Ignore any suspend request if system just woke up within 12 seconds
         if now < self.wake_cooldown_until:
             logger.info("Ignoring suspend attempt because system just woke up from background mode.")
@@ -215,8 +219,15 @@ class SuspendPolicyMixin:
         await asyncio.sleep(5.0)
         if self.is_background_mode:
             return
-        if not self.settings.get("standby_on_power_off", False):
+        if (not self.settings.get("standby_on_power_off", False)
+                or not self.settings.get("wake_at_period_end", False)):
             logger.info("[NSM RTC WAKE] Standby option is off; staying awake.")
+            return
+        if not self._effective_enabled(max_age=0.0):
+            # The RTC may already have been armed before power was removed.
+            # AC-only mode must not become a battery-powered standby on this wake.
+            if self.settings.get("enable_plugin_when_plugged_in", False):
+                await self.trigger_suspend("rtc_wake_plugin_inactive")
             return
         self.wake_cooldown_until = 0.0
         logger.info("[NSM RTC WAKE] Entering the plugin's new suspend mode.")
@@ -226,10 +237,6 @@ class SuspendPolicyMixin:
         # direct enter_background_mode path skips both.
         if not self.is_background_mode:
             await self.enter_background_mode("quiet_hours_rtc_end")
-        await decky.emit("background_mode_changed", {
-            "is_background_mode": True,
-            "reason": "quiet_hours_rtc_end",
-        })
 
     async def request_standby(self, reason: str = "standby") -> bool:
         """
@@ -239,7 +246,7 @@ class SuspendPolicyMixin:
         and drawing after put the logo on a screen whose backlight was already at zero,
         which is why nothing appeared to show up at all.
         """
-        if (not self._effective_enabled() or self.is_background_mode
+        if (not self._effective_enabled(max_age=0.0) or self.is_background_mode
                 or self.standby_request_pending or self.suspend_in_progress):
             return False
         if time.time() < self.wake_cooldown_until:
@@ -286,3 +293,15 @@ class SuspendPolicyMixin:
             "intercepted": verdict in ("hud", "standby", "wake"),
             "download_info": self.download_info,
         }
+
+    async def request_menu_sleep(self) -> Dict[str, Any]:
+        """Decide the menu's Sleep using current power, not the frontend's last poll."""
+        if not self._effective_enabled(max_age=0.0):
+            self._update_inhibitor_state()
+            return {"verdict": "allow"}
+        if self.settings.get("standby_on_power_off", False):
+            entered = await self.request_standby("standby_power_menu")
+            if not entered and not self._effective_enabled(max_age=0.0):
+                return {"verdict": "allow"}
+            return {"verdict": "standby" if entered else "ignored"}
+        return await self.trigger_suspend_intercept()

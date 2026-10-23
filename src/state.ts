@@ -3,8 +3,8 @@ import { call } from "@decky/api";
 import { DownloadInfo, PluginSettings } from "./types";
 
 export const DEFAULT_SETTINGS: PluginSettings = {
-  enabled: true,
-  enable_plugin_when_plugged_in: false,
+  enabled: false,
+  enable_plugin_when_plugged_in: true,
   min_battery_threshold: 15,
   hud_timeout_seconds: 5,
   auto_suspend_delay_seconds: 120,
@@ -116,12 +116,12 @@ export const runtime = {
 };
 
 /**
- * Mirrors _effective_enabled() in main.py: 'Enable Plugin', or 'Enable Plugin When
- * Plugged In' while on AC.
+ * Mirrors the backend's exclusive AC-only / always-on activation modes.
  */
 export const isPluginEnabled = (s: UiState = state): boolean =>
-  s.settings.enabled !== false ||
-  (s.settings.enable_plugin_when_plugged_in === true && s.powerPlugged);
+  s.settings.enable_plugin_when_plugged_in === true
+    ? s.powerPlugged
+    : s.settings.enabled === true;
 
 /** Writes a diagnostic entry into the plugin's own log file, when debug logging is on. */
 export const debugLog = (payload: Record<string, unknown>) => {

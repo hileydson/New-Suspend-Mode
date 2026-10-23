@@ -24,7 +24,6 @@ class MonitorLoopMixin:
     async def _suspend_if_ac_only_unplugged(self) -> bool:
         """Handle loss of AC before the disabled-plugin shortcut stops monitoring."""
         if (not self.is_background_mode or self.transition_in_progress or self.suspend_in_progress
-                or self.settings.get("enabled", True)
                 or not self.settings.get("enable_plugin_when_plugged_in", False)):
             return False
         bat = self._get_battery_info(max_age=0.0)

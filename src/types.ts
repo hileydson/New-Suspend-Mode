@@ -1,6 +1,6 @@
 export interface PluginSettings {
-  enabled: boolean;
-  enable_plugin_when_plugged_in: boolean; // default false — force-enables the plugin on AC regardless of 'enabled'
+  enabled: boolean; // default false — always-on mode, exclusive with AC-only
+  enable_plugin_when_plugged_in: boolean; // default true — AC-only mode
   min_battery_threshold: number; // default 15
   hud_timeout_seconds: number; // default 5
   auto_suspend_delay_seconds: number; // default 120

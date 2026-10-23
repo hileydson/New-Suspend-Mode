@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from main import Plugin
+from new_suspend_mode.constants import DEFAULT_SETTINGS
 from new_suspend_mode.power_saving import PowerSavingMixin
 from new_suspend_mode.restore import RestoreMixin
 
@@ -201,6 +202,7 @@ class TransitionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.plugin = Plugin()
         self.plugin.loop = asyncio.get_running_loop()
+        self.plugin.settings.update(enabled=True, enable_plugin_when_plugged_in=False)
 
     async def test_ac_only_unplug_suspends_even_when_effectively_disabled(self):
         p = self.plugin
@@ -218,7 +220,7 @@ class TransitionTests(unittest.IsolatedAsyncioTestCase):
         p = self.plugin
         p.trigger_suspend = AsyncMock()
         for enabled, ac_only, background, known, plugged, transitioning in (
-            (True, True, True, True, False, False),
+            (True, False, True, True, False, False),
             (False, False, True, True, False, False),
             (False, True, False, True, False, False),
             (False, True, True, False, False, False),
@@ -315,6 +317,151 @@ class TransitionTests(unittest.IsolatedAsyncioTestCase):
         p._resume_running_games.assert_called_once()
         self.assertFalse(p.games_waiting_for_resume)
         self.assertFalse(p.suspend_in_progress)
+
+
+class SettingsTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.plugin = Plugin()
+        self.plugin.settings_file = str(Path(self.temp.name) / "settings.json")
+        self.plugin._update_inhibitor_state = Mock()
+        self.plugin.exit_background_mode = AsyncMock()
+
+    async def test_activation_modes_and_power(self):
+        p = self.plugin
+        for enabled, ac_only, plugged, expected in (
+            (False, False, False, False), (False, False, True, False),
+            (True, False, False, True), (True, False, True, True),
+            (False, True, False, False), (False, True, True, True),
+            (True, True, False, False), (True, True, True, True),
+        ):
+            with self.subTest(enabled=enabled, ac_only=ac_only, plugged=plugged):
+                p.settings.update(enabled=enabled, enable_plugin_when_plugged_in=ac_only)
+                p._get_battery_info = Mock(return_value={"is_plugged": plugged})
+                self.assertEqual(p._effective_enabled(), expected)
+
+    async def test_enabling_either_mode_turns_other_off_and_persists(self):
+        p = self.plugin
+        await p.save_settings({"enabled": True})
+        self.assertTrue(p.settings["enabled"])
+        self.assertFalse(p.settings["enable_plugin_when_plugged_in"])
+        await p.save_settings({"enable_plugin_when_plugged_in": True})
+        self.assertFalse(p.settings["enabled"])
+        self.assertTrue(p.settings["enable_plugin_when_plugged_in"])
+        await p.save_settings({"enabled": True, "enable_plugin_when_plugged_in": True})
+        self.assertFalse(p.settings["enabled"])
+        self.assertTrue(p.settings["enable_plugin_when_plugged_in"])
+        self.assertEqual(json.loads(Path(p.settings_file).read_text()), p.settings)
+        await p.save_settings({"enable_plugin_when_plugged_in": False})
+        self.assertFalse(p._effective_enabled())
+
+    async def test_legacy_activation_settings_migrate_without_changing_single_modes(self):
+        for stored, expected in (
+            ({"enabled": True}, (True, False)),
+            ({"enabled": False}, (False, False)),
+            ({"enabled": False, "enable_plugin_when_plugged_in": False}, (False, False)),
+            ({"enabled": True, "enable_plugin_when_plugged_in": True}, (False, True)),
+            ({"enable_plugin_when_plugged_in": True}, (False, True)),
+        ):
+            with self.subTest(stored=stored):
+                Path(self.plugin.settings_file).write_text(json.dumps(stored))
+                loaded = Plugin()
+                loaded.settings_file = self.plugin.settings_file
+                loaded._load_settings()
+                self.assertEqual((loaded.settings["enabled"], loaded.settings["enable_plugin_when_plugged_in"]), expected)
+
+    async def test_fresh_install_and_reset_restore_every_default(self):
+        p = self.plugin
+        p._load_settings()
+        self.assertEqual(json.loads(Path(p.settings_file).read_text()), DEFAULT_SETTINGS)
+        for key in ("enable_plugin_when_plugged_in", "standby_on_power_off",
+                    "enter_real_sleep_after_time", "wake_at_period_end", "limit_download_speed"):
+            self.assertTrue(p.settings[key])
+        self.assertFalse(p.settings["enabled"])
+        p.settings = {key: not val if isinstance(val, bool) else val + 10
+                      for key, val in DEFAULT_SETTINGS.items()}
+        p.settings["obsolete_setting"] = True
+        p._save_settings_sync()
+        restored = await p.reset_defaults()
+        self.assertEqual(restored, DEFAULT_SETTINGS)
+        self.assertEqual(json.loads(Path(p.settings_file).read_text()), DEFAULT_SETTINGS)
+        loaded = Plugin()
+        loaded.settings_file = p.settings_file
+        loaded._load_settings()
+        self.assertEqual(loaded.settings, DEFAULT_SETTINGS)
+        restored["enabled"] = True
+        self.assertFalse(p.settings["enabled"])
+
+    async def test_reset_save_failure_keeps_existing_file_and_settings(self):
+        p = self.plugin
+        p.settings.update(enabled=True, enable_plugin_when_plugged_in=False, min_battery_threshold=22)
+        previous = p.settings.copy()
+        p._save_settings_sync()
+        with patch("main.os.replace", side_effect=OSError("test write failure")):
+            with self.assertRaises(RuntimeError):
+                await p.reset_defaults()
+        self.assertEqual(p.settings, previous)
+        self.assertEqual(json.loads(Path(p.settings_file).read_text()), previous)
+
+    async def test_switching_to_ac_only_on_battery_exits_existing_mode(self):
+        p = self.plugin
+        p.settings.update(enabled=True, enable_plugin_when_plugged_in=False)
+        p.is_background_mode = True
+        p._get_battery_info = Mock(return_value={"is_plugged": False})
+        await p.save_settings({"enable_plugin_when_plugged_in": True})
+        p.exit_background_mode.assert_awaited_once_with("disabled_in_settings")
+
+    async def test_menu_sleep_checks_fresh_power_without_automatic_entry_on_plug(self):
+        p = self.plugin
+        p._get_battery_info = Mock(return_value={"is_plugged": False})
+        p.request_standby = AsyncMock(return_value=True)
+        self.assertEqual((await p.request_menu_sleep())["verdict"], "allow")
+        p.request_standby.assert_not_awaited()
+        p._get_battery_info = Mock(return_value={"is_plugged": True})
+        # Reading status on plug does not itself start standby.
+        self.assertTrue(p._effective_enabled())
+        p.request_standby.assert_not_awaited()
+        p._get_battery_info.reset_mock()
+        self.assertEqual((await p.request_menu_sleep())["verdict"], "standby")
+        p._get_battery_info.assert_called_once_with(max_age=0.0)
+        p.request_standby.assert_awaited_once_with("standby_power_menu")
+
+    async def test_sleep_intercept_allows_stock_sleep_on_battery(self):
+        p = self.plugin
+        p._get_battery_info = Mock(return_value={"is_plugged": False})
+        p._refresh_download_state = Mock(return_value=True)
+        self.assertEqual(p._trigger_suspend_intercepted(), "allow")
+        p._refresh_download_state.assert_not_called()
+
+    async def test_rtc_wake_without_ac_returns_to_real_sleep(self):
+        p = self.plugin
+        p._get_battery_info = Mock(return_value={"is_plugged": False})
+        p.trigger_suspend = AsyncMock()
+        p.enter_background_mode = AsyncMock()
+        with patch("new_suspend_mode.suspend_policy.asyncio.sleep", new_callable=AsyncMock):
+            await p._enter_standby_after_rtc_wake()
+        p.trigger_suspend.assert_awaited_once_with("rtc_wake_plugin_inactive")
+        p.enter_background_mode.assert_not_awaited()
+
+    async def test_always_on_mode_still_respects_quiet_hours(self):
+        p = self.plugin
+        p.settings.update(enabled=True, enable_plugin_when_plugged_in=False, wake_at_period_end=False)
+        p._inside_quiet_hours = Mock(return_value=True)
+        p._is_active_download = Mock(return_value=False)
+        p.trigger_suspend = AsyncMock()
+        self.assertTrue(await p._maybe_real_sleep_instead("test"))
+        p.trigger_suspend.assert_awaited_once()
+
+    async def test_disabled_plugin_does_not_act_on_old_rtc_wake(self):
+        p = self.plugin
+        p.settings.update(enabled=False, enable_plugin_when_plugged_in=False)
+        p.trigger_suspend = AsyncMock()
+        p.enter_background_mode = AsyncMock()
+        with patch("new_suspend_mode.suspend_policy.asyncio.sleep", new_callable=AsyncMock):
+            await p._enter_standby_after_rtc_wake()
+        p.trigger_suspend.assert_not_awaited()
+        p.enter_background_mode.assert_not_awaited()
 
 
 class OrderingTests(unittest.TestCase):

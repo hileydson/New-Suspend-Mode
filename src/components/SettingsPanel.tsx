@@ -1,4 +1,4 @@
-import React, { FC } from "react";
+import React, { FC, useState } from "react";
 import {
   PanelSection,
   PanelSectionRow,
@@ -40,16 +40,27 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
   isCharging,
   powerPlugged,
 }) => {
+  const [saving, setSaving] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const updateSetting = async <K extends keyof PluginSettings>(
     key: K,
     val: PluginSettings[K]
   ) => {
+    if (saving) return;
     const updated = { ...settings, [key]: val };
+    if (key === "enabled" && val === true) updated.enable_plugin_when_plugged_in = false;
+    if (key === "enable_plugin_when_plugged_in" && val === true) updated.enabled = false;
+    setSaving(true);
     setSettings(updated);
     try {
-      await call("save_settings", updated);
+      const saved: PluginSettings = await call("save_settings", updated);
+      setSettings(saved);
     } catch (e) {
+      setSettings(settings);
       console.error("[NewSuspendMode] Error saving settings:", e);
+      toaster.toast({ title: "New Suspend Mode", body: "Could not save settings.", duration: 4000 });
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -79,7 +90,8 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
         <PanelSectionRow>
           <ToggleField
             label="Enable Plugin"
-            description="Intercepts suspend when downloading, turns off screen, and saves power."
+            description="Keeps the plugin enabled on battery and AC power. Turns off the AC-only option below. The configured real-sleep period still applies."
+            disabled={saving}
             checked={settings.enabled}
             onChange={(checked) => updateSetting("enabled", checked)}
           />
@@ -87,7 +99,8 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
         <PanelSectionRow>
           <ToggleField
             label="Enable Plugin When Plugged In"
-            description="Force-enables the plugin on AC power. With Enable Plugin off, unplugging during New Suspend Mode enters normal SteamOS sleep. With Enable Plugin on, the mode can continue on battery."
+            description="Enables the plugin only on AC power and turns off Enable Plugin above. Unplugging during New Suspend Mode enters normal SteamOS sleep. Connecting power while already asleep does not wake the device."
+            disabled={saving}
             checked={settings.enable_plugin_when_plugged_in === true}
             onChange={(checked) => updateSetting("enable_plugin_when_plugged_in", checked)}
           />
@@ -276,6 +289,34 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
       </PanelSection>
 
       {advanced && <AdvancedSettings settings={settings} updateSetting={updateSetting} />}
+
+      <PanelSection title="Reset Settings">
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            description="Restores all options to their defaults, including advanced settings, the sleep schedule and AC-only activation."
+            disabled={saving}
+            onClick={async () => {
+              if (saving) return;
+              setSaving(true);
+              setResetting(true);
+              try {
+                const defaults: PluginSettings = await call("reset_defaults");
+                setSettings(defaults);
+                toaster.toast({ title: "New Suspend Mode", body: "All settings restored to defaults.", duration: 4000 });
+              } catch (e) {
+                console.error("[NewSuspendMode] Error resetting defaults:", e);
+                toaster.toast({ title: "New Suspend Mode", body: "Could not reset settings; see the plugin log.", duration: 4000 });
+              } finally {
+                setSaving(false);
+                setResetting(false);
+              }
+            }}
+          >
+            {resetting ? "Resetting…" : "Reset Defaults"}
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
     </div>
   );
 };
