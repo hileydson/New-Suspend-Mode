@@ -3,6 +3,9 @@ import os
 import glob
 import subprocess
 import shutil
+import re
+import stat
+import time
 
 from .constants import logger
 
@@ -13,6 +16,34 @@ class DisplayAudioMixin:
     # ==========================================
     # Power Saving & Screen Control
     # ==========================================
+    def _gamescope_display_sockets(self, uid_dir: str):
+        """Return Wayland display sockets, not Gamescope's other IPC/files.
+
+        gamescope-* also matches environment files, statistics sockets and lock
+        files. Some accept a connection but do not speak Wayland, so probing them
+        burns the full command timeout four times before reaching the real display.
+        """
+        names = {os.path.basename(path) for path in glob.glob(os.path.join(uid_dir, "gamescope-*"))
+                 if re.fullmatch(r"gamescope-[0-9]+", os.path.basename(path))}
+        names.add("gamescope-0")
+        # Preserve explicitly named custom displays without guessing the protocol
+        # of every other socket. Absolute overrides belong to only their own user.
+        configured = os.environ.get("GAMESCOPE_WAYLAND_DISPLAY", "")
+        if configured:
+            if os.path.isabs(configured):
+                if os.path.dirname(configured) == uid_dir:
+                    names.add(os.path.basename(configured))
+            elif os.path.basename(configured) == configured:
+                names.add(configured)
+        displays = []
+        for name in sorted(names):
+            try:
+                if stat.S_ISSOCK(os.stat(os.path.join(uid_dir, name)).st_mode):
+                    displays.append(name)
+            except OSError:
+                continue
+        return displays
+
     def _set_audio_mute(self, mute: bool):
         val = "1" if mute else "0"
         amixer_arg = "mute" if mute else "unmute"
@@ -97,11 +128,7 @@ class DisplayAudioMixin:
                 # shell inherits it, which is what made every previous attempt a no-op.
                 if not uid.isdigit() or uid == "0":
                     continue
-                sockets = [
-                    os.path.basename(p)
-                    for p in glob.glob(os.path.join(uid_dir, "gamescope-*"))
-                    if not p.endswith(".lock")
-                ] or ["gamescope-0"]
+                sockets = self._gamescope_display_sockets(uid_dir)
                 for socket in sockets:
                     if not os.path.exists(os.path.join(uid_dir, socket)):
                         continue
@@ -120,6 +147,7 @@ class DisplayAudioMixin:
                         preferred = self.gamescope_command_routes.get(key, 0)
                         for route in (preferred, 1 - preferred):
                             cmd = commands[route]
+                            started = time.monotonic()
                             try:
                                 res = subprocess.run(
                                     cmd, env=env, check=False, capture_output=True,
@@ -128,7 +156,8 @@ class DisplayAudioMixin:
                                 detail = (res.stderr or res.stdout or "").strip()
                                 logger.info(
                                     f"gamescopectl {subcommand} {arg} "
-                                    f"[{uid_dir}:{socket}] rc={res.returncode}"
+                                    f"[{uid_dir}:{socket}] rc={res.returncode} "
+                                    f"elapsed={time.monotonic() - started:.3f}s"
                                     + (f" :: {detail[:200]}" if detail else "")
                                 )
                                 # gamescopectl may return 0 for a rejected property;
@@ -137,7 +166,10 @@ class DisplayAudioMixin:
                                     self.gamescope_command_routes[key] = route
                                     break
                             except Exception as e:
-                                logger.debug(f"gamescopectl {subcommand} failed: {e}")
+                                logger.warning(
+                                    f"gamescopectl {subcommand} {arg} [{uid_dir}:{socket}] "
+                                    f"route={route} elapsed={time.monotonic() - started:.3f}s failed: {e}"
+                                )
 
         # Path 2: force the DRM connector's status, which is the ONLY way to produce a
         # real "no signal" for an external TV.

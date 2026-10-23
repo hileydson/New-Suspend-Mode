@@ -53,6 +53,8 @@ The reset is also exposed as a button in the settings panel.
 
 Wake starts hardware restoration while notifying the interface, clears Steam's CPU quota before display commands, and reuses the Gamescope command route that succeeded on entry. A failed cached route still tries the other route. Bluetooth queries run outside the event loop so a busy adapter cannot block Power or USB-controller wake requests.
 
+Display discovery accepts actual Wayland sockets named `gamescope-<number>` and an explicitly configured `GAMESCOPE_WAYLAND_DISPLAY`. It excludes environment/statistics/lock files and auxiliary IPC sockets that do not speak Wayland. Probing an auxiliary socket used to add four two-second timeouts before reaching the real display. Each attempted display command now logs its duration and failures at the normal log level.
+
 Games resume after performance, display, input and the existing verification passes. Audio, LEDs and the detailed input diagnostic scan finish afterwards; they no longer hold input or a ready game paused. Controller services thaw independently in parallel, keeping the existing input-drain delay, and direct process resume is attempted even if a service command fails.
 
 Logs marked `[NSM WAKE TIMING]` show request queue time (Power/USB), each restoration stage and the time to the interactive restore. Use these with hardware tests to distinguish wake detection, display, controls and restoration delays; local tests do not establish a wake time for a particular handheld or PC.

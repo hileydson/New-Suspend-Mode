@@ -3,10 +3,89 @@ import asyncio
 import subprocess
 import signal
 import threading
+import os
+import socket
+import tempfile
+from pathlib import Path
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from main import Plugin
+
+
+class DisplayDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="nsm-display-")
+        self.addCleanup(self.temp.cleanup)
+        self.runtime = Path(self.temp.name) / "1000"
+        self.runtime.mkdir()
+        self.plugin = Plugin()
+        self.override = patch.dict(os.environ, {"GAMESCOPE_WAYLAND_DISPLAY": ""})
+        self.override.start()
+        self.addCleanup(self.override.stop)
+
+    def unix_socket(self, name):
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(str(self.runtime / name))
+        listener.listen(1)
+        return listener
+
+    def test_only_wayland_numbered_sockets_are_discovered(self):
+        self.unix_socket("gamescope-0")
+        self.unix_socket("gamescope-2")
+        # Both regular files and *real sockets* can be auxiliary Gamescope data.
+        self.unix_socket("gamescope-control")
+        self.unix_socket("gamescope-stats")
+        for name in ("gamescope-environment", "gamescope-0.lock", "gamescope-stats.lck", "gamescope-3"):
+            (self.runtime / name).write_text("not a Wayland socket")
+        (self.runtime / "gamescope-cache").mkdir()
+        self.assertEqual(self.plugin._gamescope_display_sockets(str(self.runtime)), ["gamescope-0", "gamescope-2"])
+
+    def test_no_socket_means_no_display(self):
+        (self.runtime / "gamescope-0").write_text("regular file with a numeric name")
+        self.assertEqual(self.plugin._gamescope_display_sockets(str(self.runtime)), [])
+
+    def test_explicit_custom_socket_is_preserved(self):
+        self.unix_socket("custom-display")
+        with patch.dict(os.environ, {"GAMESCOPE_WAYLAND_DISPLAY": "custom-display"}):
+            self.assertEqual(self.plugin._gamescope_display_sockets(str(self.runtime)), ["custom-display"])
+
+    def test_absolute_override_is_scoped_to_its_runtime_directory(self):
+        self.unix_socket("custom-display")
+        other = Path(self.temp.name) / "1001"
+        other.mkdir()
+        with patch.dict(os.environ, {"GAMESCOPE_WAYLAND_DISPLAY": str(self.runtime / "custom-display")}):
+            self.assertEqual(self.plugin._gamescope_display_sockets(str(self.runtime)), ["custom-display"])
+            self.assertEqual(self.plugin._gamescope_display_sockets(str(other)), [])
+
+    def test_sleep_and_wake_never_probe_auxiliary_sockets(self):
+        self.unix_socket("gamescope-0")
+        self.unix_socket("gamescope-control")
+        self.unix_socket("gamescope-stats")
+        for name in ("gamescope-environment", "gamescope-stats.lck", "gamescope-0.lock"):
+            (self.runtime / name).write_text("auxiliary")
+        import glob
+        real_glob = glob.glob
+        def paths(pattern):
+            return [str(self.runtime)] if pattern == "/run/user/*" else real_glob(pattern)
+        attempts = []
+        def command(cmd, **kwargs):
+            display = kwargs["env"]["GAMESCOPE_WAYLAND_DISPLAY"]
+            attempts.append((display, cmd[-1]))
+            if display != "gamescope-0":
+                # The old broad glob attempted four calls per auxiliary socket,
+                # each waiting two seconds for a Wayland response that never came.
+                raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        self.plugin._get_session_user = Mock(return_value="deck")
+        with patch("new_suspend_mode.display_audio.glob.glob", side_effect=paths), \
+                patch("new_suspend_mode.display_audio.shutil.which", return_value="/usr/bin/gamescopectl"), \
+                patch("new_suspend_mode.display_audio.subprocess.run", side_effect=command):
+            self.plugin._set_gamescope_display(sleep=True)
+            self.plugin._set_gamescope_display(sleep=False)
+        self.assertEqual(attempts, [("gamescope-0", "1"), ("gamescope-0", "1"),
+                                    ("gamescope-0", "0"), ("gamescope-0", "0")])
 
 
 class DisplayRouteTests(unittest.TestCase):
@@ -15,6 +94,7 @@ class DisplayRouteTests(unittest.TestCase):
         self.plugin._get_session_user = Mock(return_value="deck")
         self.plugin._save_runtime_state = Mock(return_value=True)
         self.plugin._write_sysfs = Mock(return_value=True)
+        self.plugin._gamescope_display_sockets = Mock(return_value=["gamescope-0"])
         self.glob = patch("new_suspend_mode.display_audio.glob.glob", side_effect=lambda pattern:
                           ["/run/user/1000"] if pattern == "/run/user/*" else ["/run/user/1000/gamescope-0"])
         self.exists = patch("new_suspend_mode.display_audio.os.path.exists", return_value=True)
@@ -88,6 +168,14 @@ class DisplayRouteTests(unittest.TestCase):
         with patch("new_suspend_mode.display_audio.subprocess.run", side_effect=result) as run:
             self.plugin._set_audio_mute(False)
         self.assertEqual([call.args[0][0] for call in run.call_args_list], ["amixer", "wpctl", "pactl"])
+
+    def test_timeout_names_the_endpoint_in_normal_logs(self):
+        with patch("new_suspend_mode.display_audio.subprocess.run", side_effect=subprocess.TimeoutExpired("test", 2)), \
+                self.assertLogs("NewSuspendMode", level="WARNING") as messages:
+            self.plugin._set_gamescope_display(sleep=False)
+        self.assertEqual(len(messages.output), 4)
+        self.assertTrue(all("gamescope-0" in line and "elapsed=" in line and "route=" in line
+                            for line in messages.output))
 
 
 class WakeConcurrencyTests(unittest.IsolatedAsyncioTestCase):
