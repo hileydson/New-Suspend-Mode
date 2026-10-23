@@ -1,9 +1,20 @@
 import { call, toaster } from "@decky/api";
 import { Navigation } from "@decky/ui";
-import { WAKE_COOLDOWN_MS, getState, refreshSubscribers, runtime, setState } from "./state";
+import {
+  WAKE_COOLDOWN_MS,
+  WAKE_FADE_MS,
+  WAKE_PRESENTATION_MS,
+  getState,
+  refreshSubscribers,
+  runtime,
+  setState,
+} from "./state";
+import { WakePhase } from "./types";
 
 let hudTimer: ReturnType<typeof setInterval> | null = null;
 let splashTimer: ReturnType<typeof setTimeout> | null = null;
+let wakePresentationTimer: ReturnType<typeof setTimeout> | null = null;
+let wakeFadeTimer: ReturnType<typeof setTimeout> | null = null;
 
 const stopHudTimer = () => {
   if (hudTimer) {
@@ -19,10 +30,22 @@ const stopSplashTimer = () => {
   }
 };
 
+export const stopWakeTimers = () => {
+  if (wakePresentationTimer) {
+    clearTimeout(wakePresentationTimer);
+    wakePresentationTimer = null;
+  }
+  if (wakeFadeTimer) {
+    clearTimeout(wakeFadeTimer);
+    wakeFadeTimer = null;
+  }
+};
+
 /** Stops every countdown this module started. Called when the plugin unloads. */
 export const stopFlowTimers = () => {
   stopHudTimer();
   stopSplashTimer();
+  stopWakeTimers();
 };
 
 /** Drops the download card's countdown, leaving everything else as it is. */
@@ -57,6 +80,54 @@ export const closeSteamSideMenus = () => {
 };
 
 /**
+ * Starts the 3-second wake splash presentation while the backend restores hardware
+ * and runs the post-wake hard reset with controls still locked out.
+ */
+export const startWakePresentation = (reason: string) => {
+  console.log(`[NewSuspendMode] Starting wake presentation (${reason}).`);
+  runtime.wakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
+  stopSplashTimer();
+  stopHudTimer();
+  stopWakeTimers();
+  setState({
+    isBackgroundMode: false,
+    showHud: false,
+    standbyMode: false,
+    showSplash: false,
+    wakePhase: "restoring",
+  });
+  closeSteamSideMenus();
+
+  // Safety fallback so a dropped backend event can never leave the splash up.
+  wakePresentationTimer = setTimeout(() => {
+    wakePresentationTimer = null;
+    startWakeFadeOut(`${reason}_fallback`);
+  }, WAKE_PRESENTATION_MS + 3500);
+};
+
+/**
+ * Fades out the wake presentation just before native controls are handed back.
+ */
+export const startWakeFadeOut = (reason: string) => {
+  runtime.wakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
+  stopSplashTimer();
+  stopHudTimer();
+  stopWakeTimers();
+  setState({
+    isBackgroundMode: false,
+    showHud: false,
+    standbyMode: false,
+    showSplash: false,
+    wakePhase: "fading",
+  });
+
+  wakeFadeTimer = setTimeout(() => {
+    wakeFadeTimer = null;
+    finishWakeUi(reason);
+  }, WAKE_FADE_MS + 250);
+};
+
+/**
  * Everything the interface has to undo on wake, shared by both ways a wake arrives:
  * this side asking for it, and the backend announcing it already happened.
  */
@@ -65,7 +136,14 @@ export const finishWakeUi = (reason: string) => {
   runtime.wakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
   stopSplashTimer();
   stopHudTimer();
-  setState({ isBackgroundMode: false, showHud: false, standbyMode: false, showSplash: false });
+  stopWakeTimers();
+  setState({
+    isBackgroundMode: false,
+    showHud: false,
+    standbyMode: false,
+    showSplash: false,
+    wakePhase: "",
+  });
 
   // Waking up is not left to a single render: the overlay is asked to check its state
   // again a moment later, so a late mount can never keep the black screen up.
@@ -74,17 +152,31 @@ export const finishWakeUi = (reason: string) => {
 };
 
 /**
+ * Routes backend wake announcements through restoring -> fading -> ready.
+ */
+export const handleBackendWakeEvent = (reason: string, wakePhase?: WakePhase) => {
+  if (wakePhase === "restoring") {
+    startWakePresentation(reason);
+  } else if (wakePhase === "fading") {
+    startWakeFadeOut(reason);
+  } else {
+    finishWakeUi(reason);
+  }
+};
+
+/**
  * Enters standby, replacing the HUD with nothing: the splash has already been shown.
  */
 export const triggerEnterStandby = async (reason: string) => {
-  if (Date.now() < runtime.wakeCooldownUntil) {
+  if (getState().wakePhase || Date.now() < runtime.wakeCooldownUntil) {
     console.log("[NewSuspendMode] Wake cooldown active, not entering standby.");
     return;
   }
   stopHudTimer();
   stopSplashTimer();
+  stopWakeTimers();
   runtime.backgroundModeEnteredTime = Date.now();
-  setState({ showSplash: false, showHud: false, isBackgroundMode: true, standbyMode: true });
+  setState({ showSplash: false, showHud: false, isBackgroundMode: true, standbyMode: true, wakePhase: "" });
 
   try {
     const success: any = await call("enter_background_mode", reason);
@@ -103,7 +195,7 @@ export const triggerEnterStandby = async (reason: string) => {
  * drawn after that is invisible.
  */
 export const startStandbySplash = (seconds: number, reason: string = "standby_splash") => {
-  if (getState().isBackgroundMode || Date.now() < runtime.wakeCooldownUntil) {
+  if (getState().isBackgroundMode || getState().wakePhase || Date.now() < runtime.wakeCooldownUntil) {
     return;
   }
   if (seconds <= 0) {
@@ -112,7 +204,8 @@ export const startStandbySplash = (seconds: number, reason: string = "standby_sp
   }
   stopHudTimer();
   stopSplashTimer();
-  setState({ showHud: false, showSplash: true });
+  stopWakeTimers();
+  setState({ showHud: false, showSplash: true, wakePhase: "" });
 
   splashTimer = setTimeout(() => {
     splashTimer = null;
@@ -125,12 +218,21 @@ export const startStandbySplash = (seconds: number, reason: string = "standby_sp
  * immediate re-sleep, then has the backend restore the hardware.
  */
 export const triggerFullWake = async (reason: string = "wake") => {
-  finishWakeUi(reason);
+  const wasInBackground = getState().isBackgroundMode;
+  if (wasInBackground) {
+    startWakePresentation(reason);
+  } else {
+    finishWakeUi(reason);
+  }
 
   try {
-    await call("exit_background_mode", reason);
+    const exited: any = await call("exit_background_mode", reason);
+    if (exited === false && wasInBackground) {
+      finishWakeUi(reason);
+    }
   } catch (e) {
     console.error("[NewSuspendMode] Error calling exit_background_mode:", e);
+    finishWakeUi(reason);
   }
 
   toaster.toast({
@@ -142,13 +244,14 @@ export const triggerFullWake = async (reason: string = "wake") => {
 
 /** Enters the black screen with the download carrying on in the background. */
 export const triggerEnterBlackout = async (reason: string = "countdown_completed") => {
-  if (Date.now() < runtime.wakeCooldownUntil) {
+  if (getState().wakePhase || Date.now() < runtime.wakeCooldownUntil) {
     console.log("[NewSuspendMode] Wake cooldown active, blocking enter blackout.");
     return;
   }
   stopHudTimer();
+  stopWakeTimers();
   runtime.backgroundModeEnteredTime = Date.now();
-  setState({ showHud: false, isBackgroundMode: true });
+  setState({ showHud: false, isBackgroundMode: true, wakePhase: "" });
 
   try {
     const success: any = await call("enter_background_mode", reason);
@@ -163,7 +266,7 @@ export const triggerEnterBlackout = async (reason: string = "countdown_completed
 
 /** Shows the download card with a countdown, then turns the screen black. */
 export const startHudCountdown = (customTimeout?: number) => {
-  if (getState().isBackgroundMode || Date.now() < runtime.wakeCooldownUntil) {
+  if (getState().isBackgroundMode || getState().wakePhase || Date.now() < runtime.wakeCooldownUntil) {
     return;
   }
 

@@ -114,10 +114,9 @@ class HardResetMixin:
 
         return signs
 
-    async def _auto_hard_reset_after_wake(self, delay_seconds: float):
+    async def _auto_hard_reset_after_wake(self, delay_seconds: float, during_wake: bool = False):
         """
-        Scheduled 8 s after each wake. The user asked for exactly this: "ao voltar da
-        suspensao, esperar uns 8 segundos e entao chamar o restore hardware".
+        Runs at 3 s into the wake presentation, once the regular restore is done.
 
         Runs unconditionally (does not check for signs first), because the manual button
         is what the user says works for them on the ROG Ally X - any detection logic that
@@ -132,12 +131,14 @@ class HardResetMixin:
         except asyncio.CancelledError:
             return
 
-        if self.is_background_mode or self.transition_in_progress:
+        if self.is_background_mode or self.stop_threads or self.suspend_in_progress:
+            return
+        if self.transition_in_progress and not (during_wake and self.wake_presentation_active):
             return
         if not self.settings.get("auto_hard_reset_after_wake", True):
             return
 
-        logger.warning("[NSM AUTO-RESET] 8 s post-wake: running the hard reset.")
+        logger.warning("[NSM AUTO-RESET] 3 s post-wake (or once restore finishes): running the hard reset.")
         try:
             done = await self.loop.run_in_executor(None, self._run_transition_locked_safe,
                                                    self._hard_reset_power_limits)
@@ -288,6 +289,8 @@ class HardResetMixin:
         was_bg = self.is_background_mode
         self.is_background_mode = False
         self.standby_mode = False
+        self.wake_presentation_active = False
+        self.wake_phase = ""
         self.wake_cooldown_until = time.time() + WAKE_COOLDOWN_SECONDS
         self.transition_in_progress = True
         try:

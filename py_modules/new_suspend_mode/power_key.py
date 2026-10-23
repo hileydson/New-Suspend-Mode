@@ -268,7 +268,7 @@ class PowerKeyMixin:
 
         now = time.time()
         # Cooldown check: ignore power button press if system just woke up within 12 seconds
-        if now < self.wake_cooldown_until:
+        if now < self.wake_cooldown_until or self.transition_in_progress or self.wake_presentation_active:
             logger.info("Ignoring power key because system just woke up.")
             return
 

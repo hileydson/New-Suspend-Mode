@@ -76,6 +76,7 @@ const preflight = (via: string): "original" | "handled" | undefined => {
   if (
     s.showSplash ||
     s.showHud ||
+    Boolean(s.wakePhase) ||
     now < runtime.wakeCooldownUntil ||
     now < decidingUntil ||
     now - lastTakeover < 2000

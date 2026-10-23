@@ -1,11 +1,12 @@
 import React, { FC } from "react";
 import { FaDownload, FaMoon, FaBatteryThreeQuarters, FaTimes, FaBolt } from "react-icons/fa";
-import { DownloadInfo, PluginSettings } from "../types";
+import { DownloadInfo, PluginSettings, WakePhase } from "../types";
 
 export interface OverlayProps {
   isBackgroundMode: boolean;
   showHud: boolean;
   showSplash?: boolean;
+  wakePhase?: WakePhase;
   countdown: number;
   downloadInfo: DownloadInfo;
   settings: PluginSettings;
@@ -19,6 +20,7 @@ export const Overlay: FC<OverlayProps> = ({
   isBackgroundMode,
   showHud,
   showSplash,
+  wakePhase,
   countdown,
   downloadInfo,
   settings,
@@ -28,7 +30,7 @@ export const Overlay: FC<OverlayProps> = ({
   onEnterBlackout,
 }) => {
   // If nothing is active, do not render anything
-  if (!showHud && !isBackgroundMode && !showSplash) {
+  if (!showHud && !isBackgroundMode && !showSplash && !wakePhase) {
     return null;
   }
 
@@ -43,11 +45,13 @@ export const Overlay: FC<OverlayProps> = ({
     );
   }
 
-  // Standby splash: shown while the panel is still lit, just before the screen goes
-  // dark. Takes the place of the download card when there is no download to report.
-  if (showSplash) {
+  // Standby splash (before entering) or wake presentation (for 3s on return, then fade out).
+  if (showSplash || wakePhase) {
+    const splashClass = wakePhase
+      ? `nsm-overlay-splash nsm-overlay-wake${wakePhase === "fading" ? " nsm-overlay-splash-out" : ""}`
+      : "nsm-overlay-splash";
     return (
-      <div className="nsm-overlay-container nsm-overlay-splash" tabIndex={-1} aria-hidden="true">
+      <div className={`nsm-overlay-container ${splashClass}`} tabIndex={-1} aria-hidden="true">
         <div className="nsm-splash">
           <FaDownload className="nsm-splash-icon" />
           <div className="nsm-splash-title">New Suspend Mode</div>

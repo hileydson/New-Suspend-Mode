@@ -44,7 +44,7 @@ class SuspendPolicyMixin:
             return "allow"
 
         # Cooldown: Ignore any suspend request if system just woke up within 12 seconds
-        if now < self.wake_cooldown_until:
+        if now < self.wake_cooldown_until or self.transition_in_progress or self.wake_presentation_active:
             logger.info("Ignoring suspend attempt because system just woke up from background mode.")
             return "ignored"
 
@@ -247,6 +247,7 @@ class SuspendPolicyMixin:
         which is why nothing appeared to show up at all.
         """
         if (not self._effective_enabled(max_age=0.0) or self.is_background_mode
+                or self.transition_in_progress or self.wake_presentation_active
                 or self.standby_request_pending or self.suspend_in_progress):
             return False
         if time.time() < self.wake_cooldown_until:

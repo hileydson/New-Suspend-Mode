@@ -32,6 +32,29 @@ export const PLUGIN_STYLES = `
   animation: dibFadeIn 0.25s ease-out;
 }
 
+/* Wake presentation: keeps the black backdrop opaque while the splash mark fades in,
+   then fades the whole overlay out once hardware and controls are ready. */
+.nsm-overlay-wake {
+  background-color: #000000;
+  cursor: none;
+  pointer-events: all;
+  touch-action: none;
+  animation: none;
+}
+
+.nsm-overlay-splash-out {
+  animation: dibFadeOut 0.3s ease-out forwards;
+}
+
+@keyframes dibFadeOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
 .nsm-splash {
   display: flex;
   flex-direction: column;

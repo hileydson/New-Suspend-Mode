@@ -115,7 +115,7 @@ class Plugin(
         self.watchdog_ryzenadj: Dict[str, int] = {}
         self.last_watchdog_check: float = 0.0
         # The "once per wake, then periodic check" state the user asked for. The post-wake
-        # auto-reset runs 8 s after each exit from the mode. Any later re-run from the
+        # auto-reset runs under the wake presentation, at 3 s. Any later re-run from the
         # periodic check is suppressed for 2 minutes afterwards, so the hard reset is not
         # repeated for the same cycle. See _throttle_watchdog.
         self.last_wake_time: float = 0.0
@@ -155,6 +155,9 @@ class Plugin(
         self.transition_lock = threading.Lock()
         self.input_lock = threading.Lock()
         self.transition_in_progress: bool = False
+        self.wake_presentation_active: bool = False
+        self.wake_phase: str = ""
+        self.wake_id: int = 0
         self.suspend_in_progress: bool = False
         self.sleep_targets_masked: bool = False
         self.standby_request_pending: bool = False
@@ -278,6 +281,8 @@ class Plugin(
             self.monitor_task.cancel()
 
         self.games_waiting_for_resume = False
+        self.wake_presentation_active = False
+        self.wake_phase = ""
         if self.is_background_mode or self.transition_in_progress or self.paused_game_processes:
             self.is_background_mode = False
             await self.loop.run_in_executor(None, self._run_transition_locked, self._restore_system_power_and_display)
@@ -483,6 +488,8 @@ class Plugin(
         return {
             "is_background_mode": self.is_background_mode,
             "standby_mode": self.standby_mode,
+            "wake_phase": self.wake_phase,
+            "wake_id": self.wake_id,
             "battery_capacity": bat["capacity"],
             "is_charging": bat["is_charging"],
             "power_plugged": bat["is_plugged"],

@@ -1,12 +1,14 @@
 import { addEventListener, call, removeEventListener, toaster } from "@decky/api";
-import { SystemStatus } from "./types";
+import { SystemStatus, WakePhase } from "./types";
 import { WAKE_COOLDOWN_MS, getState, isPluginEnabled, runtime, setState } from "./state";
 import {
   cancelHudCountdown,
   clearStandbySplash,
   finishWakeUi,
+  handleBackendWakeEvent,
   startHudCountdown,
   startStandbySplash,
+  stopWakeTimers,
   triggerFullWake,
 } from "./flows";
 import { freshSteamDownloadInfo, querySteamDownloads } from "./steam/downloads";
@@ -32,15 +34,21 @@ export const listenToBackend = (): (() => void) => {
     console.log("[NewSuspendMode] background_mode_changed event received:", data);
     const isBg = typeof data === "boolean" ? data : Boolean(data?.is_background_mode);
     if (!isBg) {
-      // System awakened from the backend: same cleanup as a wake asked for here.
-      finishWakeUi(String(data?.reason ?? "backend_wake"));
+      const wakePhase: WakePhase =
+        data?.wake_phase === "restoring" || data?.wake_phase === "fading"
+          ? data.wake_phase
+          : "";
+      // System awakened from the backend: run the wake presentation or finish cleanup.
+      handleBackendWakeEvent(String(data?.reason ?? "backend_wake"), wakePhase);
       return;
     }
     runtime.backgroundModeEnteredTime = Date.now();
     clearStandbySplash();
+    stopWakeTimers();
     setState({
       isBackgroundMode: true,
       showHud: false,
+      wakePhase: "",
       ...(Boolean(data?.standby) ? { standbyMode: true } : {}),
     });
   });
@@ -112,9 +120,19 @@ const syncBackendStatus = async () => {
     if (!status) return;
 
     const backendIsBg = Boolean(status.is_background_mode);
-    if (getState().isBackgroundMode && !backendIsBg) {
-      console.log("[NewSuspendMode] Backend woke up -> Synchronizing frontend!");
-      finishWakeUi("status_poll_sync");
+    const backendWakePhase: WakePhase =
+      status.wake_phase === "restoring" || status.wake_phase === "fading"
+        ? status.wake_phase
+        : "";
+    if (!backendIsBg) {
+      if (backendWakePhase) {
+        if (getState().isBackgroundMode || getState().wakePhase !== backendWakePhase) {
+          handleBackendWakeEvent("status_poll_sync", backendWakePhase);
+        }
+      } else if (getState().isBackgroundMode || getState().wakePhase === "restoring") {
+        console.log("[NewSuspendMode] Backend woke up -> Synchronizing frontend!");
+        finishWakeUi("status_poll_sync");
+      }
     }
 
     const current = getState();
@@ -122,6 +140,7 @@ const syncBackendStatus = async () => {
     setState({
       isBackgroundMode: backendIsBg,
       standbyMode: Boolean(status.standby_mode),
+      ...(backendIsBg ? { wakePhase: "" } : backendWakePhase ? { wakePhase: backendWakePhase } : {}),
       batteryCapacity: Number(status.battery_capacity ?? 100),
       isCharging: Boolean(status.is_charging),
       powerPlugged: Boolean(status.power_plugged),
@@ -149,6 +168,7 @@ export const startBackendSync = (): (() => void) => {
     const s = getState();
     const isActive =
       s.isBackgroundMode ||
+      Boolean(s.wakePhase) ||
       s.showHud ||
       Boolean(s.downloadInfo.is_downloading && !s.downloadInfo.is_paused);
     const delay = !isPluginEnabled() ? POLL_DISABLED_MS : isActive ? POLL_ACTIVE_MS : POLL_IDLE_MS;
@@ -185,7 +205,8 @@ export const startBackendSync = (): (() => void) => {
       console.log(`[NewSuspendMode] Kernel resume detected (delta=${delta}ms)! Enforcing wake state.`);
       runtime.wakeCooldownUntil = Date.now() + WAKE_COOLDOWN_MS;
       cancelHudCountdown();
-      setState({ showHud: false, isBackgroundMode: false });
+      stopWakeTimers();
+      setState({ showHud: false, isBackgroundMode: false, wakePhase: "" });
       call("exit_background_mode", "kernel_resume_clock_jump").catch(() => {});
     }
   }, 2000);

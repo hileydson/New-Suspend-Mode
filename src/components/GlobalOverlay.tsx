@@ -14,7 +14,7 @@ import { triggerEnterBlackout, triggerFullWake } from "../flows";
 export const GlobalOverlay: FC = () => {
   const s = useUiState();
 
-  if (!s.isBackgroundMode && !s.showHud && !s.showSplash) {
+  if (!s.isBackgroundMode && !s.showHud && !s.showSplash && !s.wakePhase) {
     return null;
   }
 
@@ -25,6 +25,7 @@ export const GlobalOverlay: FC = () => {
         isBackgroundMode={s.isBackgroundMode}
         showHud={s.showHud}
         showSplash={s.showSplash}
+        wakePhase={s.wakePhase}
         countdown={s.countdown}
         downloadInfo={s.downloadInfo}
         settings={s.settings}

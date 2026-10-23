@@ -167,7 +167,7 @@ class SleepInhibitorMixin:
             return False
         if self.settings.get("standby_on_power_off", False):
             return True
-        return self.is_background_mode or self._is_active_download()
+        return self.is_background_mode or self.wake_presentation_active or self._is_active_download()
 
     def _update_inhibitor_state(self):
         # The inhibitor is a child process; if it ever dies, forget it so it can be retaken.

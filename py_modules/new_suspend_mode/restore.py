@@ -59,11 +59,15 @@ class RestoreMixin:
             ("apu power limits", self._restore_apu_power_limits),
             ("cpu", self._restore_cpu_settings),
             ("gpu", self._restore_gpu_settings),
-            ("input", self._release_all_gamepad_inputs),
         )
 
         for label, stage in stages:
             run_stage(label, stage)
+
+        # A normal wake keeps native input blocked beneath the presentation. Real
+        # sleep, unload and emergency recovery still give it back immediately.
+        if not self.wake_presentation_active:
+            run_stage("input", self._release_all_gamepad_inputs)
 
         try:
             stubborn = run_stage("verify saved values", lambda: self._converge_restore(targets)) or []
@@ -71,7 +75,7 @@ class RestoreMixin:
         finally:
             # Keep games paused across a handoff into real sleep. On a normal wake,
             # clocks, display and input have already been restored before this point.
-            if not self.games_waiting_for_resume:
+            if not self.games_waiting_for_resume and not self.wake_presentation_active:
                 run_stage("resume games", self._resume_running_games)
 
         logger.info(f"[NSM WAKE TIMING] interactive restore={time.monotonic() - started:.3f}s")
@@ -80,7 +84,7 @@ class RestoreMixin:
         # leave an otherwise ready game paused.
         run_stage("audio", self._restore_audio)
         run_stage("leds", self._restore_leds)
-        if self.input_diagnostics_pending:
+        if self.input_diagnostics_pending and not self.wake_presentation_active:
             self.input_diagnostics_pending = False
             run_stage("input diagnostics", lambda: self._log_input_diagnostics("after restore"))
 

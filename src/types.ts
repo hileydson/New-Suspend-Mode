@@ -40,9 +40,13 @@ export interface DownloadInfo {
   estimated_seconds_remaining?: number;
 }
 
+export type WakePhase = "" | "restoring" | "fading";
+
 export interface SystemStatus {
   is_background_mode: boolean;
   standby_mode?: boolean;
+  wake_phase?: WakePhase;
+  wake_id?: number;
   battery_capacity: number;
   is_charging: boolean;
   power_plugged: boolean;

@@ -219,7 +219,7 @@ export const AdvancedSettings: FC<AdvancedSettingsProps> = ({ settings, updateSe
         <PanelSectionRow>
           <ToggleField
             label="Auto Restore Hardware After Wake"
-            description="Ten seconds after waking, if anything still looks capped at the plugin's own values (frequency, turbo, ryzenadj, platform profile), runs the same hard reset the button above does. Turn off if another tool manages your TDP and you prefer the button."
+            description="Three seconds after waking, while the wake presentation is still on screen, runs the same hard reset the button above does so clocks, turbo, ryzenadj and platform profile come back ready. Turn off if another tool manages your TDP and you prefer the button."
             checked={settings.auto_hard_reset_after_wake !== false}
             onChange={(checked) => updateSetting("auto_hard_reset_after_wake", checked)}
           />

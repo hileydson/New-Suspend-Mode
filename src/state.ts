@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { call } from "@decky/api";
-import { DownloadInfo, PluginSettings } from "./types";
+import { DownloadInfo, PluginSettings, WakePhase } from "./types";
 
 export const DEFAULT_SETTINGS: PluginSettings = {
   enabled: false,
@@ -45,6 +45,8 @@ export const DEFAULT_DOWNLOAD_INFO: DownloadInfo = {
 // Must match WAKE_COOLDOWN_SECONDS in main.py: the window after a wake in which
 // suspend requests are ignored, so the press that woke the console cannot re-sleep it.
 export const WAKE_COOLDOWN_MS = 5000;
+export const WAKE_PRESENTATION_MS = 3000;
+export const WAKE_FADE_MS = 300;
 
 /** Everything the overlay and the Quick Access panel are drawn from. */
 export interface UiState {
@@ -55,6 +57,7 @@ export interface UiState {
   powerPlugged: boolean;
   isBackgroundMode: boolean;
   standbyMode: boolean;
+  wakePhase: WakePhase;
   showHud: boolean;
   showSplash: boolean;
   countdown: number;
@@ -68,6 +71,7 @@ let state: UiState = {
   powerPlugged: false,
   isBackgroundMode: false,
   standbyMode: false,
+  wakePhase: "",
   showHud: false,
   showSplash: false,
   countdown: 5,

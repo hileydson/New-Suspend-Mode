@@ -241,6 +241,56 @@ class WakeConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await p._check_bluetooth_wake(30))
         p.exit_background_mode.assert_not_awaited()
 
+    async def test_wake_presentation_blocks_controls_runs_hard_reset_then_fades_out(self):
+        p = self.plugin
+        p.is_background_mode = True
+        events = []
+        for name in (
+            "_restore_cpu_quota",
+            "_restore_backlight",
+            "_restore_download_pacing",
+            "_heal_steam_scheduling",
+            "_restore_platform_profile",
+            "_restore_apu_power_limits",
+            "_restore_cpu_settings",
+            "_restore_gpu_settings",
+            "_restore_audio",
+            "_restore_leds",
+        ):
+            setattr(p, name, Mock())
+        p._restore_targets_snapshot = Mock(return_value={})
+        p._converge_restore = Mock(return_value=[])
+        p._verify_and_force_restore = Mock(return_value=[])
+        p._arm_watchdog_from_targets = Mock()
+        p._update_inhibitor_state = Mock()
+        p._hard_reset_power_limits = Mock(side_effect=lambda: events.append("hard_reset") or ["ok"])
+        p._release_all_gamepad_inputs = Mock(side_effect=lambda: events.append("release_input"))
+        p._resume_running_games = Mock(side_effect=lambda: events.append("resume_games"))
+
+        async def record_emit(event, payload):
+            if event == "background_mode_changed":
+                events.append(f"phase:{payload.get('wake_phase', '')}")
+
+        with patch("new_suspend_mode.transitions.decky.emit", side_effect=record_emit), \
+                patch("asyncio.sleep", new_callable=AsyncMock) as sleep_mock:
+            self.assertTrue(await p.exit_background_mode("power_button_wake"))
+
+        self.assertEqual(
+            events,
+            [
+                "phase:restoring",
+                "hard_reset",
+                "phase:fading",
+                "release_input",
+                "resume_games",
+                "phase:",
+            ],
+        )
+        self.assertGreaterEqual(sleep_mock.await_count, 2)
+        self.assertFalse(p.wake_presentation_active)
+        self.assertEqual(p.wake_phase, "")
+        self.assertFalse(p.transition_in_progress)
+
 
 class InputReleaseTests(unittest.TestCase):
     def test_independent_services_thaw_in_parallel_before_signals(self):
